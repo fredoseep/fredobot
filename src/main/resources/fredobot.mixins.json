@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "package": "com.fredoseep.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [
+    "ExampleMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
+  },
+  "client": [
+    "MixinWorldRenderer"
+  ]
+}
