@@ -4,7 +4,9 @@ import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.*;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.Material;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.options.KeyBinding;
@@ -108,6 +110,14 @@ public class MovementController implements IBotModule {
             }
             targetNode.pos = nodeList.get(currentIndex).pos;
         }
+        if (targetNode.state == SimplePathfinder.MovementState.MINING) {
+            boolean extraAir = targetNode.extraPos == null || MinecraftClient.getInstance().world.getBlockState(targetNode.extraPos).isAir();
+            boolean posAir = MinecraftClient.getInstance().world.getBlockState(targetNode.pos).isAir();
+
+            if (extraAir && posAir) {
+                targetNode.state = SimplePathfinder.MovementState.WALKING;
+            }
+        }
 
         double targetX = targetNode.pos.getX() + 0.5D;
         double targetZ = targetNode.pos.getZ() + 0.5D;
@@ -151,7 +161,6 @@ public class MovementController implements IBotModule {
         pressAttack = false;
         pressSprint = false;
 
-        // 【终极兜底】：弃船逃生防卡系统 (壮士断腕)
         if (PlayerHelper.isDrivingBoat(player) && player.getVehicle().horizontalCollision) {
             boatHorizontalCollisionTicks++;
             if (boatHorizontalCollisionTicks > 20) {
@@ -165,7 +174,6 @@ public class MovementController implements IBotModule {
             boatHorizontalCollisionTicks = 0;
         }
 
-        // 全局坠崖保险
         if (pathExecutor != null && pathExecutor.getCurrentPath() != null) {
             int currentIndex = pathExecutor.getCurrentPathIndex();
             List<SimplePathfinder.Node> path = pathExecutor.getCurrentPath();
@@ -180,6 +188,9 @@ public class MovementController implements IBotModule {
             case WALKING:
                 pressSprint = true;
             case FALLING:
+                if(MinecraftClient.getInstance().world.getBlockState(targetNode.pos).getBlock()== Blocks.SWEET_BERRY_BUSH){
+                    client.interactionManager.updateBlockBreakingProgress(targetNode.pos,Direction.UP);
+                }
                 pressForward = true;
                 if (pathExecutor != null && pathExecutor.getCurrentPath() != null) {
                     int nextIndex = pathExecutor.getCurrentPathIndex() + 1;
@@ -204,6 +215,9 @@ public class MovementController implements IBotModule {
                 break;
 
             case JUMPING_UP:
+                if(MinecraftClient.getInstance().world.getBlockState(targetNode.pos).getBlock()== Blocks.SWEET_BERRY_BUSH){
+                    client.interactionManager.updateBlockBreakingProgress(targetNode.pos,Direction.UP);
+                }
                 pressForward = true;
                 pressSprint = true;
                 pressJump = true;
@@ -212,10 +226,10 @@ public class MovementController implements IBotModule {
             case JUMPING_AIR:
                 pressForward = true;
                 pressSprint = true;
-                double jumpDx = Math.abs(player.getX() - (targetNode.pos.getX() + 0.5));
-                double jumpDz = Math.abs(player.getZ() - (targetNode.pos.getZ() + 0.5));
-                double maxDistToCenter = Math.max(jumpDx, jumpDz);
-                if (maxDistToCenter < 1.15) {
+
+                RelevantDirectionHelper.RelevantDirection jumpDir = RelevantDirectionHelper.getRelevantDirection(player, targetNode.pos);
+
+                if (isApproachingEdge(MinecraftClient.getInstance().world, player, jumpDir, 0.5)) {
                     pressJump = true;
                 }
                 break;
@@ -224,7 +238,6 @@ public class MovementController implements IBotModule {
                 pressForward = false;
                 pressSneak = true;
 
-                // 【核心修复】：基于碰撞箱和材质的智能清除花草阻碍
                 BlockPos footPos = targetNode.pos.down();
                 BlockState footState = MinecraftClient.getInstance().world.getBlockState(footPos);
                 if (!footState.getMaterial().isReplaceable() && footState.getCollisionShape(MinecraftClient.getInstance().world, footPos).isEmpty()) {
@@ -269,7 +282,7 @@ public class MovementController implements IBotModule {
 
                 if (selectBuildingBlock(player)) {
                     if (targetNode.parent != null && targetNode.parent.parent != null &&
-                            (lastTurningBlockPos == null || !targetNode.pos.equals(lastTurningBlockPos)) &&
+                            (!targetNode.pos.equals(lastTurningBlockPos)) &&
                             RelevantDirectionHelper.getDirectionBetween(targetNode.parent.parent.pos, targetNode.parent.pos) != RelevantDirectionHelper.getDirectionBetween(targetNode.parent.pos, targetNode.pos)) {
 
                         isAdjustingPosture = true;
@@ -291,16 +304,19 @@ public class MovementController implements IBotModule {
                 break;
 
             case MINING:
-                float[] angles = MiningHelper.getValidMiningAngle(player, targetNode.pos);
+                BlockPos targetToMine = targetNode.pos;
+                if (targetNode.extraPos != null && !MinecraftClient.getInstance().world.getBlockState(targetNode.extraPos).isAir()) {
+                    targetToMine = targetNode.extraPos;
+                }
+
+                float[] angles = MiningHelper.getValidMiningAngle(player, targetToMine);
                 targetYaw = angles[0];
                 targetPitch = angles[1];
-                if (targetNode.extraPos != null && !MinecraftClient.getInstance().world.getBlockState(targetNode.extraPos).isAir()) {
-                    ToolsHelper.equipBestTool(player, targetNode.extraPos, false);
-                    pressAttack = true;
-                } else {
-                    ToolsHelper.equipBestTool(player, targetNode.pos, false);
-                    if (!MinecraftClient.getInstance().world.getBlockState(targetNode.pos).isAir()) pressAttack = true;
-                }
+
+                ToolsHelper.equipBestTool(player, targetToMine, false);
+
+                client.interactionManager.updateBlockBreakingProgress(targetToMine, Direction.UP);
+                pressForward = true;
                 break;
 
             case SWIMMING:
@@ -319,7 +335,6 @@ public class MovementController implements IBotModule {
                                 break;
                             }
 
-                            // 【核心修复】：冰山防撞视线检测 (RayTrace)
                             Vec3d startVec = new Vec3d(boat.getX(), boat.getY() + 0.5D, boat.getZ());
                             Vec3d endVec = new Vec3d(checkNode.pos.getX() + 0.5D, boat.getY() + 0.5D, checkNode.pos.getZ() + 0.5D);
                             RayTraceContext context = new RayTraceContext(startVec, endVec, RayTraceContext.ShapeType.COLLIDER, RayTraceContext.FluidHandling.NONE, boat);
@@ -362,6 +377,9 @@ public class MovementController implements IBotModule {
                     targetPitch = 0.0F;
 
                 } else if (player.isSwimming()) {
+                    if(MinecraftClient.getInstance().world.getBlockState(targetNode.pos.up()).getBlock()== Blocks.LILY_PAD){
+                        client.interactionManager.updateBlockBreakingProgress(targetNode.pos.up(),Direction.UP);
+                    }
                     targetPitch = -1.0F;
                     pressForward = true;
                     pressSprint = true;
@@ -379,6 +397,9 @@ public class MovementController implements IBotModule {
                     tryToSwim(player);
                     targetPitch = 10.0F;
                 } else {
+                    if(MinecraftClient.getInstance().world.getBlockState(targetNode.pos.up()).getBlock()== Blocks.LILY_PAD){
+                        client.interactionManager.updateBlockBreakingProgress(targetNode.pos.up(),Direction.UP);
+                    }
                     tryToBoating(player);
                 }
                 break;
@@ -509,7 +530,7 @@ public class MovementController implements IBotModule {
         List<SimplePathfinder.Node> currentPathList = pathExecutor.getCurrentPath();
         int waterCounter = 0;
         for (int i = pathExecutor.getCurrentPathIndex(); i < currentPathList.size(); i++) {
-            if (waterCounter > 10) return true;
+            if (waterCounter > 7) return true;
             if (currentPathList.get(i).state != SimplePathfinder.MovementState.SWIMMING) return false;
             waterCounter++;
         }

@@ -11,7 +11,7 @@ import java.util.*;
 
 public class SimplePathfinder {
 
-    private static final int MAX_NODES = 20000;
+    private static final int MAX_NODES = 50000;
     private static final int ABUNDANT_BLOCK_THRESHOLD = 64;
 
     public enum MovementState {
@@ -36,19 +36,30 @@ public class SimplePathfinder {
         PriorityQueue<Node> openSet = new PriorityQueue<>();
         Set<BlockPos> closedSet = new HashSet<>();
 
-        // 起点也没有附加方块，传入 null
         Node startNode = new Node(startPos, null, null, 0, calculateHeuristic(startPos, end), MovementState.WALKING, 0);
         openSet.add(startNode);
 
         Node closestNode = startNode;
-        double minHeuristic = startNode.estimatedCostToEnd;
-        int nodesEvaluated = 0;
+        double minEarlyExitScore = Math.abs(startPos.getX() - end.getX()) + Math.abs(startPos.getZ() - end.getZ());        int nodesEvaluated = 0;
 
         while (!openSet.isEmpty() && nodesEvaluated < MAX_NODES) {
             Node current = openSet.poll();
 
-            if (current.estimatedCostToEnd < minHeuristic) {
-                minHeuristic = current.estimatedCostToEnd;
+            double dx = Math.abs(current.pos.getX() - end.getX());
+            double dz = Math.abs(current.pos.getZ() - end.getZ());
+            double horizontalDist = dx + dz;
+
+            double statePenalty = 0.0;
+            if (current.state == MovementState.BUILDING_BRIDGE || current.state == MovementState.BUILDING_PILLAR) {
+                statePenalty = 15.0;
+            } else if (current.state == MovementState.MINING || current.state == MovementState.FALLING || current.state == MovementState.JUMPING_AIR) {
+                statePenalty = 5.0;
+            }
+
+            double earlyExitScore = horizontalDist + statePenalty;
+
+            if (earlyExitScore < minEarlyExitScore) {
+                minEarlyExitScore = earlyExitScore;
                 closestNode = current;
             }
 
@@ -107,40 +118,50 @@ public class SimplePathfinder {
         int remainingPillaring = Math.max(0, counts.pillaringBlocks - current.blocksUsed);
 
         boolean isCurrentWater = world.getBlockState(current.pos).getMaterial() == net.minecraft.block.Material.WATER;
+        boolean isStandingOnWater = world.getBlockState(current.pos.down()).getMaterial() == net.minecraft.block.Material.WATER;
+
+        boolean isSimulatedSolidBelow = isSolid(world, current.pos.down())
+                || current.state == MovementState.BUILDING_PILLAR
+                || current.state == MovementState.BUILDING_BRIDGE;
+
+        boolean isCurrentMidAir = !isSimulatedSolidBelow && !isCurrentWater && !isStandingOnWater;
+
+        if (isCurrentMidAir) {
+            for (int drop = 1; drop <= 256; drop++) {
+                BlockPos dropPos = current.pos.down(drop);
+                if (!isPassable(world, dropPos) || !isPassable(world, dropPos.up())) break;
+
+                boolean isWaterBelow = world.getBlockState(dropPos.down()).getMaterial() == net.minecraft.block.Material.WATER;
+                if (isSolid(world, dropPos.down()) || isWaterBelow) {
+                    if (!isWaterBelow && drop > 3) {
+                        break;
+                    }
+                    neighbors.add(new Node(dropPos, null, current, current.costFromStart + (drop * 0.5), calculateHeuristic(dropPos, end), MovementState.FALLING, current.blocksUsed));
+                    break;
+                }
+            }
+            return neighbors;
+        }
+
         if (isCurrentWater) {
             BlockPos upPos = current.pos.up();
-            // 【修复】：向上游的时候，必须确保头顶那格也是水！
-            // 如果头顶是空气（说明已经到了水面），就不需要再往空气里生成游泳节点了，后续的边缘判断会接管出水逻辑
             if (world.getBlockState(upPos).getMaterial() == net.minecraft.block.Material.WATER && isPassable(world, upPos.up())) {
                 neighbors.add(new Node(upPos, null, current, current.costFromStart + 1.2, calculateHeuristic(upPos, end), MovementState.SWIMMING, current.blocksUsed));
             }
 
             BlockPos downPos = current.pos.down();
-            // 【修复】：向下潜水同理，必须确保下面也是水
             if (world.getBlockState(downPos).getMaterial() == net.minecraft.block.Material.WATER) {
                 neighbors.add(new Node(downPos, null, current, current.costFromStart + 1.2, calculateHeuristic(downPos, end), MovementState.SWIMMING, current.blocksUsed));
             }
         }
 
-        // ==========================================
-        // 动作：原地垫高 / 向上破顶逃生
-        // 【核心修复】：不再要求头顶必须是空气！只要头顶的方块能挖得动，就允许生成“先破顶再垫高”的节点
-        // ==========================================
-        BlockPos headPos = current.pos.up(2); // 头顶那格
+        BlockPos headPos = current.pos.up(2);
         double overheadMineCost = getMiningCost(world, headPos);
 
-        // 【新增水域检测】：获取玩家脚底下的方块材质
-        boolean isStandingOnWater = world.getBlockState(current.pos.down()).getMaterial() == net.minecraft.block.Material.WATER;
-
-        // 【核心拦截】：如果玩家当前泡在水里 (isCurrentWater)，或者脚底下踩的是水 (isStandingOnWater)，绝对不允许原地垫高！
         if (remainingPillaring > 0 && overheadMineCost < 9999.0 && !isCurrentWater && !isStandingOnWater) {
-
             BlockPos pillarPos = current.pos.up();
             double dynamicPillarCost = getDynamicCost(remainingPillaring, 1.2, 3.5);
-            // 加上可能存在的破顶挖掘代价
             double totalCost = current.costFromStart + dynamicPillarCost + overheadMineCost;
-
-            // 把头顶的方块设为 extraPos。执行器看到后，要先挖 extraPos，再往脚下放 pillarPos！
             neighbors.add(new Node(pillarPos, headPos, current, totalCost, calculateHeuristic(pillarPos, end), MovementState.BUILDING_PILLAR, current.blocksUsed + 1));
         }
 
@@ -151,10 +172,10 @@ public class SimplePathfinder {
 
             if (!isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
                 double mineCost = getMiningCost(world, adjacent) + getMiningCost(world, adjacentUp);
-                if (mineCost < 9999.0 && isSolid(world, adjacent.down())) {
-                    // 【核心修复】：将目标上下两格都存入 Node，adjacent 是下半身，adjacentUp 是上半身
+                if (mineCost < 9999.0) {
                     neighbors.add(new Node(adjacent, adjacentUp, current, current.costFromStart + 1.0 + mineCost, calculateHeuristic(adjacent, end), MovementState.MINING, current.blocksUsed));
                 }
+
                 if (isSolid(world, adjacent) && isPassable(world, adjacentUp) && isPassable(world, adjacent.up(2)) && isPassable(world, current.pos.up(2))) {
                     neighbors.add(new Node(adjacentUp, null, current, current.costFromStart + 1.5, calculateHeuristic(adjacentUp, end), MovementState.JUMPING_UP, current.blocksUsed));
                 }
@@ -235,31 +256,33 @@ public class SimplePathfinder {
         return path;
     }
 
-    private static boolean isSolid(World world, BlockPos pos) { return world.getBlockState(pos).getMaterial().isSolid(); }
-
+    private static boolean isSolid(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (state.isAir()) return false;
+        if (state.getMaterial() == net.minecraft.block.Material.LAVA || state.getMaterial() == net.minecraft.block.Material.WATER) return false;
+        return !state.getCollisionShape(world, pos).isEmpty();
+    }
     private static boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false;
-        if (state.getMaterial() == net.minecraft.block.Material.WATER) return true;
-        return !state.getMaterial().isSolid();
+        if (state.isAir()) return true;
+        if (state.getMaterial() == net.minecraft.block.Material.WATER) return true; // 水可以游过去
+        if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false; // 岩浆绝对不能碰
+        return state.getCollisionShape(world, pos).isEmpty();
     }
 
     private static double getMiningCost(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        if (state.isAir() || !state.getMaterial().isSolid()) return 0.0;
+        if (isPassable(world, pos)) return 0.0;
         if (!state.getFluidState().isEmpty()) return 9999.0;
+
         float hardness = state.getHardness(world, pos);
         if (hardness < 0) return 9999.0;
-
-        // 【核心优化】：成倍增加挖掘惩罚！
-        // 将乘数 1.5 改为 8.0。这意味着挖开两块泥土的算法代价，相当于在平地上跑 16 格！
-        // 通过加大挖掘代价，迫使算法在看到长距离地下目标时，优先选择向上破土寻找地表，而不是化身穿山甲硬挖。
         return hardness * 8.0;
     }
 
     public static class Node implements Comparable<Node> {
         public BlockPos pos;
-        public BlockPos extraPos; // 【新增】：用于记录需要互动的附加方块（比如上半身或头顶）
+        public BlockPos extraPos;
         public Node parent;
         public double costFromStart, estimatedCostToEnd, totalCost;
         public MovementState state;
@@ -267,7 +290,7 @@ public class SimplePathfinder {
 
         public Node(BlockPos pos, BlockPos extraPos, Node parent, double costFromStart, double estimatedCostToEnd, MovementState state, int blocksUsed) {
             this.pos = pos;
-            this.extraPos = extraPos; // 记录附加方块
+            this.extraPos = extraPos;
             this.parent = parent;
             this.costFromStart = costFromStart;
             this.estimatedCostToEnd = estimatedCostToEnd;
@@ -279,12 +302,9 @@ public class SimplePathfinder {
             return "pos: " + pos.toShortString() + " state: " + state;
         }
 
-
         @Override public int compareTo(Node other) { return Double.compare(this.totalCost, other.totalCost); }
     }
-    // ==========================================
-    // 路径平滑 (拉线算法) 核心逻辑
-    // ==========================================
+
     private static List<Node> smoothPath(World world, List<Node> path) {
         if (path == null || path.size() <= 2) return path;
 
@@ -294,15 +314,13 @@ public class SimplePathfinder {
         int currentIndex = 0;
         while (currentIndex < path.size() - 1) {
             int furthestWalkableIndex = currentIndex + 1;
-
-            // 往后看最多 5 个节点（避免长距离算力消耗太大，且应对复杂地形）
             int lookAheadLimit = Math.min(currentIndex + 5, path.size());
 
             for (int i = currentIndex + 2; i < lookAheadLimit; i++) {
                 if (canWalkStraight(world, path.get(currentIndex), path.get(i))) {
-                    furthestWalkableIndex = i; // 如果能直线走到 i，就更新最远可达点
+                    furthestWalkableIndex = i;
                 } else {
-                    break; // 如果中间被挡住了，更后面的也别看了
+                    break;
                 }
             }
 
@@ -314,13 +332,10 @@ public class SimplePathfinder {
     }
 
     private static boolean canWalkStraight(World world, Node start, Node end) {
-        // 规则 1：只对普通的平地行走和水面游泳进行平滑。搭桥、挖掘、跳跃等复杂动作绝对不能平滑！
         if ((start.state != MovementState.WALKING && start.state != MovementState.SWIMMING) ||
                 (end.state != MovementState.WALKING && end.state != MovementState.SWIMMING)) {
             return false;
         }
-
-        // 规则 2：必须在同一高度。跨高度的平滑极易导致摔落或卡墙角
         if (start.pos.getY() != end.pos.getY()) {
             return false;
         }
@@ -331,18 +346,13 @@ public class SimplePathfinder {
         int maxZ = Math.max(start.pos.getZ(), end.pos.getZ());
         int y = start.pos.getY();
 
-        // 规则 3：检查两点形成的矩形包围盒内的所有方块
-        // 这是为了防止机器人被方块的边角卡住 (因为玩家碰撞箱有 0.6 宽)
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
                 BlockPos checkPos = new BlockPos(x, y, z);
 
-                // 身体和头顶必须畅通无阻
                 if (!isPassable(world, checkPos) || !isPassable(world, checkPos.up())) {
                     return false;
                 }
-
-                // 如果是走路，脚底下的方块必须是实心的（防止直线走过去掉进坑里）
                 if (start.state == MovementState.WALKING && !isSolid(world, checkPos.down())) {
                     return false;
                 }
