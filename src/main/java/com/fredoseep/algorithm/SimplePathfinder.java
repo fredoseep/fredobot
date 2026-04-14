@@ -34,73 +34,70 @@ public class SimplePathfinder {
         int maxZ = Math.max(startPos.getZ(), end.getZ()) + margin;
 
         PriorityQueue<Node> openSet = new PriorityQueue<>();
-        Set<BlockPos> closedSet = new HashSet<>();
+
+        // ==========================================
+        // 【终极重构：状态感知代价表 (State-Aware Cost Map)】
+        // 彻底废除存在致命漏洞的 closedSet。
+        // 现在不仅记录 BlockPos，还细分到每一种 MovementState 的历史最低代价！
+        // ==========================================
+        Map<BlockPos, EnumMap<MovementState, Double>> costSoFar = new HashMap<>();
 
         Node startNode = new Node(startPos, null, null, 0, calculateHeuristic(startPos, end), MovementState.WALKING, 0);
         openSet.add(startNode);
+        // 记录起点的初始状态代价
+        costSoFar.computeIfAbsent(startPos, k -> new EnumMap<>(MovementState.class)).put(MovementState.WALKING, 0.0);
 
         Node closestNode = startNode;
-        double minEarlyExitScore = Math.abs(startPos.getX() - end.getX()) + Math.abs(startPos.getZ() - end.getZ());        int nodesEvaluated = 0;
+        double minEarlyExitScore = Math.abs(startPos.getX() - end.getX()) + Math.abs(startPos.getZ() - end.getZ());
+        int nodesEvaluated = 0;
 
         while (!openSet.isEmpty() && nodesEvaluated < MAX_NODES) {
             Node current = openSet.poll();
 
-            double dx = Math.abs(current.pos.getX() - end.getX());
-            double dz = Math.abs(current.pos.getZ() - end.getZ());
-            double horizontalDist = dx + dz;
-
-            double statePenalty = 0.0;
-            if (current.state == MovementState.BUILDING_BRIDGE || current.state == MovementState.BUILDING_PILLAR) {
-                statePenalty = 15.0;
-            } else if (current.state == MovementState.MINING || current.state == MovementState.FALLING || current.state == MovementState.JUMPING_AIR) {
-                statePenalty = 5.0;
+            // 【惰性删除 (Lazy Deletion)】：
+            // 如果这个节点在队列里排队的时候，算法已经找到了一条更便宜的、同状态的路到达这里，
+            // 那么这个节点就是过时的垃圾数据，直接扔掉！
+            EnumMap<MovementState, Double> currentBestStates = costSoFar.get(current.pos);
+            if (currentBestStates != null && current.costFromStart > currentBestStates.getOrDefault(current.state, Double.MAX_VALUE)) {
+                continue;
             }
 
-            double earlyExitScore = horizontalDist + statePenalty;
+            nodesEvaluated++; // 只有真正有用的节点才计入评估次数
 
-            if (earlyExitScore < minEarlyExitScore) {
-                minEarlyExitScore = earlyExitScore;
-                closestNode = current;
+            if (current.state == MovementState.WALKING || current.state == MovementState.SWIMMING) {
+                double horizontalDist = Math.abs(current.pos.getX() - end.getX()) + Math.abs(current.pos.getZ() - end.getZ());
+                if (horizontalDist < minEarlyExitScore) {
+                    minEarlyExitScore = horizontalDist;
+                    closestNode = current;
+                }
             }
 
             if (current.pos.equals(end)) {
                 long endTime = System.currentTimeMillis();
-                System.out.println("[SimplePathfinder] 寻路成功！耗时: " + (endTime - startTime) + " ms");
+                System.out.println("[SimplePathfinder] 寻路成功！耗时: " + (endTime - startTime) + " ms, 实际评估节点数: " + nodesEvaluated);
                 return smoothPath(world, reconstructPath(current));
             }
 
-            closedSet.add(current.pos);
-            nodesEvaluated++;
-
             for (Node neighbor : getNeighbors(world, current, end, blockCounts)) {
-                if (closedSet.contains(neighbor.pos)) continue;
-
                 if (neighbor.pos.getX() < minX || neighbor.pos.getX() > maxX ||
                         neighbor.pos.getZ() < minZ || neighbor.pos.getZ() > maxZ) {
                     continue;
                 }
 
-                boolean inOpenSet = false;
-                for (Node openNode : openSet) {
-                    if (openNode.pos.equals(neighbor.pos)) {
-                        inOpenSet = true;
-                        if (neighbor.costFromStart < openNode.costFromStart) {
-                            openNode.costFromStart = neighbor.costFromStart;
-                            openNode.totalCost = openNode.costFromStart + openNode.estimatedCostToEnd;
-                            openNode.parent = neighbor.parent;
-                            openNode.state = neighbor.state;
-                            openNode.blocksUsed = neighbor.blocksUsed;
-                            openSet.remove(openNode);
-                            openSet.add(openNode);
-                        }
-                        break;
-                    }
-                }
+                // 【核心逻辑取代 O(N) 遍历】：
+                // 查表：如果我们要探索的这个新邻居，比历史上相同坐标、相同状态的路径更便宜，
+                // 我们就无情地覆盖历史，并将它加入队列！再也不怕廉价的走路被昂贵的坠落封死了！
+                EnumMap<MovementState, Double> neighborBestStates = costSoFar.computeIfAbsent(neighbor.pos, k -> new EnumMap<>(MovementState.class));
+                double previousCost = neighborBestStates.getOrDefault(neighbor.state, Double.MAX_VALUE);
 
-                if (!inOpenSet) openSet.add(neighbor);
+                if (neighbor.costFromStart < previousCost) {
+                    neighborBestStates.put(neighbor.state, neighbor.costFromStart);
+                    openSet.add(neighbor);
+                }
             }
         }
 
+        System.out.println("[SimplePathfinder] 触及算力上限！执行安全港截断。实际评估节点数: " + nodesEvaluated);
         return smoothPath(world, reconstructPath(closestNode == startNode ? null : closestNode));
     }
 
@@ -260,13 +257,18 @@ public class SimplePathfinder {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return false;
         if (state.getMaterial() == net.minecraft.block.Material.LAVA || state.getMaterial() == net.minecraft.block.Material.WATER) return false;
+        if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return false;
+
         return !state.getCollisionShape(world, pos).isEmpty();
     }
+
     private static boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return true;
         if (state.getMaterial() == net.minecraft.block.Material.WATER) return true; // 水可以游过去
         if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false; // 岩浆绝对不能碰
+        if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return true;
+
         return state.getCollisionShape(world, pos).isEmpty();
     }
 

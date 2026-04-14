@@ -240,8 +240,12 @@ public class MovementController implements IBotModule {
 
                 BlockPos footPos = targetNode.pos.down();
                 BlockState footState = MinecraftClient.getInstance().world.getBlockState(footPos);
-                if (!footState.getMaterial().isReplaceable() && footState.getCollisionShape(MinecraftClient.getInstance().world, footPos).isEmpty()) {
-                    System.out.println("FredoBot: 发现脚下有花/火把等障碍物，使用协议发包清除...");
+
+                boolean isFlowerOrTorch = !footState.getMaterial().isReplaceable() && footState.getCollisionShape(MinecraftClient.getInstance().world, footPos).isEmpty();
+                boolean isSnowLayer = footState.getBlock() == net.minecraft.block.Blocks.SNOW; // 识别薄雪层
+
+                if (isFlowerOrTorch || isSnowLayer) {
+                    System.out.println("FredoBot: 发现脚下有花/火把/雪层等障碍物，使用协议发包清除...");
                     client.interactionManager.updateBlockBreakingProgress(footPos, Direction.UP);
                     player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                     break;
@@ -463,7 +467,7 @@ public class MovementController implements IBotModule {
     private void tryToBoating(PlayerEntity player) {
         if (InventoryHelper.putBoatToHotBar(player)) {
             player.inventory.selectedSlot = 7;
-            targetPitch = 30F;
+            targetPitch = 45F;
             boatInventorySleepingTick++;
         }
         if (boatInventorySleepingTick > 0) boatHasBeenPlacedDown = true;
