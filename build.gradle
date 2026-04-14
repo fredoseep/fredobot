@@ -25,7 +25,13 @@ dependencies {
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
 	// Fabric API. This is technically optional, but you probably want it anyway.
+	modImplementation files("libs/atum-2.7.2+1.16-1.16.1.jar")
+	modImplementation files("libs/speedrunapi-2.2+1.16-1.16.1.jar")
+	modImplementation files("libs/autotreasurereset-1.0.0.jar")
 	modImplementation "net.fabricmc.fabric-api:fabric-api:0.18.0+build.387-1.16.1"
+	include files("libs/autotreasurereset-1.0.0.jar")
+	include files("libs/atum-2.7.2+1.16-1.16.1.jar")
+	include files("libs/speedrunapi-2.2+1.16-1.16.1.jar")
 	include "net.fabricmc.fabric-api:fabric-api:0.18.0+build.387-1.16.1"
 	
 }

@@ -143,6 +143,7 @@ public class PathRenderer {
             case JUMPING_UP -> new float[]{1.0f, 0.5f, 0.0f, 1.0f}; // 橙
             case JUMPING_AIR -> new float[]{1.0f, 1.0f, 0.0f, 1.0f}; // 黄
             case SWIMMING -> new float[]{0.0f, 0.5f, 1.0f, 1.0f}; // 浅蓝
+            case DIVING -> new float[]{0.0f,0.5f,1.5f,1.0f};//深蓝
             default -> new float[]{1.0f, 1.0f, 1.0f, 1.0f}; // 白
         };
     }

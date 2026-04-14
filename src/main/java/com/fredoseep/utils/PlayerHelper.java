@@ -3,7 +3,9 @@ package com.fredoseep.utils;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 
 public class PlayerHelper {
     public static boolean isDrivingBoat(PlayerEntity player) {
@@ -37,5 +39,8 @@ public class PlayerHelper {
                 MathHelper.wrapDegrees(yaw),
                 MathHelper.wrapDegrees(pitch)
         };
+    }
+    public static boolean isNear(PlayerEntity player, BlockPos targetPos, double radius) {
+        return player.squaredDistanceTo(Vec3d.ofCenter(targetPos)) <= (radius * radius);
     }
 }

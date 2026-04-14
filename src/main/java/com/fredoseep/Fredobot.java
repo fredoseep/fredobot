@@ -1,6 +1,7 @@
 package com.fredoseep;
 
 import com.fredoseep.excutor.BotEngine;
+import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
@@ -41,6 +42,12 @@ public class Fredobot implements ModInitializer {
 						context.getSource().sendFeedback(new LiteralText("§c[服务器侧] 机器人已彻底停止"), false);
 						return 1;
 					})));
+		});
+		CommandRegistrationCallback.EVENT.register((commandDispatcher, b) -> {
+			commandDispatcher.register((CommandManager.literal("speedrun")).executes(commandContext -> {
+				BotEngine.getInstance().start();
+				return 1;
+			}));
 		});
 
 		System.out.println("SpeedrunBot 初始化成功！");

@@ -25,9 +25,10 @@ public class BotEngine {
     private BotEngine() {
         // 在这里注册你所有的 Controller
         // 注意：这里只是注册，它们会根据 getPriority() 自动排序
-        registerModule(new PathExecutor());    // 也就是你之前的 PathExecutor
-        registerModule(new MovementController());    // 底层移动模块
+        registerModule(new PathExecutor());
+        registerModule(new MovementController());
         registerModule(new MiscController());
+        registerModule(new GlobalExecutor());
         // 按照优先级排序 (Priority 越小越排在前面)
         modules.sort(Comparator.comparingInt(IBotModule::getPriority));
 

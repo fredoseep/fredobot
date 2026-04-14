@@ -15,7 +15,8 @@ public class SimplePathfinder {
     private static final int ABUNDANT_BLOCK_THRESHOLD = 64;
 
     public enum MovementState {
-        WALKING, FALLING, JUMPING_UP, JUMPING_AIR, BUILDING_BRIDGE, BUILDING_PILLAR, MINING, SWIMMING
+        // 【新增】：剥离出独立的 DIVING（潜水）状态
+        WALKING, FALLING, JUMPING_UP, JUMPING_AIR, BUILDING_BRIDGE, BUILDING_PILLAR, MINING, SWIMMING, DIVING
     }
 
     public static List<Node> findPath(World world, PlayerEntity player, BlockPos end) {
@@ -34,17 +35,10 @@ public class SimplePathfinder {
         int maxZ = Math.max(startPos.getZ(), end.getZ()) + margin;
 
         PriorityQueue<Node> openSet = new PriorityQueue<>();
-
-        // ==========================================
-        // 【终极重构：状态感知代价表 (State-Aware Cost Map)】
-        // 彻底废除存在致命漏洞的 closedSet。
-        // 现在不仅记录 BlockPos，还细分到每一种 MovementState 的历史最低代价！
-        // ==========================================
         Map<BlockPos, EnumMap<MovementState, Double>> costSoFar = new HashMap<>();
 
         Node startNode = new Node(startPos, null, null, 0, calculateHeuristic(startPos, end), MovementState.WALKING, 0);
         openSet.add(startNode);
-        // 记录起点的初始状态代价
         costSoFar.computeIfAbsent(startPos, k -> new EnumMap<>(MovementState.class)).put(MovementState.WALKING, 0.0);
 
         Node closestNode = startNode;
@@ -54,17 +48,15 @@ public class SimplePathfinder {
         while (!openSet.isEmpty() && nodesEvaluated < MAX_NODES) {
             Node current = openSet.poll();
 
-            // 【惰性删除 (Lazy Deletion)】：
-            // 如果这个节点在队列里排队的时候，算法已经找到了一条更便宜的、同状态的路到达这里，
-            // 那么这个节点就是过时的垃圾数据，直接扔掉！
             EnumMap<MovementState, Double> currentBestStates = costSoFar.get(current.pos);
             if (currentBestStates != null && current.costFromStart > currentBestStates.getOrDefault(current.state, Double.MAX_VALUE)) {
                 continue;
             }
 
-            nodesEvaluated++; // 只有真正有用的节点才计入评估次数
+            nodesEvaluated++;
 
-            if (current.state == MovementState.WALKING || current.state == MovementState.SWIMMING) {
+            // 【白名单更新】：允许机器人在水面或水下安全截断
+            if (current.state == MovementState.WALKING || current.state == MovementState.SWIMMING || current.state == MovementState.DIVING) {
                 double horizontalDist = Math.abs(current.pos.getX() - end.getX()) + Math.abs(current.pos.getZ() - end.getZ());
                 if (horizontalDist < minEarlyExitScore) {
                     minEarlyExitScore = horizontalDist;
@@ -84,9 +76,6 @@ public class SimplePathfinder {
                     continue;
                 }
 
-                // 【核心逻辑取代 O(N) 遍历】：
-                // 查表：如果我们要探索的这个新邻居，比历史上相同坐标、相同状态的路径更便宜，
-                // 我们就无情地覆盖历史，并将它加入队列！再也不怕廉价的走路被昂贵的坠落封死了！
                 EnumMap<MovementState, Double> neighborBestStates = costSoFar.computeIfAbsent(neighbor.pos, k -> new EnumMap<>(MovementState.class));
                 double previousCost = neighborBestStates.getOrDefault(neighbor.state, Double.MAX_VALUE);
 
@@ -140,15 +129,49 @@ public class SimplePathfinder {
             return neighbors;
         }
 
+        // ==========================================
+        // 【核心重构：水下 3D 动态代价引擎】
+        // 彻底分离 SWIMMING 和 DIVING。根据与目标的 2D 距离智能规划潜水与上浮时机！
+        // ==========================================
         if (isCurrentWater) {
-            BlockPos upPos = current.pos.up();
-            if (world.getBlockState(upPos).getMaterial() == net.minecraft.block.Material.WATER && isPassable(world, upPos.up())) {
-                neighbors.add(new Node(upPos, null, current, current.costFromStart + 1.2, calculateHeuristic(upPos, end), MovementState.SWIMMING, current.blocksUsed));
-            }
+            boolean isTargetWater = world.getBlockState(end).getMaterial() == net.minecraft.block.Material.WATER;
+            double dist2D = Math.sqrt(Math.pow(current.pos.getX() - end.getX(), 2) + Math.pow(current.pos.getZ() - end.getZ(), 2));
+            boolean isSurface = !world.getBlockState(current.pos.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
 
-            BlockPos downPos = current.pos.down();
-            if (world.getBlockState(downPos).getMaterial() == net.minecraft.block.Material.WATER) {
-                neighbors.add(new Node(downPos, null, current, current.costFromStart + 1.2, calculateHeuristic(downPos, end), MovementState.SWIMMING, current.blocksUsed));
+            Direction[] allDirs = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP, Direction.DOWN};
+
+            for (Direction dir : allDirs) {
+                BlockPos nextPos = current.pos.offset(dir);
+                if (world.getBlockState(nextPos).getMaterial() == net.minecraft.block.Material.WATER) {
+                    boolean nextIsSurface = !world.getBlockState(nextPos.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
+                    MovementState nextState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
+                    double moveCost = 1.2;
+
+                    if (isSurface && !nextIsSurface) {
+                        // 规则 1：水面 -> 水下 (尝试潜水)
+                        if (!isTargetWater) moveCost = 999.0; // 目标在岸上，打死不潜水
+                        else if (dist2D > 30) moveCost = 50.0; // 距离大于30，延迟潜水，强制水面赶路
+                        else moveCost = 1.5; // 小于30，以稍微高于水平的代价倾斜潜水
+                    }
+                    else if (!isSurface && !nextIsSurface) {
+                        // 规则 2：水下 -> 水下 (深海游动)
+                        if (!isTargetWater || dist2D > 30) {
+                            if (dir == Direction.UP) moveCost = 1.0; // 极速上浮逃逸
+                            else moveCost = 10.0; // 惩罚深海水下乱游，逼迫其先上浮
+                        } else {
+                            if (dir == Direction.DOWN) moveCost = 1.5;
+                            else moveCost = 1.2;
+                        }
+                    }
+                    else if (!isSurface && nextIsSurface) {
+                        // 水下 -> 水面 (破水而出)
+                        moveCost = 1.0;
+                    }
+
+                    if (isPassable(world, nextPos) && isPassable(world, nextPos.up())) {
+                        neighbors.add(new Node(nextPos, null, current, current.costFromStart + moveCost, calculateHeuristic(nextPos, end), nextState, current.blocksUsed));
+                    }
+                }
             }
         }
 
@@ -167,6 +190,17 @@ public class SimplePathfinder {
             BlockPos adjacentUp = adjacent.up();
             boolean isAdjacentWater = world.getBlockState(adjacent).getMaterial() == net.minecraft.block.Material.WATER;
 
+            // 【重要拦截】：如果前面是水域，处理完边缘后直接 continue，防止与上面的全方位水域寻路冲突！
+            if (isAdjacentWater) {
+                if (!isCurrentWater) {
+                    // 岸上 -> 扑通跳入水里
+                    boolean nextIsSurface = !world.getBlockState(adjacent.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
+                    MovementState nextState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
+                    neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.2, calculateHeuristic(adjacent, end), nextState, current.blocksUsed));
+                }
+                continue;
+            }
+
             if (!isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
                 double mineCost = getMiningCost(world, adjacent) + getMiningCost(world, adjacentUp);
                 if (mineCost < 9999.0) {
@@ -179,9 +213,7 @@ public class SimplePathfinder {
                 continue;
             }
 
-            if (isAdjacentWater) {
-                neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.2, calculateHeuristic(adjacent, end), MovementState.SWIMMING, current.blocksUsed));
-            } else if (isCurrentWater && isSolid(world, adjacent.down())) {
+            if (isCurrentWater && isSolid(world, adjacent.down())) {
                 neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.2, calculateHeuristic(adjacent, end), MovementState.WALKING, current.blocksUsed));
             } else if (isSolid(world, adjacent.down())) {
                 neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.0, calculateHeuristic(adjacent, end), MovementState.WALKING, current.blocksUsed));
@@ -265,8 +297,8 @@ public class SimplePathfinder {
     private static boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return true;
-        if (state.getMaterial() == net.minecraft.block.Material.WATER) return true; // 水可以游过去
-        if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false; // 岩浆绝对不能碰
+        if (state.getMaterial() == net.minecraft.block.Material.WATER) return true;
+        if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false;
         if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return true;
 
         return state.getCollisionShape(world, pos).isEmpty();
@@ -334,8 +366,9 @@ public class SimplePathfinder {
     }
 
     private static boolean canWalkStraight(World world, Node start, Node end) {
-        if ((start.state != MovementState.WALKING && start.state != MovementState.SWIMMING) ||
-                (end.state != MovementState.WALKING && end.state != MovementState.SWIMMING)) {
+        // 【平滑扩容】：允许 SWIMMING 和 DIVING 在同一高度层面被拉直平滑
+        if ((start.state != MovementState.WALKING && start.state != MovementState.SWIMMING && start.state != MovementState.DIVING) ||
+                (end.state != MovementState.WALKING && end.state != MovementState.SWIMMING && end.state != MovementState.DIVING)) {
             return false;
         }
         if (start.pos.getY() != end.pos.getY()) {

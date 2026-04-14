@@ -85,6 +85,10 @@ public class InventoryHelper {
         return false;
     }
 
+    public static boolean putShovelToHotbar(PlayerEntity player){
+        int shovelSlot = findItemSlot(player, ShovelItem.class);
+        return moveItemToHotbar(MinecraftClient.getInstance(),player,shovelSlot,2);
+    }
     public static boolean putAxeToHotbar(PlayerEntity player) {
         int axeSlot = findItemSlot(player,AxeItem.class);
         return moveItemToHotbar(MinecraftClient.getInstance(),player,axeSlot,0);
