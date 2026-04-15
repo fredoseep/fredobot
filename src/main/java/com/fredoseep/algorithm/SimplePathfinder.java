@@ -130,8 +130,8 @@ public class SimplePathfinder {
         }
 
         // ==========================================
-        // 【核心重构：水下 3D 动态代价引擎】
-        // 彻底分离 SWIMMING 和 DIVING。根据与目标的 2D 距离智能规划潜水与上浮时机！
+        // 【核心重构：严格下潜圆柱引擎 (Strict Dive Cylinder)】
+        // 彻底消灭 SWIMMING/DIVING 穿插，绝对禁止贴着海床潜水！
         // ==========================================
         if (isCurrentWater) {
             boolean isTargetWater = world.getBlockState(end).getMaterial() == net.minecraft.block.Material.WATER;
@@ -140,35 +140,48 @@ public class SimplePathfinder {
 
             Direction[] allDirs = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP, Direction.DOWN};
 
+            // 严格下潜半径：只有距离目标平面 5 格以内，才允许把头扎进水里！
+            double diveRadius = 5.0;
+
             for (Direction dir : allDirs) {
                 BlockPos nextPos = current.pos.offset(dir);
                 if (world.getBlockState(nextPos).getMaterial() == net.minecraft.block.Material.WATER) {
                     boolean nextIsSurface = !world.getBlockState(nextPos.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
                     MovementState nextState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
-                    double moveCost = 1.2;
+                    double moveCost;
 
-                    if (isSurface && !nextIsSurface) {
-                        // 规则 1：水面 -> 水下 (尝试潜水)
-                        if (!isTargetWater) moveCost = 999.0; // 目标在岸上，打死不潜水
-                        else if (dist2D > 30) moveCost = 50.0; // 距离大于30，延迟潜水，强制水面赶路
-                        else moveCost = 1.5; // 小于30，以稍微高于水平的代价倾斜潜水
+                    boolean isHorizontal = (dir == Direction.NORTH || dir == Direction.SOUTH || dir == Direction.EAST || dir == Direction.WEST);
+
+                    if (isSurface && nextIsSurface) {
+                        // 1. 水面巡航 (SWIMMING -> SWIMMING)：最常规的赶路方式
+                        moveCost = 1.2;
+                    }
+                    else if (isSurface && !nextIsSurface) {
+                        // 2. 准备入水 (SWIMMING -> DIVING)
+                        if (!isTargetWater) moveCost = 9999.0; // 目标在岸上：打死不潜水
+                        else if (dist2D > diveRadius) moveCost = 9999.0; // 目标太远：禁止提前下潜，必须在水面游过去！
+                        else moveCost = 1.2; // 进入黄金圆柱区：允许顺滑入水
                     }
                     else if (!isSurface && !nextIsSurface) {
-                        // 规则 2：水下 -> 水下 (深海游动)
-                        if (!isTargetWater || dist2D > 30) {
-                            if (dir == Direction.UP) moveCost = 1.0; // 极速上浮逃逸
-                            else moveCost = 10.0; // 惩罚深海水下乱游，逼迫其先上浮
+                        // 3. 深海潜航 (DIVING -> DIVING)
+                        if (!isTargetWater || dist2D > diveRadius) {
+                            // 处于非法的深海区（比如起点在水下但目标很远）：强制逼出水面
+                            if (dir == Direction.UP) moveCost = 1.0;
+                            else moveCost = 9999.0; // 绝对禁止在非法区域继续水平或向下潜水
                         } else {
-                            if (dir == Direction.DOWN) moveCost = 1.5;
-                            else moveCost = 1.2;
+                            // 处于合法的下潜圆柱区内：逼迫直下
+                            if (dir == Direction.DOWN) moveCost = 1.2; // 极度鼓励垂直向下
+                            else if (isHorizontal) moveCost = 4.0; // 【核心拦截】：水下水平移动极其昂贵！彻底杜绝贴着海床平移！
+                            else moveCost = 1.5; // 允许必要的微调上浮
                         }
                     }
-                    else if (!isSurface && nextIsSurface) {
-                        // 水下 -> 水面 (破水而出)
-                        moveCost = 1.0;
+                    else {
+                        // 4. 破水而出 (DIVING -> SWIMMING)
+                        moveCost = 1.0; // 永远鼓励回到水面
                     }
 
-                    if (isPassable(world, nextPos) && isPassable(world, nextPos.up())) {
+                    // 只有代价正常的节点才会被加入队列
+                    if (moveCost < 9990.0 && isPassable(world, nextPos) && isPassable(world, nextPos.up())) {
                         neighbors.add(new Node(nextPos, null, current, current.costFromStart + moveCost, calculateHeuristic(nextPos, end), nextState, current.blocksUsed));
                     }
                 }

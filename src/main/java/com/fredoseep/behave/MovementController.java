@@ -330,16 +330,12 @@ public class MovementController implements IBotModule {
                 double horizontalDist = Math.sqrt(dX * dX + dZ * dZ);
 
                 targetPitch = (float) -Math.toDegrees(Math.atan2(dY, horizontalDist));
-                targetYaw = (float) Math.toDegrees(Math.atan2(-dX, dZ));
-
+                if (horizontalDist > 0.1) {
+                    targetYaw = (float) Math.toDegrees(Math.atan2(-dX, dZ));
+                }
                 pressForward = true;
                 pressSprint = true;
 
-                if (swimStateStabilizationTicks <= 10) {
-                    swimStateStabilizationTicks++;
-                } else if (dY > 0.2) {
-                    pressJump = true;
-                }
                 break;
 
             case SWIMMING:
@@ -427,8 +423,8 @@ public class MovementController implements IBotModule {
                 break;
         }
 
-        if (!player.isOnGround() && targetNode.state != SimplePathfinder.MovementState.JUMPING_AIR && targetNode.state != SimplePathfinder.MovementState.SWIMMING)
-            pressSprint = false;//防止跳跃惯性
+        if (!player.isOnGround() && targetNode.state != SimplePathfinder.MovementState.JUMPING_AIR && targetNode.state != SimplePathfinder.MovementState.SWIMMING&&targetNode.state!= SimplePathfinder.MovementState.DIVING)
+            pressSprint = false;
         setLookDirection(player, targetYaw, targetPitch);
         lastState = targetNode.state;
     }

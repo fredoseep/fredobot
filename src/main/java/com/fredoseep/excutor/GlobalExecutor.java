@@ -3,23 +3,33 @@ package com.fredoseep.excutor;
 import com.fredoseep.BtPosContext;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
+import com.fredoseep.utils.InventoryHelper;
 import com.fredoseep.utils.PlayerHelper;
 import me.voidxwalker.autoreset.Atum;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.screen.GenericContainerScreenHandler;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.WorldView;
 
 public class GlobalExecutor implements IBotModule {
 
     private final MinecraftClient minecraftClient = MinecraftClient.getInstance();
+
+    private PathExecutor pathExecutor ;
     private BlockPos btPos = null;
     private BlockPos btStandingPos = null;
 
     private int waitTicks = 0;
+    private int debugTick = 0;
 
     private GlobalState currentState = GlobalState.IDLE;
 
@@ -39,15 +49,17 @@ public class GlobalExecutor implements IBotModule {
             waitTicks = 0;
             return;
         }
-        if(currentState.missionOrder<3){
-            btStaff();
+        pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+
+        if(currentState.missionOrder<5){
+            btStaff((ClientPlayerEntity) player);
         }
 
 
     }
 
     public enum GlobalState{
-        IDLE(0),GOING_TO_BT_STANDING_PLACE(1),DIGGING_BT(3);
+        IDLE(0),GOING_TO_BT_STANDING_PLACE(1),DIGGING_BT(3),LOOTING_BT(4),NEXT(0x7FFFFFF);
         private final int missionOrder;
         GlobalState(int missionOrder){
             this.missionOrder = missionOrder;
@@ -57,7 +69,7 @@ public class GlobalExecutor implements IBotModule {
             return missionOrder;
         }
     }
-    private void btStaff(){
+    private void btStaff(ClientPlayerEntity player){
         if (btPos == null) {
             int x = BtPosContext.btXPos;
             int z = BtPosContext.btZPos;
@@ -77,44 +89,93 @@ public class GlobalExecutor implements IBotModule {
                 resetWorld();
                 return;
             }
-            if(btStandingPos==null)btStandingPos = findAProperPosThen();
-            if (currentState.getMissionOrder() < 1) {
-                PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+            if(btStandingPos == null) {
+                btStandingPos = findAProperPosThen();
+                System.out.println("FredoBot [Debug]: 宝藏已锁定! 目标挖掘站位点计算为 -> " + btStandingPos.toShortString());
+            }
+        }
+
+        debugTick++;
+
+        switch(currentState){
+            case IDLE:
                 pathExecutor.setGoal(btStandingPos);
                 currentState = GlobalState.GOING_TO_BT_STANDING_PLACE;
-            }
-            if(PlayerHelper.isNear(minecraftClient.player, btStandingPos,1))currentState = GlobalState.DIGGING_BT;
+                System.out.println("FredoBot [Debug]: 状态切换 -> 开始前往挖掘站位点");
+                break;
 
+            case GOING_TO_BT_STANDING_PLACE:
+                boolean isNear = PlayerHelper.isNear(player, btStandingPos, 1);
+                boolean isPathBusy = pathExecutor.isBusy();
 
+                if (debugTick % 20 == 0) {
+                    double distSq = player.squaredDistanceTo(Vec3d.ofCenter(btStandingPos));
+                    System.out.printf("FredoBot [Debug]: isNear: %b, isBusy: %b, distanceSquare: %.2f\n", isNear, isPathBusy, distSq);
+                }
+
+                if(isNear && !isPathBusy){
+                    System.out.println("FredoBot [Debug]: 状态切换 -> 已抵达站位点，开始暴力挖掘！");
+                    currentState = GlobalState.DIGGING_BT;
+                }
+                break;
+
+            case DIGGING_BT:
+                if(ChestBlock.isChestBlocked(minecraftClient.world, btPos)){
+                    if (debugTick % 20 == 0) {
+                        System.out.println("FredoBot [Debug]: 正在挖掘... 目标方块: " + btPos.up().toShortString());
+                    }
+                    com.fredoseep.utils.ToolsHelper.equipBestTool(player, btPos.up(), false);
+                    minecraftClient.interactionManager.updateBlockBreakingProgress(btPos.up(), Direction.UP);
+                    player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                }
+                else{
+                    System.out.println("FredoBot [Debug]: 状态切换 -> 障碍物已清空，发送秒开箱子请求！");
+                    currentState = GlobalState.LOOTING_BT;
+                    BlockHitResult hitResult = new BlockHitResult(
+                            Vec3d.ofCenter(btPos),
+                            Direction.UP,
+                            btPos,
+                            false
+                    );
+                    minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, hitResult);
+                }
+                break;
+
+            case LOOTING_BT:
+                if (debugTick % 20 == 0) {
+                    System.out.println("FredoBot [Debug]: 正在等待服务器下发箱子 GUI 同步协议...");
+                }
+
+                if (player.currentScreenHandler instanceof GenericContainerScreenHandler) {
+                    int syncId = player.currentScreenHandler.syncId;
+                    System.out.println("FredoBot [Debug]: GUI 已就绪，SyncId = " + syncId + "，开始执行毫秒级拿取...");
+
+                    for (int slot = 0; slot < 27; slot++) {
+                        if(!InventoryHelper.BtUsefulStaff.isUseful(player.currentScreenHandler.getSlot(slot).getStack())) continue;
+                        if (player.currentScreenHandler.getSlot(slot).hasStack()) {
+                            minecraftClient.interactionManager.clickSlot(
+                                    syncId,
+                                    slot,
+                                    0,
+                                    net.minecraft.screen.slot.SlotActionType.QUICK_MOVE,
+                                    player
+                            );
+                        }
+                    }
+                    player.closeHandledScreen();
+                    minecraftClient.openScreen(null);
+                    System.out.println("FredoBot [Debug]: 战利品洗劫完毕，关闭界面！");
+
+                    currentState = GlobalState.NEXT;
+                    break;
+                }
         }
     }
 
     private BlockPos findAProperPosThen() {
         BlockPos closeToBtPos = btPos;
         for(BlockPos currentPos = btPos;currentPos.getY()<100;currentPos = currentPos.up()){
-            if(minecraftClient.world.getBlockState(currentPos).getMaterial().isLiquid()){
-                closeToBtPos = currentPos;
-                break;
-            }
-            if(currentPos==btPos.up()){
-                if(minecraftClient.world.getBlockState(currentPos.east()).getMaterial().isLiquid()){
-                    closeToBtPos = currentPos.east();
-                    break;
-                }
-                else if(minecraftClient.world.getBlockState(currentPos.west()).getMaterial().isLiquid()){
-                    closeToBtPos = currentPos.west();
-                    break;
-                }
-                else if(minecraftClient.world.getBlockState(currentPos.south()).getMaterial().isLiquid()){
-                    closeToBtPos = currentPos.south();
-                    break;
-                }
-                else if(minecraftClient.world.getBlockState(currentPos.north()).getMaterial().isLiquid()){
-                    closeToBtPos = currentPos.north();
-                    break;
-                }
-            }
-            if(minecraftClient.world.getBlockState(currentPos).isAir()){
+            if(minecraftClient.world.getBlockState(currentPos).getMaterial().isLiquid()||minecraftClient.world.getBlockState(currentPos).isAir()){
                 closeToBtPos = currentPos;
                 break;
             }
@@ -141,7 +202,7 @@ public class GlobalExecutor implements IBotModule {
         resetState();
         BotEngine.getInstance().getModule(PathExecutor.class).stop();
         BotEngine.getInstance().getModule(MiscController.class).stopTask();
-        Atum.scheduleReset(); // 调用 Atum 进行秒级重置
+        Atum.scheduleReset();
     }
 
     private void resetState(){
@@ -149,6 +210,7 @@ public class GlobalExecutor implements IBotModule {
         btStandingPos = null;
         currentState = GlobalState.IDLE;
         waitTicks = 0;
+        debugTick = 0;
     }
 
     private void setBtPos() {

@@ -211,4 +211,36 @@ public class InventoryHelper {
             }
         }
     }
+
+    public enum BtUsefulStaff {
+        IRON_INGOT(Items.IRON_INGOT),
+        GOLD_INGOT(Items.GOLD_INGOT),
+        DIAMOND(Items.DIAMOND),
+        IRON_SWORD(Items.IRON_SWORD),
+        TNT(Items.TNT),
+        COOKED_SALMON(Items.COOKED_SALMON),
+        COOKED_COD(Items.COOKED_COD);
+
+        private final Item item;
+
+        BtUsefulStaff(Item item) {
+            this.item = item;
+        }
+
+        public Item getItem() {
+            return item;
+        }
+        public static boolean isUseful(Item itemToCheck) {
+            for (BtUsefulStaff staff : values()) {
+                if (staff.getItem() == itemToCheck) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        public static boolean isUseful(ItemStack stack) {
+            if (stack == null || stack.isEmpty()) return false;
+            return isUseful(stack.getItem());
+        }
+    }
 }
