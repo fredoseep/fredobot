@@ -3,22 +3,22 @@ package com.fredoseep.excutor;
 import com.fredoseep.BtPosContext;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
-import com.fredoseep.utils.InventoryHelper;
-import com.fredoseep.utils.PlayerHelper;
+import com.fredoseep.utils.bt.BtStuff;
+import com.fredoseep.utils.player.InventoryHelper;
+import com.fredoseep.utils.player.PlayerHelper;
+import com.fredoseep.utils.player.ToolsHelper;
 import me.voidxwalker.autoreset.Atum;
-import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.Items;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.Heightmap;
-import net.minecraft.world.WorldView;
 
 public class GlobalExecutor implements IBotModule {
 
@@ -26,7 +26,9 @@ public class GlobalExecutor implements IBotModule {
 
     private PathExecutor pathExecutor ;
     private BlockPos btPos = null;
+    private BlockPos TNTSetupPos = null;
     private BlockPos btStandingPos = null;
+    private boolean globalInitialized = false;
 
     private int waitTicks = 0;
     private int debugTick = 0;
@@ -49,17 +51,28 @@ public class GlobalExecutor implements IBotModule {
             waitTicks = 0;
             return;
         }
+        if(!globalInitialized)initializeSettings();
         pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
 
-        if(currentState.missionOrder<5){
+        if(currentState.missionOrder<6){
             btStaff((ClientPlayerEntity) player);
         }
 
 
     }
 
+    private void initializeSettings() {
+        minecraftClient.getInstance().options.viewDistance = 20;
+        minecraftClient.getInstance().options.entityDistanceScaling = 5.0f;
+        minecraftClient.getInstance().options.gamma = 5.0;
+        if (minecraftClient.worldRenderer != null) {
+            minecraftClient.worldRenderer.reload();
+        }
+        globalInitialized = true;
+    }
+
     public enum GlobalState{
-        IDLE(0),GOING_TO_BT_STANDING_PLACE(1),DIGGING_BT(3),LOOTING_BT(4),NEXT(0x7FFFFFF);
+        IDLE(0),GOING_TO_BT_STANDING_PLACE(1),DIGGING_BT(3),LOOTING_BT(4),LOOKING_FOR_TREES(5),NEXT(0x7FFFFFF);
         private final int missionOrder;
         GlobalState(int missionOrder){
             this.missionOrder = missionOrder;
@@ -124,7 +137,7 @@ public class GlobalExecutor implements IBotModule {
                     if (debugTick % 20 == 0) {
                         System.out.println("FredoBot [Debug]: 正在挖掘... 目标方块: " + btPos.up().toShortString());
                     }
-                    com.fredoseep.utils.ToolsHelper.equipBestTool(player, btPos.up(), false);
+                    ToolsHelper.equipBestTool(player, btPos.up(), false);
                     minecraftClient.interactionManager.updateBlockBreakingProgress(btPos.up(), Direction.UP);
                     player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 }
@@ -165,10 +178,16 @@ public class GlobalExecutor implements IBotModule {
                     player.closeHandledScreen();
                     minecraftClient.openScreen(null);
                     System.out.println("FredoBot [Debug]: 战利品洗劫完毕，关闭界面！");
-
-                    currentState = GlobalState.NEXT;
+                    if(!BtStuff.evaluateBt(player))resetWorld();
+                    currentState = GlobalState.LOOKING_FOR_TREES;
                     break;
                 }
+            case LOOKING_FOR_TREES:
+                if(BtStuff.hasTNT&&!BtStuff.itemsToCraft.contains(Items.STONE_BUTTON)){
+                    TNTSetupPos = BtStuff.calTNTSetupPos(player);
+                    pathExecutor.setGoal(TNTSetupPos);
+                }
+                break;
         }
     }
 
@@ -211,6 +230,8 @@ public class GlobalExecutor implements IBotModule {
         currentState = GlobalState.IDLE;
         waitTicks = 0;
         debugTick = 0;
+        globalInitialized = false;
+        BtStuff.reset();
     }
 
     private void setBtPos() {

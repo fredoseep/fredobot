@@ -2,10 +2,10 @@ package com.fredoseep.behave;
 
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.PathExecutor;
-import com.fredoseep.utils.InventoryHelper;
-import com.fredoseep.utils.MiningHelper;
-import com.fredoseep.utils.PlayerHelper;
-import com.fredoseep.utils.ToolsHelper;
+import com.fredoseep.utils.player.InventoryHelper;
+import com.fredoseep.utils.player.MiningHelper;
+import com.fredoseep.utils.player.PlayerHelper;
+import com.fredoseep.utils.player.ToolsHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.options.KeyBinding;
 import net.minecraft.entity.ItemEntity;

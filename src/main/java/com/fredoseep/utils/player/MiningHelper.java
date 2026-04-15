@@ -1,5 +1,6 @@
-package com.fredoseep.utils;
+package com.fredoseep.utils.player;
 
+import net.minecraft.block.Block;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -10,7 +11,9 @@ import net.minecraft.world.RayTraceContext;
 import net.minecraft.world.World;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.PriorityQueue;
 
 public class MiningHelper {
     /**
@@ -103,5 +106,42 @@ public class MiningHelper {
         }
 
         return new float[]{bestYaw, bestPitch};
+    }
+    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Block targetBlock, int count,int maxRadius) {
+        List<BlockPos> result = new ArrayList<>();
+
+        if (count <= 0) return result;
+
+        World world = player.world;
+        BlockPos playerPos = player.getBlockPos();
+
+        PriorityQueue<BlockPos> queue = new PriorityQueue<>(
+                Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos))
+        );
+
+        for (int x = -maxRadius; x <= maxRadius; x++) {
+            for (int y = -maxRadius; y <= maxRadius; y++) {
+                for (int z = -maxRadius; z <= maxRadius; z++) {
+                    BlockPos checkPos = playerPos.add(x, y, z);
+
+                    // 剔除正方体边角，确保是一个完美的球形搜索范围
+                    if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) {
+                        continue;
+                    }
+
+                    // 如果是目标方块，直接扔进优先队列
+                    if (world.getBlockState(checkPos).getBlock() == targetBlock) {
+                        queue.add(checkPos);
+                    }
+                }
+            }
+        }
+
+        // 从优先队列中不断取出“最近的”方块，直到拿够所需数量，或者队列被拿空
+        while (!queue.isEmpty() && result.size() < count) {
+            result.add(queue.poll());
+        }
+
+        return result;
     }
 }

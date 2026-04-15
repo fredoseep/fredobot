@@ -1,6 +1,6 @@
 package com.fredoseep.algorithm;
 
-import com.fredoseep.utils.InventoryHelper;
+import com.fredoseep.utils.player.InventoryHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.BlockPos;

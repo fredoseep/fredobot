@@ -1,4 +1,4 @@
-package com.fredoseep.utils;
+package com.fredoseep.utils.player;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.enchantment.EnchantmentHelper;

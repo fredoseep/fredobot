@@ -1,6 +1,5 @@
-package com.fredoseep.utils;
+package com.fredoseep.utils.player;
 
-import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.util.math.BlockPos;
