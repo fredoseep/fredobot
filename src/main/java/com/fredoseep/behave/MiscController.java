@@ -1,6 +1,7 @@
 package com.fredoseep.behave;
 
 import com.fredoseep.excutor.BotEngine;
+import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
@@ -34,7 +35,9 @@ public class MiscController implements IBotModule {
 
     public enum MiscType {
         MINE_BLOCK_ABOVE_HEAD,
-        BACK_FROM_SWIMMING
+        BACK_FROM_SWIMMING,
+        MINE_THE_BLOCK,
+        MINE_THE_BLOCK_AND_COLLECT_THE_DROP;
         // 以后还可以加: EAT_FOOD, THROW_TRASH, etc.
     }
 
@@ -107,6 +110,7 @@ public class MiscController implements IBotModule {
         }
 
         // 默认每帧重置攻击键，避免死锁
+        PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
 
         switch (currentTask) {
             case MINE_BLOCK_ABOVE_HEAD:
@@ -119,7 +123,7 @@ public class MiscController implements IBotModule {
                 if (client.world.getBlockState(targetPos).isAir()) {
                     System.out.println("FredoBot: 头顶方块清理完毕！");
                     stopTask();
-                    BotEngine.getInstance().getModule(PathExecutor.class).resume();
+                    pathExecutor.resume();
                     return; // 结束这一帧
                 }
 
@@ -155,14 +159,8 @@ public class MiscController implements IBotModule {
                     } else {
                         ItemEntity droppedBoat = InventoryHelper.findNearestDroppedItem(player, 8.0, net.minecraft.item.BoatItem.class);
                         if (droppedBoat != null) {
-                            double dx = droppedBoat.getX() - player.getX();
-                            double dz = droppedBoat.getZ() - player.getZ();
-                            yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-                            MovementController.setLookDirection(player, yaw, 30.0f);
-                            pressForward = true;
-                            if (player.horizontalCollision) {
-                                pressJump = true;
-                            }
+                            // 【优化】：直接调用提炼好的走向实体方法
+                            walkTowardsEntity(player, droppedBoat);
                         } else {
                             System.out.println("FredoBot: 掉落的船丢失，放弃拾取！");
                             boatEntity = null;
@@ -171,21 +169,102 @@ public class MiscController implements IBotModule {
                 }
                 else {
                     if (player.isTouchingWater()) {
-                        // 1. 还在水里 -> 看向目标节点，奋力游泳
                         float[] angles = PlayerHelper.getLookAngles(player, targetPos.getX(), targetPos.getY(), targetPos.getZ());
                         MovementController.setLookDirection(player, angles[0], angles[1]);
 
                         pressForward = true;
-                        pressJump = true; // 保持浮在水面
-                        pressSprint = true; // 【极其关键】在水里不按疾跑，速度会慢得像蜗牛
+                        pressJump = true;
+                        pressSprint = true;
                     } else {
-                        // 2. 脚踩实地 -> 完美收工！
                         System.out.println("FredoBot: 成功登陆目标海岸，恢复寻路！");
                         stopTask();
-                        BotEngine.getInstance().getModule(PathExecutor.class).resume();
+                        // 假设你的 PathExecutor 有 resume() 方法，没有的话删掉这行即可
+                        // pathExecutor.resume();
                     }
                 }
                 break;
+            case MINE_THE_BLOCK:
+                if(pathExecutor.isBusy())break;
+                if(MiningHelper.blockToMine.isEmpty()){
+                    BotEngine.getInstance().getModule(MiscController.class).stopTask();
+                    break;
+                }
+                pathExecutor.setGoal(MiningHelper.blockToMine.getFirst());
+                MiningHelper.blockToMine.removeFirst();
+                break;
+            case MINE_THE_BLOCK_AND_COLLECT_THE_DROP:
+                if (targetPos == null || client.world == null) {
+                    stopTask();
+                    break;
+                }
+
+                // 判断目标方块是否已经被挖掉（变成了空气/液体）
+                boolean isBlockMined = client.world.getBlockState(targetPos).isAir() ||
+                        client.world.getBlockState(targetPos).getMaterial().isLiquid();
+
+                if (!isBlockMined) {
+                    // --- 阶段 1：接近并挖掘 ---
+                    double distSq = player.squaredDistanceTo(net.minecraft.util.math.Vec3d.ofCenter(targetPos));
+
+                    // 如果距离超过 4 格（距离平方 > 16），需要先寻路过去
+                    if (distSq > 16.0) {
+                        if (!pathExecutor.isBusy()) {
+                            pathExecutor.setGoal(targetPos);
+                        }
+                    } else {
+                        // 足够接近了，停下脚步开始物理挖掘
+                        if (pathExecutor.isBusy()) {
+                            pathExecutor.stop();
+                        }
+
+                        // 计算最佳挖掘视角、切工具并锁定视角
+                        float[] angles = MiningHelper.getValidMiningAngle(player, targetPos);
+                        yaw = angles[0];
+                        pitch = angles[1];
+                        ToolsHelper.equipBestTool(player, targetPos, false);
+                        MovementController.setLookDirection(player, yaw, pitch);
+
+                        // 当准星对准方块时（容差 5 度），按住左键开挖！
+                        if (Math.abs(MathHelper.wrapDegrees(player.yaw - yaw)) < 5.0f &&
+                                Math.abs(player.pitch - pitch) < 5.0f) {
+                            pressAttack = true;
+                        }
+                    }
+                } else {
+                    // --- 阶段 2：方块已碎，寻找并拾取掉落物 ---
+                    pressAttack = false; // 赶紧松开左键
+                    if (pathExecutor.isBusy()) {
+                        pathExecutor.stop();
+                    }
+
+                    // 在目标方块原来的位置周围 4 格内扫描所有的掉落物实体
+                    net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(targetPos).expand(4.0);
+                    java.util.List<ItemEntity> drops = client.world.getEntities(ItemEntity.class, searchBox, e -> true);
+
+                    if (!drops.isEmpty()) {
+                        // 找出离玩家最近的那一个掉落物
+                        ItemEntity nearestDrop = null;
+                        double minDist = Double.MAX_VALUE;
+                        for (ItemEntity drop : drops) {
+                            double d = player.squaredDistanceTo(drop);
+                            if (d < minDist) {
+                                minDist = d;
+                                nearestDrop = drop;
+                            }
+                        }
+
+                        // 调用提炼好的公共方法走过去吃掉它！
+                        if (nearestDrop != null) {
+                            walkTowardsEntity(player, nearestDrop);
+                        }
+                    } else {
+                        // 如果周围没有掉落物了，说明已经被我们捡进背包，或者掉进了岩浆被烧毁
+                        System.out.println("FredoBot: 方块已挖掘并拾取完毕！");
+                        stopTask();
+                    }
+                }
+                break;
+
             // case EAT_FOOD: ...
         }
 
@@ -240,6 +319,21 @@ public class MiscController implements IBotModule {
             KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), false);
             KeyBinding.setKeyPressed(client.options.keyAttack.getDefaultKey(), false);
             KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(), false);
+        }
+    }
+    private void walkTowardsEntity(PlayerEntity player, net.minecraft.entity.Entity entity) {
+        double dx = entity.getX() - player.getX();
+        double dz = entity.getZ() - player.getZ();
+
+        yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        // 视角对准目标，并稍微低头(30度)确保能看到地上的物品
+        MovementController.setLookDirection(player, yaw, 30.0f);
+
+        pressForward = true;
+
+        // 如果前面有坎，自动跳跃
+        if (player.horizontalCollision) {
+            pressJump = true;
         }
     }
 }

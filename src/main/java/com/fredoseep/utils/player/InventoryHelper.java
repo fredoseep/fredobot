@@ -1,17 +1,22 @@
 package com.fredoseep.utils.player;
 
+import net.minecraft.block.Block;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.*;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.tag.BlockTags;
 import net.minecraft.util.math.Box;
 import net.minecraft.world.World;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Predicate;
 
 public class InventoryHelper {
+    public static Set<Block> anyLogs = new HashSet<>(BlockTags.LOGS.values());
 
     public static boolean hasBoat(PlayerEntity player) {
         if (player == null || player.inventory == null) return false;

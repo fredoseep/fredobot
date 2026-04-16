@@ -10,18 +10,17 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RayTraceContext;
 import net.minecraft.world.World;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.PriorityQueue;
+import java.util.*;
 
 public class MiningHelper {
+    public static List<BlockPos> blockToMine = new ArrayList<>();
+
     /**
      * 计算可行的挖掘视角：避开遮挡，寻找肉眼可见的方块表面。
      * 优先选择最不需要大幅度转头的那个点，防止视角抽搐。
      *
-     * @param player     玩家实体
-     * @param targetPos  当前要挖掘的方块坐标
+     * @param player    玩家实体
+     * @param targetPos 当前要挖掘的方块坐标
      * @return 返回一个 float[]，包含 [0]:目标Yaw, [1]:目标Pitch
      */
     public static float[] getValidMiningAngle(PlayerEntity player, BlockPos targetPos) {
@@ -107,39 +106,90 @@ public class MiningHelper {
 
         return new float[]{bestYaw, bestPitch};
     }
-    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Block targetBlock, int count,int maxRadius) {
-        List<BlockPos> result = new ArrayList<>();
 
-        if (count <= 0) return result;
+    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Set<Block> targetBlocks, int totalCount,int maxRadius) {
+        List<BlockPos> result = new ArrayList<>();
+        if (totalCount <= 0 || targetBlocks == null || targetBlocks.isEmpty()) return result;
 
         World world = player.world;
         BlockPos playerPos = player.getBlockPos();
-
         PriorityQueue<BlockPos> queue = new PriorityQueue<>(
                 Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos))
         );
+
 
         for (int x = -maxRadius; x <= maxRadius; x++) {
             for (int y = -maxRadius; y <= maxRadius; y++) {
                 for (int z = -maxRadius; z <= maxRadius; z++) {
                     BlockPos checkPos = playerPos.add(x, y, z);
 
-                    // 剔除正方体边角，确保是一个完美的球形搜索范围
-                    if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) {
-                        continue;
-                    }
+                    if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) continue;
 
-                    // 如果是目标方块，直接扔进优先队列
-                    if (world.getBlockState(checkPos).getBlock() == targetBlock) {
+                    // 【核心变化】：检查当前方块是否存在于我们的“目标池”中
+                    Block currentBlock = world.getBlockState(checkPos).getBlock();
+                    if (targetBlocks.contains(currentBlock)) {
                         queue.add(checkPos);
                     }
                 }
             }
         }
 
-        // 从优先队列中不断取出“最近的”方块，直到拿够所需数量，或者队列被拿空
-        while (!queue.isEmpty() && result.size() < count) {
+        while (!queue.isEmpty() && result.size() < totalCount) {
             result.add(queue.poll());
+        }
+
+        return result;
+    }
+    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Map<Block, Integer> targetCounts,int maxRadius) {
+        List<BlockPos> result = new ArrayList<>();
+        if (targetCounts == null || targetCounts.isEmpty()) return result;
+
+        // 复制一份配额表（剩余需求表），防止修改外部传入的 Map
+        Map<Block, Integer> remainingCounts = new HashMap<>(targetCounts);
+
+        // 计算我们总共需要找多少个方块，如果总数是 0 直接结束
+        int totalNeeded = remainingCounts.values().stream().mapToInt(Integer::intValue).sum();
+        if (totalNeeded <= 0) return result;
+
+        World world = player.world;
+        BlockPos playerPos = player.getBlockPos();
+        PriorityQueue<BlockPos> queue = new PriorityQueue<>(
+                Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos))
+        );
+
+        // 依然是单次雷达扫描
+        for (int x = -maxRadius; x <= maxRadius; x++) {
+            for (int y = -maxRadius; y <= maxRadius; y++) {
+                for (int z = -maxRadius; z <= maxRadius; z++) {
+                    BlockPos checkPos = playerPos.add(x, y, z);
+
+                    if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) continue;
+
+                    Block currentBlock = world.getBlockState(checkPos).getBlock();
+                    // 只有当这个方块在我们的清单里，我们才把它塞进队列
+                    if (remainingCounts.containsKey(currentBlock)) {
+                        queue.add(checkPos);
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 【核心分配逻辑】：按距离从小到大拿取，并检查各个方块的“配额”
+        // ==========================================
+        while (!queue.isEmpty() && totalNeeded > 0) {
+            BlockPos pos = queue.poll();
+            Block block = world.getBlockState(pos).getBlock();
+
+            // 检查这个方块我们还需要多少个
+            int needed = remainingCounts.getOrDefault(block, 0);
+
+            if (needed > 0) {
+                result.add(pos); // 确实还需要，加入结果！
+                remainingCounts.put(block, needed - 1); // 这种方块的配额 -1
+                totalNeeded--; // 总需求 -1
+            }
+            // 如果 needed 已经是 0 了，说明这种方块找够了，直接丢弃（循环进入下一次），继续找别的。
         }
 
         return result;
