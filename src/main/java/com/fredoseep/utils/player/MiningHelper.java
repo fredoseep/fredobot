@@ -1,12 +1,14 @@
 package com.fredoseep.utils.player;
 
 import net.minecraft.block.Block;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
 import net.minecraft.world.RayTraceContext;
 import net.minecraft.world.World;
 
@@ -193,5 +195,38 @@ public class MiningHelper {
         }
 
         return result;
+    }
+    /**
+     * 辅助方法：以玩家为中心，快速扫描四周，找到绝对意义上的“陆地表面”
+     */
+    public static BlockPos findNearestLand(PlayerEntity player) {
+        net.minecraft.world.World world = MinecraftClient.getInstance().world;
+        BlockPos pPos = player.getBlockPos();
+
+        for (int r = 1; r <= 60; r++) {
+            for (int x = -r; x <= r; x++) {
+                for (int z = -r; z <= r; z++) {
+                    if (Math.abs(x) != r && Math.abs(z) != r) continue;
+
+                    int targetX = pPos.getX() + x;
+                    int targetZ = pPos.getZ() + z;
+
+                    if (!world.getChunkManager().isChunkLoaded(targetX >> 4, targetZ >> 4)) {
+                        continue;
+                    }
+
+                    BlockPos checkPos = new BlockPos(targetX, 0, targetZ);
+
+                    // 【极速优化】：直接读取原版的高度图（Heightmap），瞬间找到该坐标最顶层的方块
+                    BlockPos topPos = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, checkPos).down();
+
+                    // 只要这个群系最高处的方块不是水，那它就是露天的沙滩/草地/石头！
+                    if (!world.getBlockState(topPos).getMaterial().isLiquid()) {
+                        return topPos; // 找到陆地，返回目标坐标
+                    }
+                }
+            }
+        }
+        return null;
     }
 }

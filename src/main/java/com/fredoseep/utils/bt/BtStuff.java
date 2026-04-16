@@ -30,7 +30,7 @@ public class BtStuff {
         int maxY = Math.min(255, pY + 40);
         int minY = Math.max(0, pY - 15);
 
-        for (int r = 0; r <= 200; r++) {
+        for (int r = 0; r <= 100; r++) {
             for (int x = -r; x <= r; x++) {
                 for (int z = -r; z <= r; z++) {
                     if (Math.abs(x) != r && Math.abs(z) != r) continue;
@@ -65,28 +65,18 @@ public class BtStuff {
                                     BlockPos candidate = prioritizedCandidates[i];
                                     BlockState candidateState = world.getBlockState(candidate);
 
-                                    // 1. 防哑炮/销毁保护：过滤水和岩浆
                                     if (candidateState.getMaterial().isLiquid()) {
                                         continue;
                                     }
-
-                                    // ==========================================
-                                    // 【新增：开局无工具防卡死保护】
-                                    // 目标位置必须是空气、树叶，或者是可以被瞬间破坏/替换的植物！
-                                    // getHardness == 0.0f 完美涵盖了小花、蘑菇、红石线等瞬间掉落的方块。
-                                    // ==========================================
                                     boolean canPlaceWithoutTools =
                                             candidateState.isAir() ||
                                                     candidateState.isIn(BlockTags.LEAVES) ||
                                                     candidateState.getMaterial().isReplaceable() ||
                                                     candidateState.getHardness(world, candidate) == 0.0f;
 
-                                    // 如果点位被原木、石头、泥土等占据，徒手挖太慢，直接放弃当前高度！
                                     if (!canPlaceWithoutTools) {
                                         continue;
                                     }
-
-                                    // 只有满足秒放/秒挖条件，才进行产出评估
                                     int yield = evaluateTNTYield(world, candidate);
 
                                     if (yield >= 10) {

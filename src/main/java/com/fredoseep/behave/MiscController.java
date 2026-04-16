@@ -29,7 +29,6 @@ public class MiscController implements IBotModule {
     private float yaw;
     private float pitch;
 
-
     private BoatEntity boatEntity;
     private boolean gotOffBoat = false;
 
@@ -38,38 +37,21 @@ public class MiscController implements IBotModule {
         BACK_FROM_SWIMMING,
         MINE_THE_BLOCK,
         MINE_THE_BLOCK_AND_COLLECT_THE_DROP;
-        // 以后还可以加: EAT_FOOD, THROW_TRASH, etc.
     }
 
-    // ==========================================
-    // 核心状态管理变量
-    // ==========================================
     private MiscType currentTask = null;
     private BlockPos targetPos = null;
 
-    // ==========================================
-    // 外部调用接口
-    // ==========================================
-
-    /**
-     * 接收并开始一个新的杂项任务
-     */
     public void startTask(MiscType type, BlockPos pos) {
         this.currentTask = type;
         this.targetPos = pos;
         System.out.println("FredoBot: 开始杂项任务 -> " + type.name());
     }
 
-    /**
-     * 判断当前是否有杂项任务正在进行中
-     */
     public boolean isBusy() {
         return currentTask != null;
     }
 
-    /**
-     * 强制清空当前任务并释放按键
-     */
     public void stopTask() {
         this.currentTask = null;
         this.targetPos = null;
@@ -78,38 +60,22 @@ public class MiscController implements IBotModule {
         resetKeys();
     }
 
-    // ==========================================
-    // 生命周期与 Tick 循环
-    // ==========================================
+    @Override
+    public void onEnable() { stopTask(); }
 
     @Override
-    public void onEnable() {
-        stopTask();
-    }
+    public void onDisable() { stopTask(); }
 
     @Override
-    public void onDisable() {
-        stopTask();
-    }
+    public String getName() { return "Misc_Controller"; }
 
     @Override
-    public String getName() {
-        return "Misc_Controller";
-    }
-
-    @Override
-    public int getPriority() {
-        return 1; // 极高优先级，确保它能第一时间抢占控制权
-    }
+    public int getPriority() { return 50; }
 
     @Override
     public void onTick(MinecraftClient client, PlayerEntity player) {
-        // 如果当前没有任务，直接返回，不干扰其他控制器的按键
-        if (currentTask == null) {
-            return;
-        }
+        if (currentTask == null) return;
 
-        // 默认每帧重置攻击键，避免死锁
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
 
         switch (currentTask) {
@@ -119,23 +85,22 @@ public class MiscController implements IBotModule {
                     break;
                 }
 
-                // 1. 检查完成条件：如果头顶的方块已经被挖成空气了，任务结束！
                 if (client.world.getBlockState(targetPos).isAir()) {
                     System.out.println("FredoBot: 头顶方块清理完毕！");
                     stopTask();
                     pathExecutor.resume();
-                    return; // 结束这一帧
+                    return;
                 }
 
-                // 2. 持续执行动作：算视角、切工具、转头
                 prepareMineBlockAboveHead(player, targetPos);
 
-                // 3. 只有当准星精确对准了目标方块，才按下左键！(容差 2.0 度)
-                if (Math.abs(MathHelper.wrapDegrees(player.yaw - yaw)) < 2.0f &&
-                        Math.abs(player.pitch - pitch) < 2.0f) {
-                    pressAttack = true;
+                // 【已修改】：直接发包挖掘头顶方块，无视准星精准度
+                client.interactionManager.updateBlockBreakingProgress(targetPos, net.minecraft.util.math.Direction.DOWN);
+                if (!player.handSwinging) {
+                    player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 }
                 break;
+
             case BACK_FROM_SWIMMING:
                 if (PlayerHelper.isDrivingBoat(player)) {
                     boatEntity = (BoatEntity) player.getVehicle();
@@ -159,7 +124,6 @@ public class MiscController implements IBotModule {
                     } else {
                         ItemEntity droppedBoat = InventoryHelper.findNearestDroppedItem(player, 8.0, net.minecraft.item.BoatItem.class);
                         if (droppedBoat != null) {
-                            // 【优化】：直接调用提炼好的走向实体方法
                             walkTowardsEntity(player, droppedBoat);
                         } else {
                             System.out.println("FredoBot: 掉落的船丢失，放弃拾取！");
@@ -178,71 +142,68 @@ public class MiscController implements IBotModule {
                     } else {
                         System.out.println("FredoBot: 成功登陆目标海岸，恢复寻路！");
                         stopTask();
-                        // 假设你的 PathExecutor 有 resume() 方法，没有的话删掉这行即可
-                        // pathExecutor.resume();
+                        pathExecutor.resume();
                     }
                 }
                 break;
+
             case MINE_THE_BLOCK:
-                if(pathExecutor.isBusy())break;
+                if(pathExecutor.isBusy()) break;
                 if(MiningHelper.blockToMine.isEmpty()){
-                    BotEngine.getInstance().getModule(MiscController.class).stopTask();
+                    stopTask();
                     break;
                 }
-                pathExecutor.setGoal(MiningHelper.blockToMine.getFirst());
-                MiningHelper.blockToMine.removeFirst();
+                pathExecutor.setGoal(MiningHelper.blockToMine.get(0));
+                MiningHelper.blockToMine.remove(0);
                 break;
+
             case MINE_THE_BLOCK_AND_COLLECT_THE_DROP:
                 if (targetPos == null || client.world == null) {
                     stopTask();
                     break;
                 }
 
-                // 判断目标方块是否已经被挖掉（变成了空气/液体）
                 boolean isBlockMined = client.world.getBlockState(targetPos).isAir() ||
                         client.world.getBlockState(targetPos).getMaterial().isLiquid();
 
                 if (!isBlockMined) {
-                    // --- 阶段 1：接近并挖掘 ---
                     double distSq = player.squaredDistanceTo(net.minecraft.util.math.Vec3d.ofCenter(targetPos));
-
-                    // 如果距离超过 4 格（距离平方 > 16），需要先寻路过去
-                    if (distSq > 16.0) {
+                    System.out.println("FredobotDebug: current distsq: "+ distSq);
+                    if (distSq > 9.0) {
                         if (!pathExecutor.isBusy()) {
                             pathExecutor.setGoal(targetPos);
                         }
+                        return; // 让出控制权给 PathExecutor
                     } else {
-                        // 足够接近了，停下脚步开始物理挖掘
                         if (pathExecutor.isBusy()) {
                             pathExecutor.stop();
                         }
-
-                        // 计算最佳挖掘视角、切工具并锁定视角
                         float[] angles = MiningHelper.getValidMiningAngle(player, targetPos);
                         yaw = angles[0];
                         pitch = angles[1];
-                        ToolsHelper.equipBestTool(player, targetPos, false);
                         MovementController.setLookDirection(player, yaw, pitch);
+                        ToolsHelper.equipBestTool(player, targetPos, false);
 
-                        // 当准星对准方块时（容差 5 度），按住左键开挖！
-                        if (Math.abs(MathHelper.wrapDegrees(player.yaw - yaw)) < 5.0f &&
-                                Math.abs(player.pitch - pitch) < 5.0f) {
-                            pressAttack = true;
+                        // 【已修改：彻底改用底层发包破坏】
+                        client.interactionManager.updateBlockBreakingProgress(targetPos, net.minecraft.util.math.Direction.UP);
+                        if (!player.handSwinging) {
+                            player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                         }
                     }
                 } else {
-                    // --- 阶段 2：方块已碎，寻找并拾取掉落物 ---
-                    pressAttack = false; // 赶紧松开左键
+                    // 阶段 2：方块已碎，寻找并拾取掉落物
+                    pressAttack = false;
+                    pressForward = false; // 停止挤压
+                    pressJump = false;
+
                     if (pathExecutor.isBusy()) {
                         pathExecutor.stop();
                     }
 
-                    // 在目标方块原来的位置周围 4 格内扫描所有的掉落物实体
                     net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(targetPos).expand(4.0);
                     java.util.List<ItemEntity> drops = client.world.getEntities(ItemEntity.class, searchBox, e -> true);
 
                     if (!drops.isEmpty()) {
-                        // 找出离玩家最近的那一个掉落物
                         ItemEntity nearestDrop = null;
                         double minDist = Double.MAX_VALUE;
                         for (ItemEntity drop : drops) {
@@ -252,29 +213,19 @@ public class MiscController implements IBotModule {
                                 nearestDrop = drop;
                             }
                         }
-
-                        // 调用提炼好的公共方法走过去吃掉它！
                         if (nearestDrop != null) {
                             walkTowardsEntity(player, nearestDrop);
                         }
                     } else {
-                        // 如果周围没有掉落物了，说明已经被我们捡进背包，或者掉进了岩浆被烧毁
                         System.out.println("FredoBot: 方块已挖掘并拾取完毕！");
                         stopTask();
                     }
                 }
                 break;
-
-            // case EAT_FOOD: ...
         }
 
-        // 只有在有任务执行的时候，才真正应用按键
         applyKeys(client);
     }
-
-    // ==========================================
-    // 内部动作方法
-    // ==========================================
 
     public void prepareMineBlockAboveHead(PlayerEntity player, BlockPos extraPos) {
         float[] angles = MiningHelper.getValidMiningAngle(player, extraPos);
@@ -321,17 +272,15 @@ public class MiscController implements IBotModule {
             KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(), false);
         }
     }
+
     private void walkTowardsEntity(PlayerEntity player, net.minecraft.entity.Entity entity) {
         double dx = entity.getX() - player.getX();
         double dz = entity.getZ() - player.getZ();
 
         yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        // 视角对准目标，并稍微低头(30度)确保能看到地上的物品
         MovementController.setLookDirection(player, yaw, 30.0f);
 
         pressForward = true;
-
-        // 如果前面有坎，自动跳跃
         if (player.horizontalCollision) {
             pressJump = true;
         }

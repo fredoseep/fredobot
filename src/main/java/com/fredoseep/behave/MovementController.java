@@ -58,7 +58,7 @@ public class MovementController implements IBotModule {
 
     @Override
     public int getPriority() {
-        return 100;
+        return 40;
     }
 
     @Override
@@ -144,6 +144,7 @@ public class MovementController implements IBotModule {
         if (lastState == SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.SWIMMING) {
             pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING, targetNode.pos);
+            return;
         }
 
 

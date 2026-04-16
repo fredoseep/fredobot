@@ -23,6 +23,8 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -35,6 +37,8 @@ public class GlobalExecutor implements IBotModule {
     private BlockPos TNTSetupPos = null;
     private BlockPos btStandingPos = null;
     private boolean globalInitialized = false;
+    private boolean treeQueueGenerated = false;
+    private boolean tntQueueGenerated = false;
     private static final BlockPos INVALID_BLOCKPOS= new BlockPos(-1,-1,-1);
 
     private int waitTicks = 0;
@@ -188,28 +192,43 @@ public class GlobalExecutor implements IBotModule {
                     if(!BtStuff.evaluateBt(player)){
                         System.out.println("Fredobot: reset because bt staffs are not enough.");
                         resetWorld();
+                        return;
                     }
                     currentState = GlobalState.LOOKING_FOR_TREES;
                     break;
                 }
             case LOOKING_FOR_TREES:
-                if(BotEngine.getInstance().getModule(MiscController.class).isBusy()||pathExecutor.isBusy())break;
-                if(BtStuff.hasTNT){
-                    if(BtStuff.itemsToCraft.contains(Items.STONE_BUTTON)) {
-                        mineAndCollect(player,InventoryHelper.anyLogs,1,100);
+                if(BotEngine.getInstance().getModule(MiscController.class).isBusy() || pathExecutor.isBusy()) {
+                    break;
+                }
+                if (!MiningHelper.blockToMine.isEmpty()) {
+                    dispatchNextMineAndCollectTask();
+                    break;
+                }
+                if (!treeQueueGenerated) {
+                    if(BtStuff.hasTNT){
+                        if(BtStuff.itemsToCraft.contains(Items.STONE_BUTTON)) {
+                            mineAndCollect(player, InventoryHelper.anyLogs, 1, 100);
+                        }
+                    } else {
+                        mineAndCollect(player, InventoryHelper.anyLogs, 2, 100);
                     }
+                    treeQueueGenerated = true;
+                    break;
+                }
+                if (BtStuff.hasTNT) {
+                    if (!tntQueueGenerated&&!pathExecutor.isBusy()) {
                         TNTSetupStaffs(player);
-                }
-                else{
-                    mineAndCollect(player,InventoryHelper.anyLogs,2,100);
-                }
-                if(!(BotEngine.getInstance().getModule(MiscController.class).isBusy()||pathExecutor.isBusy())) {
-                    if(BtStuff.hasTNT) {
-                        lightUpTNT(player);
-                    }
-                    currentState = GlobalState.NEXT;
-                };
 
+                        break;
+                    }
+                    if(pathExecutor.isBusy())break;
+                    lightUpTNT(player);
+                }
+
+                // 5. 完美收工，进入下一个大状态
+                System.out.println("FredoBot [Debug]: 树木/TNT前置任务全部完成，进入 NEXT！");
+                currentState = GlobalState.NEXT;
                 break;
         }
     }
@@ -223,6 +242,7 @@ public class GlobalExecutor implements IBotModule {
         if(MiningHelper.blockToMine.isEmpty()){
             System.out.println("Fredobot: reset because cant find enough blocks");
             resetWorld();
+            return;
         }
         dispatchNextMineAndCollectTask(); // 启动第一个任务
     }
@@ -237,6 +257,7 @@ public class GlobalExecutor implements IBotModule {
         if(MiningHelper.blockToMine.isEmpty()){
             System.out.println("Fredobot: reset because cant find enough blocks");
             resetWorld();
+            return;
         }
         dispatchNextMineAndCollectTask(); // 启动第一个任务
     }
@@ -259,26 +280,56 @@ public class GlobalExecutor implements IBotModule {
         }
     }
 
+
     private void TNTSetupStaffs(PlayerEntity player){
         TNTSetupPos = BtStuff.calTNTSetupPos(player);
         if(TNTSetupPos.equals(INVALID_BLOCKPOS)){
             System.out.println("Fredobot: reset because no place to set up TNT");
             resetWorld();
+            return;
         }
 
-        BlockPos TNTGroundPos = minecraftClient.world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,TNTSetupPos);
-        int neededBlockCount = TNTSetupPos.getY()-TNTGroundPos.getY();
-        if(InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks<neededBlockCount){
-            MiningHelper.blockToMine = MiningHelper.findNearestBlocks(
+        BlockPos TNTGroundPos = minecraftClient.world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, TNTSetupPos);
+        int neededBlockCount = TNTSetupPos.getY() - TNTGroundPos.getY();
+        System.out.println("Fredodeg: neededBlockCount: "+ neededBlockCount);
+
+        if(InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks < neededBlockCount){
+
+            if (player.isTouchingWater() || player.isSwimming()) {
+                System.out.println("FredoBot [Debug]: 玩家在水中，优先寻找最近的海岸登陆...");
+                BlockPos landPos = MiningHelper.findNearestLand(player);
+                if (landPos != null) {
+                    pathExecutor.setGoal(landPos);
+                } else {
+                    System.out.println("FredoBot [Debug]: 方圆 60 格内找不到海岸，重置！");
+                    resetWorld();
+                }
+                return;
+            }
+            System.out.println("FredoBot [Debug]: 玩家已在陆地，开始锁定目标方块...");
+            MiningHelper.blockToMine.clear();
+            MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(
                     player,
-                    Set.of(Blocks.GRASS_BLOCK, Blocks.SAND, Blocks.GRAVEL),
+                    new java.util.HashSet<>(java.util.Arrays.asList(Blocks.GRASS_BLOCK, Blocks.DIRT, Blocks.SAND, Blocks.GRAVEL)),
                     neededBlockCount,
-                    10
-            );
-            BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.MINE_THE_BLOCK,new BlockPos(-1,-1,-1));
+                    30
+            ));
+
+            if(MiningHelper.blockToMine.size() < neededBlockCount){
+                System.out.println("Fredobot: 即使上岸也找不到足够的垫脚石，重置！");
+                resetWorld();
+                return;
+            }
+
+            tntQueueGenerated = true;
+            dispatchNextMineAndCollectTask();
+        } else {
+            pathExecutor.setGoal(TNTGroundPos);
+            tntQueueGenerated = true;
         }
-        pathExecutor.setGoal(TNTGroundPos);
     }
+
+
 
     private BlockPos findAProperPosThen() {
         BlockPos closeToBtPos = btPos;
@@ -321,6 +372,9 @@ public class GlobalExecutor implements IBotModule {
         debugTick = 0;
         globalInitialized = false;
         BtStuff.reset();
+        treeQueueGenerated = false;
+        tntQueueGenerated = false;
+        MiningHelper.blockToMine.clear();
     }
 
     private void setBtPos() {

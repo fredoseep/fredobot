@@ -35,7 +35,7 @@ public class PathExecutor implements IBotModule {
 
     @Override
     public int getPriority() {
-        return 50;
+        return 40;
     }
 
     @Override
@@ -297,9 +297,11 @@ public class PathExecutor implements IBotModule {
         if (player.hasVehicle()) {
             lowerBody = player.getVehicle().getBoundingBox().expand(0.5, 0.0, 0.5);
         } else if (player.isSwimming() || player.isTouchingWater()) {
-            // 潜水姿态下，原版碰撞箱高度自动变为 0.6
-            lowerBody = player.getBoundingBox().expand(0.2, 0.2, 0.2);
-        } else {
+            net.minecraft.util.math.Box baseBox = player.getBoundingBox().expand(0.2, 0.2, 0.2);
+            net.minecraft.util.math.Vec3d lookDir = player.getRotationVec(1.0F).normalize().multiply(1.2);
+            net.minecraft.util.math.Box headBox = baseBox.offset(lookDir.x, lookDir.y, lookDir.z);
+            lowerBody = baseBox.union(headBox);
+        }else {
             lowerBody = new net.minecraft.util.math.Box(
                     player.getX() - 0.3, player.getY(), player.getZ() - 0.3,
                     player.getX() + 0.3, player.getY() + 0.5, player.getZ() + 0.3
@@ -321,16 +323,9 @@ public class PathExecutor implements IBotModule {
                 expandYDown = 0.5;
                 expandYUp = 0.5;
             } else if (node.state == SimplePathfinder.MovementState.DIVING) {
-                // ==========================================
-                // 【大道至简：超级潜水包围盒】
-                // 彻底抛弃复杂的数学计算，直接回归 AABB 碰撞箱！
-                // XZ 扩展 0.8：允许水平方向有将近 1 格的偏移（防止水流冲刷或视角微晃）。
-                // YDown 和 YUp 扩展 1.5：这把节点的碰撞箱变成了一个高达 4 格的“擎天柱”！
-                // 无论玩家下落速度多快，都不可能在一帧内穿透这个 4 格高的盒子，完美解决 Tick 穿透问题。
-                // ==========================================
-                expandXZ = 0.8;
-                expandYDown = 1.5;
-                expandYUp = 1.5;
+                expandXZ = 0.5;
+                expandYDown = 1.0;
+                expandYUp = 1.0;
             } else if (node.state == SimplePathfinder.MovementState.JUMPING_UP ||
                     node.state == SimplePathfinder.MovementState.JUMPING_AIR ||
                     node.state == SimplePathfinder.MovementState.FALLING) {
@@ -356,6 +351,13 @@ public class PathExecutor implements IBotModule {
             );
             
             boolean isPhysicallyReached = lowerBody.intersects(nodeBox);
+
+            if (i == currentPath.size() - 1) {
+                double dx = player.getX() - (node.pos.getX() + 0.5);
+                double dz = player.getZ() - (node.pos.getZ() + 0.5);
+                double dy = Math.abs(player.getY() - node.pos.getY());
+                isPhysicallyReached = (dx * dx + dz * dz <= 0.12) && (dy <= 1.0);
+            }
 
             if (node.state == SimplePathfinder.MovementState.BUILDING_BRIDGE) {
                 if (world.getBlockState(node.pos.down()).getMaterial().isReplaceable()) {
