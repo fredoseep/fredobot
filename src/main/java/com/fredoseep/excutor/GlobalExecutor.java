@@ -32,19 +32,21 @@ public class GlobalExecutor implements IBotModule {
 
     private final MinecraftClient minecraftClient = MinecraftClient.getInstance();
 
-    private PathExecutor pathExecutor ;
+    private PathExecutor pathExecutor;
     private BlockPos btPos = null;
-    private BlockPos TNTSetupPos = null;
+    public  BlockPos TNTSetupPos = null;
     private BlockPos btStandingPos = null;
     private boolean globalInitialized = false;
     private boolean treeQueueGenerated = false;
     private boolean tntQueueGenerated = false;
-    private static final BlockPos INVALID_BLOCKPOS= new BlockPos(-1,-1,-1);
+    private static final BlockPos INVALID_BLOCKPOS = new BlockPos(-1, -1, -1);
 
     private int waitTicks = 0;
     private int debugTick = 0;
 
     private GlobalState currentState = GlobalState.IDLE;
+
+
 
     @Override
     public void onEnable() {
@@ -58,14 +60,14 @@ public class GlobalExecutor implements IBotModule {
 
     @Override
     public void onTick(MinecraftClient client, PlayerEntity player) {
-        if(minecraftClient.world == null || minecraftClient.player == null) {
+        if (minecraftClient.world == null || minecraftClient.player == null) {
             waitTicks = 0;
             return;
         }
-        if(!globalInitialized)initializeSettings();
+        if (!globalInitialized) initializeSettings();
         pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
 
-        if(currentState.missionOrder<6){
+        if (currentState.missionOrder < 6) {
             btStaff((ClientPlayerEntity) player);
         }
 
@@ -82,10 +84,11 @@ public class GlobalExecutor implements IBotModule {
         globalInitialized = true;
     }
 
-    public enum GlobalState{
-        IDLE(0),GOING_TO_BT_STANDING_PLACE(1),DIGGING_BT(3),LOOTING_BT(4),LOOKING_FOR_TREES(5),NEXT(0x7FFFFFF);
+    public enum GlobalState {
+        IDLE(0), GOING_TO_BT_STANDING_PLACE(1), DIGGING_BT(3), LOOTING_BT(4), LOOKING_FOR_TREES(5), NEXT(0x7FFFFFF);
         private final int missionOrder;
-        GlobalState(int missionOrder){
+
+        GlobalState(int missionOrder) {
             this.missionOrder = missionOrder;
         }
 
@@ -93,7 +96,8 @@ public class GlobalExecutor implements IBotModule {
             return missionOrder;
         }
     }
-    private void btStaff(ClientPlayerEntity player){
+
+    private void btStaff(ClientPlayerEntity player) {
         if (btPos == null) {
             int x = BtPosContext.btXPos;
             int z = BtPosContext.btZPos;
@@ -113,15 +117,13 @@ public class GlobalExecutor implements IBotModule {
                 resetWorld();
                 return;
             }
-            if(btStandingPos == null) {
+            if (btStandingPos == null) {
                 btStandingPos = findAProperPosThen();
                 System.out.println("FredoBot [Debug]: 宝藏已锁定! 目标挖掘站位点计算为 -> " + btStandingPos.toShortString());
             }
         }
 
-        debugTick++;
-
-        switch(currentState){
+        switch (currentState) {
             case IDLE:
                 pathExecutor.setGoal(btStandingPos);
                 currentState = GlobalState.GOING_TO_BT_STANDING_PLACE;
@@ -132,27 +134,19 @@ public class GlobalExecutor implements IBotModule {
                 boolean isNear = PlayerHelper.isNear(player, btStandingPos, 1);
                 boolean isPathBusy = pathExecutor.isBusy();
 
-                if (debugTick % 20 == 0) {
-                    double distSq = player.squaredDistanceTo(Vec3d.ofCenter(btStandingPos));
-                    System.out.printf("FredoBot [Debug]: isNear: %b, isBusy: %b, distanceSquare: %.2f\n", isNear, isPathBusy, distSq);
-                }
 
-                if(isNear && !isPathBusy){
+                if (isNear && !isPathBusy) {
                     System.out.println("FredoBot [Debug]: 状态切换 -> 已抵达站位点，开始暴力挖掘！");
                     currentState = GlobalState.DIGGING_BT;
                 }
                 break;
 
             case DIGGING_BT:
-                if(ChestBlock.isChestBlocked(minecraftClient.world, btPos)){
-                    if (debugTick % 20 == 0) {
-                        System.out.println("FredoBot [Debug]: 正在挖掘... 目标方块: " + btPos.up().toShortString());
-                    }
+                if (ChestBlock.isChestBlocked(minecraftClient.world, btPos)) {
                     ToolsHelper.equipBestTool(player, btPos.up(), false);
                     minecraftClient.interactionManager.updateBlockBreakingProgress(btPos.up(), Direction.UP);
                     player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-                }
-                else{
+                } else {
                     System.out.println("FredoBot [Debug]: 状态切换 -> 障碍物已清空，发送秒开箱子请求！");
                     currentState = GlobalState.LOOTING_BT;
                     BlockHitResult hitResult = new BlockHitResult(
@@ -166,16 +160,14 @@ public class GlobalExecutor implements IBotModule {
                 break;
 
             case LOOTING_BT:
-                if (debugTick % 20 == 0) {
-                    System.out.println("FredoBot [Debug]: 正在等待服务器下发箱子 GUI 同步协议...");
-                }
 
                 if (player.currentScreenHandler instanceof GenericContainerScreenHandler) {
                     int syncId = player.currentScreenHandler.syncId;
                     System.out.println("FredoBot [Debug]: GUI 已就绪，SyncId = " + syncId + "，开始执行毫秒级拿取...");
 
                     for (int slot = 0; slot < 27; slot++) {
-                        if(!InventoryHelper.BtUsefulStaff.isUseful(player.currentScreenHandler.getSlot(slot).getStack())) continue;
+                        if (!InventoryHelper.BtUsefulStaff.isUseful(player.currentScreenHandler.getSlot(slot).getStack()))
+                            continue;
                         if (player.currentScreenHandler.getSlot(slot).hasStack()) {
                             minecraftClient.interactionManager.clickSlot(
                                     syncId,
@@ -189,16 +181,16 @@ public class GlobalExecutor implements IBotModule {
                     player.closeHandledScreen();
                     minecraftClient.openScreen(null);
                     System.out.println("FredoBot [Debug]: 战利品洗劫完毕，关闭界面！");
-                    if(!BtStuff.evaluateBt(player)){
+                    if (!BtStuff.evaluateBt(player)) {
                         System.out.println("Fredobot: reset because bt staffs are not enough.");
                         resetWorld();
                         return;
                     }
-                    currentState = GlobalState.LOOKING_FOR_TREES;
-                    break;
                 }
+                currentState = GlobalState.LOOKING_FOR_TREES;
+                break;
             case LOOKING_FOR_TREES:
-                if(BotEngine.getInstance().getModule(MiscController.class).isBusy() || pathExecutor.isBusy()) {
+                if (BotEngine.getInstance().getModule(MiscController.class).isBusy() || pathExecutor.isBusy()) {
                     break;
                 }
                 if (!MiningHelper.blockToMine.isEmpty()) {
@@ -206,24 +198,39 @@ public class GlobalExecutor implements IBotModule {
                     break;
                 }
                 if (!treeQueueGenerated) {
-                    if(BtStuff.hasTNT){
-                        if(BtStuff.itemsToCraft.contains(Items.STONE_BUTTON)) {
+                    if (BtStuff.hasTNT) {
+                        if (BtStuff.itemsToCraft.contains(Items.STONE_BUTTON)) {
                             mineAndCollect(player, InventoryHelper.anyLogs, 1, 100);
                         }
                     } else {
                         mineAndCollect(player, InventoryHelper.anyLogs, 2, 100);
+                        System.out.println("Fredodebug: get two woods");
                     }
                     treeQueueGenerated = true;
                     break;
                 }
                 if (BtStuff.hasTNT) {
-                    if (!tntQueueGenerated&&!pathExecutor.isBusy()) {
+                    if (!tntQueueGenerated && !pathExecutor.isBusy()) {
                         TNTSetupStaffs(player);
-
                         break;
                     }
-                    if(pathExecutor.isBusy())break;
-                    lightUpTNT(player);
+                    if (pathExecutor.isBusy()) break;
+
+                    double dX = player.getX() - (TNTSetupPos.getX() + 0.5);
+                    double dZ = player.getZ() - (TNTSetupPos.getZ() + 0.5);
+                    double dY = Math.abs(player.getY() - TNTSetupPos.getY());
+                    boolean isCentered = (dX * dX + dZ * dZ <= 0.15) && (dY <= 0.5);
+
+                    if (!isCentered && BtStuff.tntState == BtStuff.TNTState.INIT) {
+                        pathExecutor.setGoal(TNTSetupPos);
+                        break;
+                    }
+
+                    BtStuff.lightUpTNT(player);
+
+                    if (BtStuff.tntState != BtStuff.TNTState.DONE) {
+                        break;
+                    }
                 }
 
                 // 5. 完美收工，进入下一个大状态
@@ -232,15 +239,14 @@ public class GlobalExecutor implements IBotModule {
                 break;
         }
     }
-    private void lightUpTNT(PlayerEntity player){
 
-    }
-    public void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount,int maxRadius) {
+
+    public void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [混合方块] 挖掘拾取队列...");
         MiningHelper.blockToMine.clear(); // 清空上次的残留
-        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetBlocks, totalCount,maxRadius));
-        if(MiningHelper.blockToMine.isEmpty()){
-            System.out.println("Fredobot: reset because cant find enough blocks");
+        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetBlocks, totalCount, maxRadius));
+        if (MiningHelper.blockToMine.isEmpty()) {
+            System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetBlocks.toString());
             resetWorld();
             return;
         }
@@ -250,11 +256,11 @@ public class GlobalExecutor implements IBotModule {
     /**
      * 重载 2：扫描精确配额的方块
      */
-    public void mineAndCollect(PlayerEntity player, java.util.Map<Block, Integer> targetCounts,int maxRadius) {
+    public void mineAndCollect(PlayerEntity player, java.util.Map<Block, Integer> targetCounts, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [精确配额] 挖掘拾取队列...");
         MiningHelper.blockToMine.clear();
-        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetCounts,maxRadius));
-        if(MiningHelper.blockToMine.isEmpty()){
+        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetCounts, maxRadius));
+        if (MiningHelper.blockToMine.isEmpty()) {
             System.out.println("Fredobot: reset because cant find enough blocks");
             resetWorld();
             return;
@@ -281,23 +287,23 @@ public class GlobalExecutor implements IBotModule {
     }
 
 
-    private void TNTSetupStaffs(PlayerEntity player){
+    private void TNTSetupStaffs(PlayerEntity player) {
         TNTSetupPos = BtStuff.calTNTSetupPos(player);
-        if(TNTSetupPos.equals(INVALID_BLOCKPOS)){
+        if (TNTSetupPos.equals(INVALID_BLOCKPOS)) {
             System.out.println("Fredobot: reset because no place to set up TNT");
             resetWorld();
             return;
         }
 
-        BlockPos TNTGroundPos = minecraftClient.world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, TNTSetupPos);
-        int neededBlockCount = TNTSetupPos.getY() - TNTGroundPos.getY();
-        System.out.println("Fredodeg: neededBlockCount: "+ neededBlockCount);
+        int TNTSetupPosY = BtStuff.groundYNoLeavesOrTrees(TNTSetupPos);
+        int neededBlockCount = TNTSetupPos.getY() - TNTSetupPosY - 1;
+        System.out.println("Fredodeg: neededBlockCount: " + neededBlockCount);
 
-        if(InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks < neededBlockCount){
+        if (InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks < neededBlockCount) {
 
             if (player.isTouchingWater() || player.isSwimming()) {
                 System.out.println("FredoBot [Debug]: 玩家在水中，优先寻找最近的海岸登陆...");
-                BlockPos landPos = MiningHelper.findNearestLand(player);
+                BlockPos landPos = MiningHelper.findNearestBlocks(player,new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)) ,1,50).getFirst();
                 if (landPos != null) {
                     pathExecutor.setGoal(landPos);
                 } else {
@@ -310,12 +316,12 @@ public class GlobalExecutor implements IBotModule {
             MiningHelper.blockToMine.clear();
             MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(
                     player,
-                    new java.util.HashSet<>(java.util.Arrays.asList(Blocks.GRASS_BLOCK, Blocks.DIRT, Blocks.SAND, Blocks.GRAVEL)),
+                    new java.util.HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)),
                     neededBlockCount,
                     30
             ));
 
-            if(MiningHelper.blockToMine.size() < neededBlockCount){
+            if (MiningHelper.blockToMine.size() < neededBlockCount) {
                 System.out.println("Fredobot: 即使上岸也找不到足够的垫脚石，重置！");
                 resetWorld();
                 return;
@@ -324,22 +330,20 @@ public class GlobalExecutor implements IBotModule {
             tntQueueGenerated = true;
             dispatchNextMineAndCollectTask();
         } else {
-            pathExecutor.setGoal(TNTGroundPos);
             tntQueueGenerated = true;
         }
     }
 
 
-
     private BlockPos findAProperPosThen() {
         BlockPos closeToBtPos = btPos;
-        for(BlockPos currentPos = btPos;currentPos.getY()<100;currentPos = currentPos.up()){
-            if(minecraftClient.world.getBlockState(currentPos).getMaterial().isLiquid()||minecraftClient.world.getBlockState(currentPos).isAir()){
+        for (BlockPos currentPos = btPos; currentPos.getY() < 100; currentPos = currentPos.up()) {
+            if (minecraftClient.world.getBlockState(currentPos).getMaterial().isLiquid() || minecraftClient.world.getBlockState(currentPos).isAir()) {
                 closeToBtPos = currentPos;
                 break;
             }
         }
-        return  closeToBtPos;
+        return closeToBtPos;
     }
 
     @Override
@@ -357,17 +361,19 @@ public class GlobalExecutor implements IBotModule {
         return false;
     }
 
-    private void resetWorld(){
+    public void resetWorld() {
         resetState();
         BotEngine.getInstance().getModule(PathExecutor.class).stop();
+        pathExecutor.suspendedDestinations.clear();
         BotEngine.getInstance().getModule(MiscController.class).stopTask();
         Atum.scheduleReset();
     }
 
-    private void resetState(){
+    private void resetState() {
         btPos = null;
         btStandingPos = null;
         currentState = GlobalState.IDLE;
+        BlockPos coverPos = null;
         waitTicks = 0;
         debugTick = 0;
         globalInitialized = false;

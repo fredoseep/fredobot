@@ -9,6 +9,7 @@ import com.fredoseep.utils.player.PlayerHelper;
 import com.fredoseep.utils.player.ToolsHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.options.KeyBinding;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
@@ -30,6 +31,7 @@ public class MiscController implements IBotModule {
     private float pitch;
 
     private BoatEntity boatEntity;
+    private int pickupCoolDownTick = 0;
     private boolean gotOffBoat = false;
 
     public enum MiscType {
@@ -41,6 +43,7 @@ public class MiscController implements IBotModule {
 
     private MiscType currentTask = null;
     private BlockPos targetPos = null;
+    public Entity targetEntity = null;
 
     public void startTask(MiscType type, BlockPos pos) {
         this.currentTask = type;
@@ -57,6 +60,8 @@ public class MiscController implements IBotModule {
         this.targetPos = null;
         this.boatEntity = null;
         this.gotOffBoat = false;
+        pickupCoolDownTick = 0;
+        targetEntity = null;
         resetKeys();
     }
 
@@ -120,6 +125,7 @@ public class MiscController implements IBotModule {
                     pressAttack = false;
                     if (InventoryHelper.hasBoat(player)) {
                         System.out.println("FredoBot: 船只回收完毕，准备游向岸边！");
+                        pathExecutor.resumeSuspendedGoal();
                         boatEntity = null;
                     } else {
                         ItemEntity droppedBoat = InventoryHelper.findNearestDroppedItem(player, 8.0, net.minecraft.item.BoatItem.class);
@@ -168,8 +174,7 @@ public class MiscController implements IBotModule {
 
                 if (!isBlockMined) {
                     double distSq = player.squaredDistanceTo(net.minecraft.util.math.Vec3d.ofCenter(targetPos));
-                    System.out.println("FredobotDebug: current distsq: "+ distSq);
-                    if (distSq > 9.0) {
+                    if (distSq > 2.25) {
                         if (!pathExecutor.isBusy()) {
                             pathExecutor.setGoal(targetPos);
                         }
@@ -191,13 +196,16 @@ public class MiscController implements IBotModule {
                         }
                     }
                 } else {
-                    // 阶段 2：方块已碎，寻找并拾取掉落物
+                    if(pickupCoolDownTick<=18){
+                        pickupCoolDownTick++;
+                        return;
+                    }
                     pressAttack = false;
                     pressForward = false; // 停止挤压
                     pressJump = false;
 
                     if (pathExecutor.isBusy()) {
-                        pathExecutor.stop();
+                        return;
                     }
 
                     net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(targetPos).expand(4.0);
@@ -214,10 +222,15 @@ public class MiscController implements IBotModule {
                             }
                         }
                         if (nearestDrop != null) {
+                            // 委派给 PathExecutor，并立刻结束本帧
                             walkTowardsEntity(player, nearestDrop);
+                            return;
                         }
-                    } else {
+                    }else {
                         System.out.println("FredoBot: 方块已挖掘并拾取完毕！");
+                        pickupCoolDownTick = 0;
+                        targetEntity = null;
+                        pathExecutor.resumeSuspendedGoal();
                         stopTask();
                     }
                 }
@@ -273,16 +286,10 @@ public class MiscController implements IBotModule {
         }
     }
 
-    private void walkTowardsEntity(PlayerEntity player, net.minecraft.entity.Entity entity) {
-        double dx = entity.getX() - player.getX();
-        double dz = entity.getZ() - player.getZ();
-
-        yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        MovementController.setLookDirection(player, yaw, 30.0f);
-
-        pressForward = true;
-        if (player.horizontalCollision) {
-            pressJump = true;
-        }
+    private void walkTowardsEntity(PlayerEntity player, Entity entity) {
+        PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+        targetEntity = entity;
+        BlockPos entityBlockPos = entity.getBlockPos();
+        pathExecutor.setTemporaryGoal(new BlockPos(entityBlockPos.getX(),entityBlockPos.getY()+0.5D,entityBlockPos.getZ()), PathExecutor.TempMissionType.GO_TO_ENTITY);
     }
 }

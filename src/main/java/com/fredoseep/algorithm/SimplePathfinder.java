@@ -27,6 +27,7 @@ public class SimplePathfinder {
     public static List<Node> findPath(World world, PlayerEntity player, BlockPos startPos, BlockPos end) {
         long startTime = System.currentTimeMillis();
         InventoryHelper.BlockCounts blockCounts = InventoryHelper.countAvailableBuildingBlocks(player);
+        System.out.println("Fredodebut: availableBlockCounts: " + blockCounts.pillaringBlocks);
 
         int margin = 100;
         int minX = Math.min(startPos.getX(), end.getX()) - margin;
@@ -100,11 +101,17 @@ public class SimplePathfinder {
         List<Node> neighbors = new ArrayList<>();
         Direction[] directions = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
 
-        int remainingBridging = Math.max(0, counts.bridgingBlocks - current.blocksUsed);
-        int remainingPillaring = Math.max(0, counts.pillaringBlocks - current.blocksUsed);
+        // ==========================================
+        // 【核心修复 2】：动态可用方块结算
+        // 抛弃 Math.max() 限制！允许 blocksUsed 变成负数。
+        // 如果预演时挖了 3 个方块，blocksUsed 就是 -3，
+        // 那么 remaining 就会变成 counts - (-3) = counts + 3，越走越多！
+        // ==========================================
+        int remainingBridging = counts.bridgingBlocks - current.blocksUsed;
+        int remainingPillaring = counts.pillaringBlocks - current.blocksUsed;
 
-        boolean isCurrentWater = world.getBlockState(current.pos).getMaterial() == net.minecraft.block.Material.WATER;
-        boolean isStandingOnWater = world.getBlockState(current.pos.down()).getMaterial() == net.minecraft.block.Material.WATER;
+        boolean isCurrentWater = isWaterBlock(world, current.pos);
+        boolean isStandingOnWater = isWaterBlock(world, current.pos.down());
 
         boolean isSimulatedSolidBelow = isSolid(world, current.pos.down())
                 || current.state == MovementState.BUILDING_PILLAR
@@ -117,11 +124,14 @@ public class SimplePathfinder {
                 BlockPos dropPos = current.pos.down(drop);
                 if (!isPassable(world, dropPos) || !isPassable(world, dropPos.up())) break;
 
-                boolean isWaterBelow = world.getBlockState(dropPos.down()).getMaterial() == net.minecraft.block.Material.WATER;
-                if (isSolid(world, dropPos.down()) || isWaterBelow) {
-                    if (!isWaterBelow && drop > 3) {
-                        break;
-                    }
+                if (isWaterBlock(world, dropPos)) {
+                    // 【严格水域】: 空中掉进水里，落地状态必须是 SWIMMING 或 DIVING
+                    boolean nextIsSurface = !isWaterBlock(world, dropPos.up());
+                    MovementState fallState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
+                    neighbors.add(new Node(dropPos, null, current, current.costFromStart + (drop * 0.5), calculateHeuristic(dropPos, end), fallState, current.blocksUsed));
+                    break;
+                } else if (isSolid(world, dropPos.down())) {
+                    if (drop > 3) break;
                     neighbors.add(new Node(dropPos, null, current, current.costFromStart + (drop * 0.5), calculateHeuristic(dropPos, end), MovementState.FALLING, current.blocksUsed));
                     break;
                 }
@@ -129,58 +139,43 @@ public class SimplePathfinder {
             return neighbors;
         }
 
-        // ==========================================
-        // 【核心重构：严格下潜圆柱引擎 (Strict Dive Cylinder)】
-        // 彻底消灭 SWIMMING/DIVING 穿插，绝对禁止贴着海床潜水！
-        // ==========================================
         if (isCurrentWater) {
-            boolean isTargetWater = world.getBlockState(end).getMaterial() == net.minecraft.block.Material.WATER;
+            boolean isTargetWater = isWaterBlock(world, end);
             double dist2D = Math.sqrt(Math.pow(current.pos.getX() - end.getX(), 2) + Math.pow(current.pos.getZ() - end.getZ(), 2));
-            boolean isSurface = !world.getBlockState(current.pos.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
+            boolean isSurface = !isWaterBlock(world, current.pos.up());
 
             Direction[] allDirs = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP, Direction.DOWN};
-
-            // 严格下潜半径：只有距离目标平面 5 格以内，才允许把头扎进水里！
             double diveRadius = 5.0;
 
             for (Direction dir : allDirs) {
                 BlockPos nextPos = current.pos.offset(dir);
-                if (world.getBlockState(nextPos).getMaterial() == net.minecraft.block.Material.WATER) {
-                    boolean nextIsSurface = !world.getBlockState(nextPos.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
+                // 【严格水域】：遗漏的 Material 替换，全部统一为 isWaterBlock
+                if (isWaterBlock(world, nextPos)) {
+                    boolean nextIsSurface = !isWaterBlock(world, nextPos.up());
                     MovementState nextState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
                     double moveCost;
 
                     boolean isHorizontal = (dir == Direction.NORTH || dir == Direction.SOUTH || dir == Direction.EAST || dir == Direction.WEST);
 
                     if (isSurface && nextIsSurface) {
-                        // 1. 水面巡航 (SWIMMING -> SWIMMING)：最常规的赶路方式
                         moveCost = 1.2;
-                    }
-                    else if (isSurface && !nextIsSurface) {
-                        // 2. 准备入水 (SWIMMING -> DIVING)
-                        if (!isTargetWater) moveCost = 9999.0; // 目标在岸上：打死不潜水
-                        else if (dist2D > diveRadius) moveCost = 9999.0; // 目标太远：禁止提前下潜，必须在水面游过去！
-                        else moveCost = 1.2; // 进入黄金圆柱区：允许顺滑入水
-                    }
-                    else if (!isSurface && !nextIsSurface) {
-                        // 3. 深海潜航 (DIVING -> DIVING)
+                    } else if (isSurface && !nextIsSurface) {
+                        if (!isTargetWater) moveCost = 9999.0;
+                        else if (dist2D > diveRadius) moveCost = 9999.0;
+                        else moveCost = 1.2;
+                    } else if (!isSurface && !nextIsSurface) {
                         if (!isTargetWater || dist2D > diveRadius) {
-                            // 处于非法的深海区（比如起点在水下但目标很远）：强制逼出水面
                             if (dir == Direction.UP) moveCost = 1.0;
-                            else moveCost = 9999.0; // 绝对禁止在非法区域继续水平或向下潜水
+                            else moveCost = 9999.0;
                         } else {
-                            // 处于合法的下潜圆柱区内：逼迫直下
-                            if (dir == Direction.DOWN) moveCost = 1.2; // 极度鼓励垂直向下
-                            else if (isHorizontal) moveCost = 4.0; // 【核心拦截】：水下水平移动极其昂贵！彻底杜绝贴着海床平移！
-                            else moveCost = 1.5; // 允许必要的微调上浮
+                            if (dir == Direction.DOWN) moveCost = 1.2;
+                            else if (isHorizontal) moveCost = 4.0;
+                            else moveCost = 1.5;
                         }
-                    }
-                    else {
-                        // 4. 破水而出 (DIVING -> SWIMMING)
-                        moveCost = 1.0; // 永远鼓励回到水面
+                    } else {
+                        moveCost = 1.0;
                     }
 
-                    // 只有代价正常的节点才会被加入队列
                     if (moveCost < 9990.0 && isPassable(world, nextPos) && isPassable(world, nextPos.up())) {
                         neighbors.add(new Node(nextPos, null, current, current.costFromStart + moveCost, calculateHeuristic(nextPos, end), nextState, current.blocksUsed));
                     }
@@ -195,19 +190,23 @@ public class SimplePathfinder {
             BlockPos pillarPos = current.pos.up();
             double dynamicPillarCost = getDynamicCost(remainingPillaring, 1.2, 3.5);
             double totalCost = current.costFromStart + dynamicPillarCost + overheadMineCost;
-            neighbors.add(new Node(pillarPos, headPos, current, totalCost, calculateHeuristic(pillarPos, end), MovementState.BUILDING_PILLAR, current.blocksUsed + 1));
+
+            // 【动态库存】：垂直垫脚会消耗 1 个方块。如果头顶有障碍被挖掉了，就变相获得了 1 个方块，一进一出抵消！
+            int netBlocksUsed = current.blocksUsed + 1;
+            if (!isPassable(world, headPos)) {
+                netBlocksUsed -= 1;
+            }
+            neighbors.add(new Node(pillarPos, headPos, current, totalCost, calculateHeuristic(pillarPos, end), MovementState.BUILDING_PILLAR, netBlocksUsed));
         }
 
         for (Direction dir : directions) {
             BlockPos adjacent = current.pos.offset(dir);
             BlockPos adjacentUp = adjacent.up();
-            boolean isAdjacentWater = world.getBlockState(adjacent).getMaterial() == net.minecraft.block.Material.WATER;
+            boolean isAdjacentWater = isWaterBlock(world, adjacent);
 
-            // 【重要拦截】：如果前面是水域，处理完边缘后直接 continue，防止与上面的全方位水域寻路冲突！
             if (isAdjacentWater) {
                 if (!isCurrentWater) {
-                    // 岸上 -> 扑通跳入水里
-                    boolean nextIsSurface = !world.getBlockState(adjacent.up()).getMaterial().equals(net.minecraft.block.Material.WATER);
+                    boolean nextIsSurface = !isWaterBlock(world, adjacent.up());
                     MovementState nextState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
                     neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.2, calculateHeuristic(adjacent, end), nextState, current.blocksUsed));
                 }
@@ -217,7 +216,15 @@ public class SimplePathfinder {
             if (!isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
                 double mineCost = getMiningCost(world, adjacent) + getMiningCost(world, adjacentUp);
                 if (mineCost < 9999.0) {
-                    neighbors.add(new Node(adjacent, adjacentUp, current, current.costFromStart + 1.0 + mineCost, calculateHeuristic(adjacent, end), MovementState.MINING, current.blocksUsed));
+                    // 【动态库存】：预演挖掘行为。每挖开一个实体方块，大脑就会假定背包里多了一块石头/泥土。
+                    int blocksGained = 0;
+                    if (!isPassable(world, adjacent)) blocksGained++;
+                    if (!isPassable(world, adjacentUp)) blocksGained++;
+
+                    // 用负消耗代表库存的增加！
+                    int nextBlocksUsed = current.blocksUsed - blocksGained;
+
+                    neighbors.add(new Node(adjacent, adjacentUp, current, current.costFromStart + 1.0 + mineCost, calculateHeuristic(adjacent, end), MovementState.MINING, nextBlocksUsed));
                 }
 
                 if (isSolid(world, adjacent) && isPassable(world, adjacentUp) && isPassable(world, adjacent.up(2)) && isPassable(world, current.pos.up(2))) {
@@ -252,8 +259,11 @@ public class SimplePathfinder {
                         BlockPos dropPos = adjacent.down(drop);
                         if (!isPassable(world, dropPos) || !isPassable(world, dropPos.up())) break;
 
-                        if (world.getBlockState(dropPos).getMaterial() == net.minecraft.block.Material.WATER) {
-                            neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.2, calculateHeuristic(dropPos, end), MovementState.SWIMMING, current.blocksUsed));
+                        if (isWaterBlock(world, dropPos)) {
+                            // 【严格水域】: 跨过悬崖掉进水里
+                            boolean nextIsSurface = !isWaterBlock(world, dropPos.up());
+                            MovementState fallState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
+                            neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.2, calculateHeuristic(dropPos, end), fallState, current.blocksUsed));
                             break;
                         } else if (isSolid(world, dropPos.down())) {
                             neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.0 + (drop * 0.5), calculateHeuristic(dropPos, end), MovementState.FALLING, current.blocksUsed));
@@ -265,6 +275,7 @@ public class SimplePathfinder {
                 if (remainingBridging > 0) {
                     BlockPos bridgePos = adjacent;
                     double dynamicBridgeCost = getDynamicCost(remainingBridging, 5.0, 10.0);
+                    // 搭桥消耗 1 个库存
                     neighbors.add(new Node(bridgePos, null, current, current.costFromStart + dynamicBridgeCost, calculateHeuristic(bridgePos, end), MovementState.BUILDING_BRIDGE, current.blocksUsed + 1));
                 }
             }
@@ -301,7 +312,8 @@ public class SimplePathfinder {
     private static boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return false;
-        if (state.getMaterial() == net.minecraft.block.Material.LAVA || state.getMaterial() == net.minecraft.block.Material.WATER) return false;
+        // 【修改这里】：使用万能助手
+        if (state.getMaterial() == net.minecraft.block.Material.LAVA || isWaterBlock(world, pos)) return false;
         if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return false;
 
         return !state.getCollisionShape(world, pos).isEmpty();
@@ -310,7 +322,8 @@ public class SimplePathfinder {
     private static boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return true;
-        if (state.getMaterial() == net.minecraft.block.Material.WATER) return true;
+        // 【修改这里】：使用万能助手
+        if (isWaterBlock(world, pos)) return true;
         if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false;
         if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return true;
 
@@ -355,31 +368,69 @@ public class SimplePathfinder {
     private static List<Node> smoothPath(World world, List<Node> path) {
         if (path == null || path.size() <= 2) return path;
 
+        // ==========================================
+        // 第一步：垂直潜水共线消除 (Vertical Collinear Reduction)
+        // 采用你的神级思路：把垂直方向连续的 DIVING 节点全部压缩，只留头尾！
+        // ==========================================
+        List<Node> verticallySmoothed = new ArrayList<>();
+        verticallySmoothed.add(path.get(0));
+
+        for (int i = 1; i < path.size() - 1; i++) {
+            Node prev = verticallySmoothed.get(verticallySmoothed.size() - 1);
+            Node curr = path.get(i);
+            Node next = path.get(i + 1);
+
+            // 如果连续三个节点都是潜水状态
+            if (prev.state == MovementState.DIVING && curr.state == MovementState.DIVING && next.state == MovementState.DIVING) {
+                // 且它们的 X 和 Z 完全一样（即在同一个垂直柱子上）
+                if (prev.pos.getX() == curr.pos.getX() && curr.pos.getX() == next.pos.getX() &&
+                        prev.pos.getZ() == curr.pos.getZ() && curr.pos.getZ() == next.pos.getZ()) {
+
+                    // 确保它们是沿着同一个方向移动（比如都在往下潜，没有折返）
+                    int dy1 = curr.pos.getY() - prev.pos.getY();
+                    int dy2 = next.pos.getY() - curr.pos.getY();
+
+                    if (dy1 == dy2) {
+                        continue; // 核心：直接跳过这个中间节点，把它“平滑”掉！
+                    }
+                }
+            }
+            verticallySmoothed.add(curr);
+        }
+        verticallySmoothed.add(path.get(path.size() - 1));
+
+        // ==========================================
+        // 第二步：原有的水平方向平滑 (Horizontal Smoothing)
+        // ==========================================
         List<Node> smoothedPath = new ArrayList<>();
-        smoothedPath.add(path.get(0));
+        smoothedPath.add(verticallySmoothed.get(0));
 
         int currentIndex = 0;
-        while (currentIndex < path.size() - 1) {
+        while (currentIndex < verticallySmoothed.size() - 1) {
             int furthestWalkableIndex = currentIndex + 1;
-            int lookAheadLimit = Math.min(currentIndex + 5, path.size());
+            int lookAheadLimit = Math.min(currentIndex + 5, verticallySmoothed.size());
 
             for (int i = currentIndex + 2; i < lookAheadLimit; i++) {
-                if (canWalkStraight(world, path.get(currentIndex), path.get(i))) {
+                if (canWalkStraight(world, verticallySmoothed.get(currentIndex), verticallySmoothed.get(i))) {
                     furthestWalkableIndex = i;
                 } else {
                     break;
                 }
             }
 
-            smoothedPath.add(path.get(furthestWalkableIndex));
+            smoothedPath.add(verticallySmoothed.get(furthestWalkableIndex));
             currentIndex = furthestWalkableIndex;
         }
 
         return smoothedPath;
     }
+    private static boolean isWaterBlock(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.getMaterial() == net.minecraft.block.Material.WATER ||
+                state.getFluidState().isIn(net.minecraft.tag.FluidTags.WATER);
+    }
 
     private static boolean canWalkStraight(World world, Node start, Node end) {
-        // 【平滑扩容】：允许 SWIMMING 和 DIVING 在同一高度层面被拉直平滑
         if ((start.state != MovementState.WALKING && start.state != MovementState.SWIMMING && start.state != MovementState.DIVING) ||
                 (end.state != MovementState.WALKING && end.state != MovementState.SWIMMING && end.state != MovementState.DIVING)) {
             return false;
@@ -401,8 +452,17 @@ public class SimplePathfinder {
                 if (!isPassable(world, checkPos) || !isPassable(world, checkPos.up())) {
                     return false;
                 }
-                if (start.state == MovementState.WALKING && !isSolid(world, checkPos.down())) {
-                    return false;
+
+                boolean isWater = isWaterBlock(world, checkPos);
+
+                // ==========================================
+                // 【核心修复 1】：水陆绝对隔离
+                // ==========================================
+                if (start.state == MovementState.SWIMMING || start.state == MovementState.DIVING) {
+                    if (!isWater) return false; // 游泳的平滑直线上，绝对不允许出现空气和陆地！
+                } else if (start.state == MovementState.WALKING) {
+                    if (isWater) return false; // 走路的平滑直线上，绝对不允许踩过水面！
+                    if (!isSolid(world, checkPos.down())) return false; // 走路必须脚踏实地
                 }
             }
         }

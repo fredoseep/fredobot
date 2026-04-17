@@ -141,14 +141,15 @@ public class MovementController implements IBotModule {
         if (targetNode.state == SimplePathfinder.MovementState.SWIMMING && lastState != SimplePathfinder.MovementState.SWIMMING && !player.isTouchingWater() && !PlayerHelper.isDrivingBoat(player)) {
             targetNode.state = SimplePathfinder.MovementState.WALKING;
         }
-        if (lastState == SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.SWIMMING) {
+        if (lastState == SimplePathfinder.MovementState.SWIMMING && (targetNode.state != SimplePathfinder.MovementState.SWIMMING&&targetNode.state!= SimplePathfinder.MovementState.DIVING)) {
             pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING, targetNode.pos);
             return;
         }
 
 
-        targetPitch = player.pitch;
+        if(targetNode.pos.getY()>player.getY()&&targetNode.state!= SimplePathfinder.MovementState.SWIMMING)targetPitch = -60f;
+        else targetPitch = -2f;
         if (lastState == SimplePathfinder.MovementState.BUILDING_PILLAR && targetNode.state != SimplePathfinder.MovementState.BUILDING_BRIDGE) {
             targetPitch = 0.0F;
         }
@@ -189,6 +190,9 @@ public class MovementController implements IBotModule {
             case WALKING:
                 pressSprint = true;
             case FALLING:
+                if(targetNode.state== SimplePathfinder.MovementState.FALLING){
+                    pressForward = player.isOnGround();
+                }
                 if (MinecraftClient.getInstance().world.getBlockState(targetNode.pos).getBlock() == Blocks.SWEET_BERRY_BUSH) {
                     client.interactionManager.updateBlockBreakingProgress(targetNode.pos, Direction.UP);
                 }
@@ -537,7 +541,8 @@ public class MovementController implements IBotModule {
         if (pathExecutor == null) return false;
         MinecraftClient minecraftClient = MinecraftClient.getInstance();
         if (minecraftClient.world == null) return false;
-        return minecraftClient.world.getBlockState(pathExecutor.getCurrentNode().pos.down()).getMaterial() == Material.WATER;
+        BlockState downState = minecraftClient.world.getBlockState(pathExecutor.getCurrentNode().pos.down());
+        return downState.getMaterial() == Material.WATER || downState.getFluidState().isIn(FluidTags.WATER);
     }
 
     private boolean isBoatingNeeded(PlayerEntity player) {

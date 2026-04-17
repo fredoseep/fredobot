@@ -1,5 +1,6 @@
 package com.fredoseep.utils.player;
 
+import com.fredoseep.utils.bt.BtStuff;
 import net.minecraft.block.Block;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.ItemEntity;
@@ -247,4 +248,119 @@ public class InventoryHelper {
             return isUseful(stack.getItem());
         }
     }
+    public static boolean executeTNTCrafting(PlayerEntity player) {
+        // 注意：你目前的列表里装的是 HEAVY_WEIGHTED_PRESSURE_PLATE
+        boolean needIronPlate = com.fredoseep.utils.bt.BtStuff.itemsToCraft.contains(net.minecraft.item.Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
+        boolean needGoldPlate = com.fredoseep.utils.bt.BtStuff.itemsToCraft.contains(net.minecraft.item.Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
+
+        if (needIronPlate) {
+            if (craftViaRecipe(player, net.minecraft.item.Items.HEAVY_WEIGHTED_PRESSURE_PLATE)) {
+                com.fredoseep.utils.bt.BtStuff.itemsToCraft.remove(net.minecraft.item.Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
+                return true;
+            }
+        } else if (needGoldPlate) {
+            if (craftViaRecipe(player, net.minecraft.item.Items.LIGHT_WEIGHTED_PRESSURE_PLATE)) {
+                com.fredoseep.utils.bt.BtStuff.itemsToCraft.remove(net.minecraft.item.Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
+                return true;
+            }
+        }
+
+        // ====== 动态木板与按钮逻辑 ======
+        net.minecraft.item.Item targetButton = getTargetButtonType(player);
+        net.minecraft.item.Item targetPlanks = getTargetPlankType(targetButton);
+
+        // 如果包里没有这种木板，发包秒搓木板
+        if (findItemSlot(player, targetPlanks) == -1) {
+            craftViaRecipe(player, targetPlanks);
+        }
+
+        // 发包秒搓对应的按钮
+        if (craftViaRecipe(player, targetButton)) {
+            com.fredoseep.utils.bt.BtStuff.itemsToCraft.remove(net.minecraft.item.Items.STONE_BUTTON); // 移除占位符
+            return true;
+        }
+
+        return false;
+    }
+    public static boolean craftViaRecipe(PlayerEntity player, net.minecraft.item.Item targetOutput) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        int syncId = player.playerScreenHandler.syncId; // 自带 2x2 背包的 SyncId 永远是 0
+
+        // 遍历客户端缓存的配方管理器，找到输出目标物品的配方
+        net.minecraft.recipe.Recipe<?> targetRecipe = null;
+        for (net.minecraft.recipe.Recipe<?> recipe : client.world.getRecipeManager().values()) {
+            if (recipe.getOutput().getItem() == targetOutput) {
+                targetRecipe = recipe;
+                break;
+            }
+        }
+
+        if (targetRecipe != null) {
+            // 【发包 1】：调用 Recipe Book 协议，请求服务器自动将材料摆入网格
+            client.interactionManager.clickRecipe(syncId, targetRecipe, false);
+            // 【发包 2】：Shift-Click (QUICK_MOVE) 第 0 格（输出格），瞬间拿走合成产物
+            client.interactionManager.clickSlot(syncId, 0, 0, net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, player);
+            return true;
+        }
+        return false;
+    }
+    // ==========================================
+    // 1. 发送 Search Crafting 请求 (通知服务器摆配方)
+    // ==========================================
+    public static boolean requestSearchCrafting(PlayerEntity player, net.minecraft.item.Item targetOutput) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        int syncId = player.playerScreenHandler.syncId;
+
+        // 遍历配方本寻找目标
+        net.minecraft.recipe.Recipe<?> targetRecipe = null;
+        for (net.minecraft.recipe.Recipe<?> recipe : client.world.getRecipeManager().values()) {
+            if (recipe.getOutput().getItem() == targetOutput) {
+                targetRecipe = recipe;
+                break;
+            }
+        }
+
+        if (targetRecipe != null) {
+            // 纯发包：告诉服务器“我要合成这个，帮我把包里的材料填进 2x2 网格”
+            client.interactionManager.clickRecipe(syncId, targetRecipe, false);
+            return true;
+        }
+        System.out.println("FredoBot [警告]: 客户端未找到该物品的配方或未解锁 -> " + targetOutput.toString());
+        return false;
+    }
+
+    // ==========================================
+    // 2. 拿走成品 (发包拿取)
+    // ==========================================
+    public static void collectCraftingResult(PlayerEntity player) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        int syncId = player.playerScreenHandler.syncId;
+        // Shift-Click 第 0 格（输出格），瞬间拿走合成产物
+        client.interactionManager.clickSlot(syncId, 0, 0, net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, player);
+    }
+
+    // ==========================================
+    // 3. 动态木材嗅探器
+    // ==========================================
+    public static net.minecraft.item.Item getTargetButtonType(PlayerEntity player) {
+        for (int i = 0; i < 36; i++) {
+            net.minecraft.item.Item item = player.inventory.getStack(i).getItem();
+            if (item == net.minecraft.item.Items.SPRUCE_PLANKS || item == net.minecraft.item.Items.SPRUCE_LOG) return net.minecraft.item.Items.SPRUCE_BUTTON;
+            if (item == net.minecraft.item.Items.BIRCH_PLANKS || item == net.minecraft.item.Items.BIRCH_LOG) return net.minecraft.item.Items.BIRCH_BUTTON;
+            if (item == net.minecraft.item.Items.JUNGLE_PLANKS || item == net.minecraft.item.Items.JUNGLE_LOG) return net.minecraft.item.Items.JUNGLE_BUTTON;
+            if (item == net.minecraft.item.Items.ACACIA_PLANKS || item == net.minecraft.item.Items.ACACIA_LOG) return net.minecraft.item.Items.ACACIA_BUTTON;
+            if (item == net.minecraft.item.Items.DARK_OAK_PLANKS || item == net.minecraft.item.Items.DARK_OAK_LOG) return net.minecraft.item.Items.DARK_OAK_BUTTON;
+        }
+        return net.minecraft.item.Items.OAK_BUTTON; // 默认兜底
+    }
+
+    public static net.minecraft.item.Item getTargetPlankType(Item buttonType) {
+        if (buttonType == net.minecraft.item.Items.SPRUCE_BUTTON) return net.minecraft.item.Items.SPRUCE_PLANKS;
+        if (buttonType == net.minecraft.item.Items.BIRCH_BUTTON) return net.minecraft.item.Items.BIRCH_PLANKS;
+        if (buttonType == net.minecraft.item.Items.JUNGLE_BUTTON) return net.minecraft.item.Items.JUNGLE_PLANKS;
+        if (buttonType == net.minecraft.item.Items.ACACIA_BUTTON) return net.minecraft.item.Items.ACACIA_PLANKS;
+        if (buttonType == net.minecraft.item.Items.DARK_OAK_BUTTON) return net.minecraft.item.Items.DARK_OAK_PLANKS;
+        return net.minecraft.item.Items.OAK_PLANKS;
+    }
+
 }

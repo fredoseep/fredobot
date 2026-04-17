@@ -1,5 +1,6 @@
 package com.fredoseep.utils.player;
 
+import com.fredoseep.utils.bt.BtStuff;
 import net.minecraft.block.Block;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
@@ -217,8 +218,8 @@ public class MiningHelper {
 
                     BlockPos checkPos = new BlockPos(targetX, 0, targetZ);
 
-                    // 【极速优化】：直接读取原版的高度图（Heightmap），瞬间找到该坐标最顶层的方块
-                    BlockPos topPos = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, checkPos).down();
+                    BlockPos topPos = new BlockPos(checkPos.getX(),BtStuff.groundYNoLeavesOrTrees(checkPos),checkPos.getZ());
+                    System.out.println("Fredodebug: nearestGroundBlock: "+ topPos.toShortString());
 
                     // 只要这个群系最高处的方块不是水，那它就是露天的沙滩/草地/石头！
                     if (!world.getBlockState(topPos).getMaterial().isLiquid()) {

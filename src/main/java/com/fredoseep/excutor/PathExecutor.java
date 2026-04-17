@@ -2,6 +2,7 @@ package com.fredoseep.excutor;
 
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.behave.IBotModule;
+import com.fredoseep.behave.MiscController;
 import com.fredoseep.behave.MovementController;
 
 import net.minecraft.client.MinecraftClient;
@@ -12,6 +13,7 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
 import java.util.List;
+import java.util.Stack;
 import java.util.concurrent.CompletableFuture;
 
 public class PathExecutor implements IBotModule {
@@ -19,9 +21,11 @@ public class PathExecutor implements IBotModule {
     public enum State {IDLE, CALCULATING, EXECUTING}
 
     private State currentState = State.IDLE;
+    private TempMissionType tempMissionType = TempMissionType.IDLE;
     private List<SimplePathfinder.Node> currentPath = null;
     private int currentPathIndex = 0;
     private BlockPos finalDestination = null;
+    public Stack<BlockPos> suspendedDestinations = new Stack<>();
 
     // 废弃了 nextPath，因为我们将使用无缝拼接流！
     private boolean isCalculatingNext = false;
@@ -51,6 +55,8 @@ public class PathExecutor implements IBotModule {
     @Override
     public void onDisable() {
         stop();
+        this.suspendedDestinations.clear();
+        this.finalDestination = null;
     }
 
     public State getCurrentState() {
@@ -104,15 +110,46 @@ public class PathExecutor implements IBotModule {
     }
 
     public void setGoal(BlockPos destination) {
-        this.finalDestination = destination;
+        this.suspendedDestinations.clear(); // 新任务到来，彻底清空挂起记忆
+        startNewPath(destination);
+    }
+
+    public void setTemporaryGoal(BlockPos tempDestination,TempMissionType type) {
+        tempMissionType = type;
+        if (this.finalDestination != null) {
+            // 将当前的目标压入记忆栈
+            this.suspendedDestinations.push(this.finalDestination);
+            System.out.println("FredoBot: 挂起原目标 -> " + this.finalDestination.toShortString() + "，前往临时目标 -> " + tempDestination.toShortString());
+        }
+        startNewPath(tempDestination);
+    }
+
+    public void resumeSuspendedGoal() {
+        tempMissionType = TempMissionType.IDLE;
+        if (!this.suspendedDestinations.isEmpty()) {
+            BlockPos target = this.suspendedDestinations.pop();
+            System.out.println("FredoBot: 临时任务结束，恢复原目标 -> " + target.toShortString());
+            startNewPath(target);
+        } else {
+            System.out.println("FredoBot: 没有被挂起的任务。");
+        }
+    }
+
+    private void startNewPath(BlockPos dest) {
+        this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
 
         MinecraftClient client = MinecraftClient.getInstance();
-        client.player.sendMessage(new LiteralText("§e[Bot] 发起首次寻路计算..."), false);
+        if (client.player != null) {
+            client.player.sendMessage(new LiteralText("§e[Bot] 发起寻路计算... -> " + dest.toShortString()), false);
+            BlockPos startPos = new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ());
+            recalculatePath(startPos);
+        }
+    }
 
-        BlockPos startPos = new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ());
-        recalculatePath(startPos);
+    public boolean hasSuspendedGoal() {
+        return !this.suspendedDestinations.isEmpty();
     }
 
     public void stop() {
@@ -213,6 +250,10 @@ public class PathExecutor implements IBotModule {
             }
             return;
         }
+        if(tempMissionType == TempMissionType.GO_TO_ENTITY&& BotEngine.getInstance().getModule(MiscController.class).targetEntity==null){
+            player.sendMessage(new LiteralText("§b[Bot] Entity has gone"), false);
+            stop();
+        }
 
         SimplePathfinder.Node targetNode = currentPath.get(currentPathIndex);
         MovementController mc = BotEngine.getInstance().getModule(MovementController.class);
@@ -234,6 +275,9 @@ public class PathExecutor implements IBotModule {
 
         double hToleranceSq = inBoat ? 25.0 : 9.0;
         double vTolerance = 4.0;
+        if (!player.isOnGround() && !player.isTouchingWater() && !player.isSwimming() && !player.hasVehicle()) {
+            vTolerance = 25.0;
+        }
 
         double targetX = currentNode.pos.getX() + 0.5;
         double targetY = currentNode.pos.getY();
@@ -301,7 +345,7 @@ public class PathExecutor implements IBotModule {
             net.minecraft.util.math.Vec3d lookDir = player.getRotationVec(1.0F).normalize().multiply(1.2);
             net.minecraft.util.math.Box headBox = baseBox.offset(lookDir.x, lookDir.y, lookDir.z);
             lowerBody = baseBox.union(headBox);
-        }else {
+        } else {
             lowerBody = new net.minecraft.util.math.Box(
                     player.getX() - 0.3, player.getY(), player.getZ() - 0.3,
                     player.getX() + 0.3, player.getY() + 0.5, player.getZ() + 0.3
@@ -349,14 +393,19 @@ public class PathExecutor implements IBotModule {
                     node.pos.getY() + 1.0 + expandYUp,
                     node.pos.getZ() + 0.75 + expandXZ
             );
-            
+
             boolean isPhysicallyReached = lowerBody.intersects(nodeBox);
 
             if (i == currentPath.size() - 1) {
                 double dx = player.getX() - (node.pos.getX() + 0.5);
                 double dz = player.getZ() - (node.pos.getZ() + 0.5);
                 double dy = Math.abs(player.getY() - node.pos.getY());
-                isPhysicallyReached = (dx * dx + dz * dz <= 0.12) && (dy <= 1.0);
+                // ==========================================
+                // 【核心修复】：将 dy 容差从 1.0 缩小到 0.5！
+                // 逼迫机器人必须真正跳起来并落在这个方块的同一个水平面上，
+                // 绝不允许在方块正下方 1 格处“隔空”完成任务！
+                // ==========================================
+                isPhysicallyReached = (dx * dx + dz * dz <= 0.12) && (dy <= 0.5);
             }
 
             if (node.state == SimplePathfinder.MovementState.BUILDING_BRIDGE) {
@@ -372,6 +421,29 @@ public class PathExecutor implements IBotModule {
 
         if (furthestReachedIndex != -1) {
             currentPathIndex = furthestReachedIndex + 1;
+        } else {
+            boolean inAir = !player.isOnGround() && !player.isTouchingWater() && !player.isSwimming() && !player.hasVehicle();
+
+            if (inAir && player.getVelocity().y < 0) {
+                while (currentPathIndex < currentPath.size()) {
+                    SimplePathfinder.Node node = currentPath.get(currentPathIndex);
+                    if (player.getY() < node.pos.getY() - 0.5) {
+                        if (node.state == SimplePathfinder.MovementState.WALKING ||
+                                node.state == SimplePathfinder.MovementState.FALLING ||
+                                node.state == SimplePathfinder.MovementState.JUMPING_AIR) {
+                            currentPathIndex++;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
     }
+    public enum TempMissionType{
+        IDLE,GO_TO_ENTITY;
+    }
+
 }
