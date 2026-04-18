@@ -426,6 +426,32 @@ public class MovementController implements IBotModule {
                 }
                 break;
         }
+        boolean isLastNode = (currentIndex == nodeList.size() - 1);
+        boolean isNormalWalk = (targetNode.state == SimplePathfinder.MovementState.WALKING || targetNode.state == SimplePathfinder.MovementState.FALLING);
+
+        if (isLastNode && isNormalWalk) {
+            if (distSq < 0.6) { // 已经踏入最终方块的领地
+                pressSprint = false; // 禁用奔跑，防止惯性冲过头
+                pressJump = false;   // 禁用跳跃，防止乱飞
+                targetPitch = 45f;   // 稍微低头，稳定视角
+
+                if (distSq > 0.03) { // 还没完美居中 (容差 0.03，与 PathExecutor 严格对齐)
+                    if (Math.abs(MathHelper.wrapDegrees(player.yaw - targetYaw)) < 5.0f) {
+                        aimStabilizationTicks++;
+                        if (aimStabilizationTicks >= 2) {
+                            pressForward = true; // 视角稳定，往前蹭一步
+                        } else {
+                            pressForward = false; // 视角还在转，先刹车
+                        }
+                    } else {
+                        aimStabilizationTicks = 0;
+                        pressForward = false; // 视角偏了，立刻刹车转头
+                    }
+                } else {
+                    pressForward = false; // 已经完美踩在正中心，停止移动！
+                }
+            }
+        }
 
         if (!player.isOnGround() && targetNode.state != SimplePathfinder.MovementState.JUMPING_AIR && targetNode.state != SimplePathfinder.MovementState.SWIMMING&&targetNode.state!= SimplePathfinder.MovementState.DIVING)
             pressSprint = false;
@@ -583,6 +609,15 @@ public class MovementController implements IBotModule {
             if (!player.inventory.main.get(i).isEmpty()) {
                 if (InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem()) != null) {
                     player.inventory.selectedSlot = i;
+                    return true;
+                }
+            }
+        }
+        for (int i = 9; i < 36; i++) {
+            if (!player.inventory.main.get(i).isEmpty()) {
+                if (InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem()) != null) {
+                    MinecraftClient.getInstance().interactionManager.clickSlot(0, i, 5, net.minecraft.screen.slot.SlotActionType.SWAP, player);
+                    player.inventory.selectedSlot = 5;
                     return true;
                 }
             }

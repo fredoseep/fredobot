@@ -1,5 +1,8 @@
 package com.fredoseep.utils.player;
 
+import com.fredoseep.behave.MiscController;
+import com.fredoseep.excutor.BotEngine;
+import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.utils.bt.BtStuff;
 import net.minecraft.block.Block;
 import net.minecraft.client.MinecraftClient;
@@ -197,37 +200,51 @@ public class MiningHelper {
 
         return result;
     }
-    /**
-     * 辅助方法：以玩家为中心，快速扫描四周，找到绝对意义上的“陆地表面”
-     */
-    public static BlockPos findNearestLand(PlayerEntity player) {
-        net.minecraft.world.World world = MinecraftClient.getInstance().world;
-        BlockPos pPos = player.getBlockPos();
 
-        for (int r = 1; r <= 60; r++) {
-            for (int x = -r; x <= r; x++) {
-                for (int z = -r; z <= r; z++) {
-                    if (Math.abs(x) != r && Math.abs(z) != r) continue;
 
-                    int targetX = pPos.getX() + x;
-                    int targetZ = pPos.getZ() + z;
-
-                    if (!world.getChunkManager().isChunkLoaded(targetX >> 4, targetZ >> 4)) {
-                        continue;
-                    }
-
-                    BlockPos checkPos = new BlockPos(targetX, 0, targetZ);
-
-                    BlockPos topPos = new BlockPos(checkPos.getX(),BtStuff.groundYNoLeavesOrTrees(checkPos),checkPos.getZ());
-                    System.out.println("Fredodebug: nearestGroundBlock: "+ topPos.toShortString());
-
-                    // 只要这个群系最高处的方块不是水，那它就是露天的沙滩/草地/石头！
-                    if (!world.getBlockState(topPos).getMaterial().isLiquid()) {
-                        return topPos; // 找到陆地，返回目标坐标
-                    }
-                }
-            }
+    public static void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
+        System.out.println("FredoBot: 开始扫描并生成 [混合方块] 挖掘拾取队列...");
+        MiningHelper.blockToMine.clear(); // 清空上次的残留
+        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetBlocks, totalCount, maxRadius));
+        if (MiningHelper.blockToMine.isEmpty()) {
+            System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetBlocks.toString());
+            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+            return;
         }
-        return null;
+        dispatchNextMineAndCollectTask(); // 启动第一个任务
     }
+
+    /**
+     * 重载 2：扫描精确配额的方块
+     */
+    public static void mineAndCollect(PlayerEntity player, java.util.Map<Block, Integer> targetCounts, int maxRadius) {
+        System.out.println("FredoBot: 开始扫描并生成 [精确配额] 挖掘拾取队列...");
+        MiningHelper.blockToMine.clear();
+        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetCounts, maxRadius));
+        if (MiningHelper.blockToMine.isEmpty()) {
+            System.out.println("Fredobot: reset because cant find enough blocks");
+            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+            return;
+        }
+        dispatchNextMineAndCollectTask(); // 启动第一个任务
+    }
+
+    /**
+     * 核心派发器：从列表中取出一个方块，丢给 MiscController 执行
+     */
+    public static void dispatchNextMineAndCollectTask() {
+        if (!MiningHelper.blockToMine.isEmpty()) {
+            // 拿出列表里的第一个坐标，并从列表中删掉它
+            BlockPos nextTarget = MiningHelper.blockToMine.remove(0);
+
+            // 启动 MiscController 里的挖+捡一体化分支
+            BotEngine.getInstance().getModule(MiscController.class).startTask(
+                    MiscController.MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP,
+                    nextTarget
+            );
+        } else {
+            System.out.println("FredoBot: 当前挖掘列表已全部执行完毕！");
+        }
+    }
+
 }

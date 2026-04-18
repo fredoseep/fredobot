@@ -248,40 +248,7 @@ public class InventoryHelper {
             return isUseful(stack.getItem());
         }
     }
-    public static boolean executeTNTCrafting(PlayerEntity player) {
-        // 注意：你目前的列表里装的是 HEAVY_WEIGHTED_PRESSURE_PLATE
-        boolean needIronPlate = com.fredoseep.utils.bt.BtStuff.itemsToCraft.contains(net.minecraft.item.Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
-        boolean needGoldPlate = com.fredoseep.utils.bt.BtStuff.itemsToCraft.contains(net.minecraft.item.Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
 
-        if (needIronPlate) {
-            if (craftViaRecipe(player, net.minecraft.item.Items.HEAVY_WEIGHTED_PRESSURE_PLATE)) {
-                com.fredoseep.utils.bt.BtStuff.itemsToCraft.remove(net.minecraft.item.Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
-                return true;
-            }
-        } else if (needGoldPlate) {
-            if (craftViaRecipe(player, net.minecraft.item.Items.LIGHT_WEIGHTED_PRESSURE_PLATE)) {
-                com.fredoseep.utils.bt.BtStuff.itemsToCraft.remove(net.minecraft.item.Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
-                return true;
-            }
-        }
-
-        // ====== 动态木板与按钮逻辑 ======
-        net.minecraft.item.Item targetButton = getTargetButtonType(player);
-        net.minecraft.item.Item targetPlanks = getTargetPlankType(targetButton);
-
-        // 如果包里没有这种木板，发包秒搓木板
-        if (findItemSlot(player, targetPlanks) == -1) {
-            craftViaRecipe(player, targetPlanks);
-        }
-
-        // 发包秒搓对应的按钮
-        if (craftViaRecipe(player, targetButton)) {
-            com.fredoseep.utils.bt.BtStuff.itemsToCraft.remove(net.minecraft.item.Items.STONE_BUTTON); // 移除占位符
-            return true;
-        }
-
-        return false;
-    }
     public static boolean craftViaRecipe(PlayerEntity player, net.minecraft.item.Item targetOutput) {
         MinecraftClient client = MinecraftClient.getInstance();
         int syncId = player.playerScreenHandler.syncId; // 自带 2x2 背包的 SyncId 永远是 0

@@ -24,6 +24,7 @@ import org.lwjgl.system.CallbackI;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public class BtStuff {
     public static boolean hasTNT = false;
@@ -31,6 +32,8 @@ public class BtStuff {
     private static int ironIngotCount = 0;
     private static int goldIngotCount = 0;
     private static int diamondCount = 0;
+    private static Item tempCraftTarget = null;
+    private static Item tempPlankTarget = null;
 
 
     public static final List<Item> itemsToCraft= new ArrayList<>();
@@ -272,6 +275,7 @@ public class BtStuff {
         tntWaitTicks = 0;
         craftingStep = 0;
         craftingWaitTicks = 0;
+        coverPos = null;
     }
     public static void lightUpTNT(PlayerEntity player) {
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
@@ -301,8 +305,7 @@ public class BtStuff {
                 // ==========================================
                 // Search Crafting 异步微操状态机
                 // ==========================================
-                Item tempCraftTarget;
-                Item tempPlankTarget;
+
                 // 如果正在等待服务器处理，直接跳过本 Tick
                 if (craftingWaitTicks > 0) {
                     craftingWaitTicks--;
@@ -333,8 +336,10 @@ public class BtStuff {
                     }
                 }
                 else if (craftingStep == 1) {
-                    if(!InventoryHelper.requestSearchCrafting(player, InventoryHelper.getTargetPlankType(InventoryHelper.getTargetButtonType(player)))){
-                        globalExecutor.resetWorld(); return;
+                    if(!InventoryHelper.requestSearchCrafting(player, InventoryHelper.getTargetPlankType(tempCraftTarget))){
+                        System.out.println("Fredodebug: reset because don't have planks");
+                        globalExecutor.resetWorld();
+                        return;
                     }
                     craftingWaitTicks = 2; // 给服务器 2 tick 延迟摆材料
                     craftingStep = 2;
@@ -346,8 +351,10 @@ public class BtStuff {
                 }
                 else if (craftingStep == 3) {
                     // 第 3 步：请求合成最终触发器 (压力板 或 按钮)
-                    if(!InventoryHelper.requestSearchCrafting(player, InventoryHelper.getTargetButtonType(player))){
-                        globalExecutor.resetWorld(); return;
+                    if(!InventoryHelper.requestSearchCrafting(player, tempCraftTarget)){
+                        System.out.println("Fredodebug: reset because don't have "+tempCraftTarget.toString()+" recepi");
+                        globalExecutor.resetWorld();
+                        return;
                     }
                     craftingWaitTicks = 2; // 再次给服务器 2 tick
                     craftingStep = 4;
@@ -381,6 +388,7 @@ public class BtStuff {
                     // 放置 TNT
                     InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(),player,InventoryHelper.findItemSlot(player,Items.TNT),0);
                     BlockHitResult tntHit = new BlockHitResult(Vec3d.ofCenter(globalExecutor.TNTSetupPos), Direction.UP, globalExecutor.TNTSetupPos.down(), false);
+                    player.inventory.selectedSlot = 0;
                     MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity) player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, tntHit);
 
                     // 选择刚才合成好的触发器
@@ -406,6 +414,7 @@ public class BtStuff {
                     // 在 TNT 正上方放置触发器 (无视实体碰撞箱)
                     BlockPos triggerPos = globalExecutor.TNTSetupPos.up();
                     BlockHitResult triggerHit = new BlockHitResult(Vec3d.ofCenter(triggerPos), Direction.UP, globalExecutor.TNTSetupPos, false);
+                    player.inventory.selectedSlot = 1;
                     MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity) player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, triggerHit);
 
                     // ==========================================
@@ -417,11 +426,14 @@ public class BtStuff {
 
                     System.out.println("FredoBot: Fire in the hole! 开始寻找掩体！");
                     tntState = TNTState.TAKING_COVER_MOVE;
+                    tntWaitTicks = 0;
                 }
                 break;
 
             case TAKING_COVER_MOVE:
-                // 4. 随便往旁边挪一格
+                // 【关键修复 2】：在寻找掩体的过程中，时间照样流逝！
+                tntWaitTicks++;
+
                 if (coverPos == null) {
                     for (Direction dir : new Direction[]{Direction.EAST, Direction.WEST, Direction.NORTH, Direction.SOUTH}) {
                         BlockPos check = globalExecutor.TNTSetupPos.offset(dir);
@@ -430,39 +442,39 @@ public class BtStuff {
                             break;
                         }
                     }
-                    if (coverPos == null) coverPos = globalExecutor.TNTSetupPos.east(); // 绝对兜底
-                    pathExecutor.setGoal(coverPos);
+                    if (coverPos == null) coverPos = globalExecutor.TNTSetupPos.east();
+
+                    System.out.println("Fredodebug: coverpos:"+coverPos.toShortString());
+
+                    // 【强烈建议加回黑名单】：防止它在寻路挖坑的时候，把你刚放的 TNT 给挖了！
+                    Set<BlockPos> blacklist = new java.util.HashSet<>();
+                    blacklist.add(globalExecutor.TNTSetupPos);
+                    blacklist.add(globalExecutor.TNTSetupPos.down());
+                    pathExecutor.setGoal(coverPos.down(2), blacklist);
                 }
 
-                if (!pathExecutor.isBusy() && PlayerHelper.isNear(player, coverPos, 1)) {
-                    tntState = TNTState.TAKING_COVER_DIG;
-                }
-                break;
-
-            case TAKING_COVER_DIG:
-                // 5. 极速往下挖两格，实现半颗心无伤防爆！
-                BlockPos dig1 = coverPos.down();
-                BlockPos dig2 = coverPos.down(2);
-
-                if (! MinecraftClient.getInstance().world.getBlockState(dig1).isAir()) {
-                    ToolsHelper.equipBestTool(player, dig1, false);
-                    player.pitch = 90f;
-                    MinecraftClient.getInstance().interactionManager.updateBlockBreakingProgress(dig1, Direction.UP);
-                    player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-                } else if (! MinecraftClient.getInstance().world.getBlockState(dig2).isAir()) {
-                    ToolsHelper.equipBestTool(player, dig2, false);
-                    player.pitch = 90f;
-                    MinecraftClient.getInstance().interactionManager.updateBlockBreakingProgress(dig2, Direction.UP);
-                    player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-                } else {
-                    // 已成功缩进深坑
-                    tntState = TNTState.WAIT_EXPLOSION;
+                // ==========================================
+                // 【核心修复 3】：绝对时间轴强制打断 (取代 isAir)
+                // 如果掩体挖得太慢，或者被卡住了，只要超过 90 Tick，说明爆炸绝对已经发生了！
+                // ==========================================
+                if (tntWaitTicks > 90) {
+                    System.out.println("FredoBot: 掩体没跑完就炸了（或原方块未破）！直接终止寻路，开始洗劫！");
+                    if (pathExecutor.isBusy()) {
+                        pathExecutor.stop();
+                    }
+                    tntState = TNTState.COLLECT_LOOT;
                     tntWaitTicks = 0;
+                    break;
+                }
+
+                // 如果在爆炸前成功抵达了掩体，就进入安全等待状态
+                if (!pathExecutor.isBusy() && PlayerHelper.isNear(player, coverPos.down(2), 1)) {
+                    System.out.println("FredoBot: 成功缩进掩体，等待核爆...");
+                    tntState = TNTState.WAIT_EXPLOSION;
                 }
                 break;
-
             case WAIT_EXPLOSION:
-                // 6. TNT 原版引信为 80 tick (4秒)，我们稍微等 90 tick 确保彻底炸完
+                // 6. TNT 原版引信为 80 tick (4秒)，我们继续累加时间
                 tntWaitTicks++;
                 if (tntWaitTicks > 90) {
                     System.out.println("FredoBot: 爆炸完毕，出坑洗劫！");
@@ -473,7 +485,7 @@ public class BtStuff {
 
             case COLLECT_LOOT:
                 // 7. 雷达扫除半径 12 格内所有的掉落物，全部喂给 PathExecutor
-                java.util.List<net.minecraft.entity.ItemEntity> drops =  MinecraftClient.getInstance().world.getEntities(
+                List<net.minecraft.entity.ItemEntity> drops =  MinecraftClient.getInstance().world.getEntities(
                         net.minecraft.entity.ItemEntity.class,
                         new net.minecraft.util.math.Box(globalExecutor.TNTSetupPos).expand(12.0),
                         e -> true

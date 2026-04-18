@@ -50,7 +50,11 @@ public class Fredobot implements ModInitializer {
 			}).then(CommandManager.literal("stop").executes(commandContext -> {
 				BotEngine.getInstance().stop();
 				return 1;
-			})));
+			})).then(CommandManager.literal("reset").executes(commandContext -> {
+				BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+				return 1;
+					}))
+			);
 		});
 
 		System.out.println("SpeedrunBot 初始化成功！");

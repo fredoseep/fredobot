@@ -12,7 +12,9 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.Stack;
 import java.util.concurrent.CompletableFuture;
 
@@ -26,6 +28,7 @@ public class PathExecutor implements IBotModule {
     private int currentPathIndex = 0;
     private BlockPos finalDestination = null;
     public Stack<BlockPos> suspendedDestinations = new Stack<>();
+    public Set<BlockPos> currentBlacklist = Collections.emptySet();
 
     // 废弃了 nextPath，因为我们将使用无缝拼接流！
     private boolean isCalculatingNext = false;
@@ -56,6 +59,7 @@ public class PathExecutor implements IBotModule {
     public void onDisable() {
         stop();
         this.suspendedDestinations.clear();
+        this.currentBlacklist.clear();
         this.finalDestination = null;
     }
 
@@ -110,17 +114,33 @@ public class PathExecutor implements IBotModule {
     }
 
     public void setGoal(BlockPos destination) {
-        this.suspendedDestinations.clear(); // 新任务到来，彻底清空挂起记忆
+        setGoal(destination, Collections.emptySet()); // 兼容旧接口
+    }
+
+    // 支持黑名单的 setGoal
+    public void setGoal(BlockPos destination, Set<BlockPos> blacklist) {
+        this.suspendedDestinations.clear();
+        this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
         startNewPath(destination);
     }
 
-    public void setTemporaryGoal(BlockPos tempDestination,TempMissionType type) {
+    // 兼容 MiscController 的无参数临时任务
+    public void setTemporaryGoal(BlockPos tempDestination) {
+        setTemporaryGoal(tempDestination, TempMissionType.IDLE, this.currentBlacklist);
+    }
+
+    public void setTemporaryGoal(BlockPos tempDestination, TempMissionType type) {
+        setTemporaryGoal(tempDestination, type, this.currentBlacklist);
+    }
+
+    // 支持黑名单的 setTemporaryGoal
+    public void setTemporaryGoal(BlockPos tempDestination, TempMissionType type, Set<BlockPos> blacklist) {
         tempMissionType = type;
         if (this.finalDestination != null) {
-            // 将当前的目标压入记忆栈
             this.suspendedDestinations.push(this.finalDestination);
             System.out.println("FredoBot: 挂起原目标 -> " + this.finalDestination.toShortString() + "，前往临时目标 -> " + tempDestination.toShortString());
         }
+        this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
         startNewPath(tempDestination);
     }
 
@@ -165,7 +185,7 @@ public class PathExecutor implements IBotModule {
         MinecraftClient client = MinecraftClient.getInstance();
 
         CompletableFuture.supplyAsync(() -> {
-            return SimplePathfinder.findPath(client.world, client.player, startPos, finalDestination);
+            return SimplePathfinder.findPath(client.world, client.player, startPos, finalDestination, currentBlacklist, 0);
         }).thenAccept(path -> {
             client.execute(() -> {
                 if (path.isEmpty()) {
@@ -185,6 +205,7 @@ public class PathExecutor implements IBotModule {
         if (currentPath == null || currentPath.isEmpty() || isCalculatingNext) return;
 
         BlockPos currentEnd = currentPath.get(currentPath.size() - 1).pos;
+        int blocksUsedSoFar = currentPath.get(currentPath.size() - 1).blocksUsed;
 
         double distX = currentEnd.getX() - finalDestination.getX();
         double distY = currentEnd.getY() - finalDestination.getY();
@@ -195,7 +216,7 @@ public class PathExecutor implements IBotModule {
             MinecraftClient client = MinecraftClient.getInstance();
 
             CompletableFuture.supplyAsync(() -> {
-                return SimplePathfinder.findPath(client.world, client.player, currentEnd, finalDestination);
+                return SimplePathfinder.findPath(client.world, client.player, currentEnd, finalDestination, currentBlacklist, blocksUsedSoFar);
             }).thenAccept(path -> {
                 client.execute(() -> {
                     isCalculatingNext = false;
@@ -405,10 +426,12 @@ public class PathExecutor implements IBotModule {
                 // 逼迫机器人必须真正跳起来并落在这个方块的同一个水平面上，
                 // 绝不允许在方块正下方 1 格处“隔空”完成任务！
                 // ==========================================
+                boolean isWater = node.state == SimplePathfinder.MovementState.SWIMMING || node.state == SimplePathfinder.MovementState.DIVING;
+                double allowedDistSq = isWater ? 0.12 : 0.03;
                 isPhysicallyReached = (dx * dx + dz * dz <= 0.12) && (dy <= 0.5);
             }
 
-            if (node.state == SimplePathfinder.MovementState.BUILDING_BRIDGE) {
+            if (node.state == SimplePathfinder.MovementState.BUILDING_BRIDGE || node.state == SimplePathfinder.MovementState.BUILDING_PILLAR) {
                 if (world.getBlockState(node.pos.down()).getMaterial().isReplaceable()) {
                     isPhysicallyReached = false;
                 }

@@ -190,42 +190,62 @@ public class GlobalExecutor implements IBotModule {
                 currentState = GlobalState.LOOKING_FOR_TREES;
                 break;
             case LOOKING_FOR_TREES:
-                if (BotEngine.getInstance().getModule(MiscController.class).isBusy() || pathExecutor.isBusy()) {
+                // 1. 杂项控制器（挖方块/捡东西）绝对优先，它忙的时候全局挂起
+                if (BotEngine.getInstance().getModule(MiscController.class).isBusy()) {
                     break;
                 }
+
+                // 2. 如果还有没挖完的方块，等待寻路空闲后派发任务
                 if (!MiningHelper.blockToMine.isEmpty()) {
-                    dispatchNextMineAndCollectTask();
+                    if (pathExecutor.isBusy()) break;
+                    MiningHelper.dispatchNextMineAndCollectTask();
                     break;
                 }
+
+                // 3. 生成基础树木任务
                 if (!treeQueueGenerated) {
+                    if (pathExecutor.isBusy()) break;
                     if (BtStuff.hasTNT) {
                         if (BtStuff.itemsToCraft.contains(Items.STONE_BUTTON)) {
-                            mineAndCollect(player, InventoryHelper.anyLogs, 1, 100);
+                            MiningHelper.mineAndCollect(player, InventoryHelper.anyLogs, 1, 100);
                         }
                     } else {
-                        mineAndCollect(player, InventoryHelper.anyLogs, 2, 100);
+                        MiningHelper.mineAndCollect(player, InventoryHelper.anyLogs, 2, 100);
                         System.out.println("Fredodebug: get two woods");
                     }
                     treeQueueGenerated = true;
                     break;
                 }
+
+                // 4. TNT 流水线处理
                 if (BtStuff.hasTNT) {
-                    if (!tntQueueGenerated && !pathExecutor.isBusy()) {
+                    if (!tntQueueGenerated) {
+                        if (pathExecutor.isBusy()) break;
                         TNTSetupStaffs(player);
                         break;
                     }
-                    if (pathExecutor.isBusy()) break;
 
-                    double dX = player.getX() - (TNTSetupPos.getX() + 0.5);
-                    double dZ = player.getZ() - (TNTSetupPos.getZ() + 0.5);
-                    double dY = Math.abs(player.getY() - TNTSetupPos.getY());
-                    boolean isCentered = (dX * dX + dZ * dZ <= 0.15) && (dY <= 0.5);
+                    // 前往 TNT 放置点
+                    if (BtStuff.tntState == BtStuff.TNTState.INIT) {
+                        // 【严苛中心检测】：确保站在正中心，绝不隔空放 TNT！
+                        double dX = player.getX() - (TNTSetupPos.getX() + 0.5);
+                        double dZ = player.getZ() - (TNTSetupPos.getZ() + 0.5);
+                        double dY = Math.abs(player.getY() - TNTSetupPos.getY());
+                        boolean isCentered = (dX * dX + dZ * dZ <= 0.15) && (dY <= 0.5);
 
-                    if (!isCentered && BtStuff.tntState == BtStuff.TNTState.INIT) {
-                        pathExecutor.setGoal(TNTSetupPos);
-                        break;
+                        if (!isCentered) {
+                            if (!pathExecutor.isBusy()) {
+                                pathExecutor.setGoal(TNTSetupPos);
+                            }
+                            break; // 还没走到完美位置，挂起全局循环！
+                        }
                     }
 
+                    // ==========================================
+                    // 【核心修复】：进入核爆微操阶段，拆除所有全局拦截！
+                    // 无论 pathExecutor 是不是在跑路，必须让 lightUpTNT 保持每 Tick 运行，
+                    // 这样里面的秒表 (tntWaitTicks) 才能真实地记录现实时间的流逝！
+                    // ==========================================
                     BtStuff.lightUpTNT(player);
 
                     if (BtStuff.tntState != BtStuff.TNTState.DONE) {
@@ -234,57 +254,15 @@ public class GlobalExecutor implements IBotModule {
                 }
 
                 // 5. 完美收工，进入下一个大状态
-                System.out.println("FredoBot [Debug]: 树木/TNT前置任务全部完成，进入 NEXT！");
-                currentState = GlobalState.NEXT;
+                if (!pathExecutor.isBusy()) {
+                    System.out.println("FredoBot [Debug]: 树木/TNT前置任务全部完成，进入 NEXT！");
+                    currentState = GlobalState.NEXT;
+                }
                 break;
         }
     }
 
 
-    public void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
-        System.out.println("FredoBot: 开始扫描并生成 [混合方块] 挖掘拾取队列...");
-        MiningHelper.blockToMine.clear(); // 清空上次的残留
-        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetBlocks, totalCount, maxRadius));
-        if (MiningHelper.blockToMine.isEmpty()) {
-            System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetBlocks.toString());
-            resetWorld();
-            return;
-        }
-        dispatchNextMineAndCollectTask(); // 启动第一个任务
-    }
-
-    /**
-     * 重载 2：扫描精确配额的方块
-     */
-    public void mineAndCollect(PlayerEntity player, java.util.Map<Block, Integer> targetCounts, int maxRadius) {
-        System.out.println("FredoBot: 开始扫描并生成 [精确配额] 挖掘拾取队列...");
-        MiningHelper.blockToMine.clear();
-        MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetCounts, maxRadius));
-        if (MiningHelper.blockToMine.isEmpty()) {
-            System.out.println("Fredobot: reset because cant find enough blocks");
-            resetWorld();
-            return;
-        }
-        dispatchNextMineAndCollectTask(); // 启动第一个任务
-    }
-
-    /**
-     * 核心派发器：从列表中取出一个方块，丢给 MiscController 执行
-     */
-    private void dispatchNextMineAndCollectTask() {
-        if (!MiningHelper.blockToMine.isEmpty()) {
-            // 拿出列表里的第一个坐标，并从列表中删掉它
-            BlockPos nextTarget = MiningHelper.blockToMine.remove(0);
-
-            // 启动 MiscController 里的挖+捡一体化分支
-            BotEngine.getInstance().getModule(MiscController.class).startTask(
-                    MiscController.MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP,
-                    nextTarget
-            );
-        } else {
-            System.out.println("FredoBot: 当前挖掘列表已全部执行完毕！");
-        }
-    }
 
 
     private void TNTSetupStaffs(PlayerEntity player) {
@@ -328,7 +306,7 @@ public class GlobalExecutor implements IBotModule {
             }
 
             tntQueueGenerated = true;
-            dispatchNextMineAndCollectTask();
+            MiningHelper.dispatchNextMineAndCollectTask();
         } else {
             tntQueueGenerated = true;
         }
@@ -365,6 +343,7 @@ public class GlobalExecutor implements IBotModule {
         resetState();
         BotEngine.getInstance().getModule(PathExecutor.class).stop();
         pathExecutor.suspendedDestinations.clear();
+        pathExecutor.currentBlacklist.clear();
         BotEngine.getInstance().getModule(MiscController.class).stopTask();
         Atum.scheduleReset();
     }

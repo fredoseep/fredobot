@@ -2,7 +2,9 @@ package com.fredoseep.algorithm;
 
 import com.fredoseep.utils.player.InventoryHelper;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.tag.BlockTags;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.World;
@@ -21,11 +23,15 @@ public class SimplePathfinder {
 
     public static List<Node> findPath(World world, PlayerEntity player, BlockPos end) {
         BlockPos start = new BlockPos(player.getX(), player.getY() + 0.2, player.getZ());
-        return findPath(world, player, start, end);
+        return findPath(world, player, start, end, Collections.emptySet()); // 默认无黑名单
     }
 
-    public static List<Node> findPath(World world, PlayerEntity player, BlockPos startPos, BlockPos end) {
-        long startTime = System.currentTimeMillis();
+    public static List<Node> findPath(World world, PlayerEntity player, BlockPos startPos, BlockPos end, Set<BlockPos> blacklist) {
+        return findPath(world, player, startPos, end, blacklist, 0);
+    }
+
+    // 【新增】：带有黑名单参数的终极寻路入口
+    public static List<Node> findPath(World world, PlayerEntity player, BlockPos startPos, BlockPos end, Set<BlockPos> blacklist, int initialBlocksUsed) {        long startTime = System.currentTimeMillis();
         InventoryHelper.BlockCounts blockCounts = InventoryHelper.countAvailableBuildingBlocks(player);
         System.out.println("Fredodebut: availableBlockCounts: " + blockCounts.pillaringBlocks);
 
@@ -38,8 +44,7 @@ public class SimplePathfinder {
         PriorityQueue<Node> openSet = new PriorityQueue<>();
         Map<BlockPos, EnumMap<MovementState, Double>> costSoFar = new HashMap<>();
 
-        Node startNode = new Node(startPos, null, null, 0, calculateHeuristic(startPos, end), MovementState.WALKING, 0);
-        openSet.add(startNode);
+        Node startNode = new Node(startPos, null, null, 0, calculateHeuristic(startPos, end), MovementState.WALKING, initialBlocksUsed);        openSet.add(startNode);
         costSoFar.computeIfAbsent(startPos, k -> new EnumMap<>(MovementState.class)).put(MovementState.WALKING, 0.0);
 
         Node closestNode = startNode;
@@ -56,7 +61,6 @@ public class SimplePathfinder {
 
             nodesEvaluated++;
 
-            // 【白名单更新】：允许机器人在水面或水下安全截断
             if (current.state == MovementState.WALKING || current.state == MovementState.SWIMMING || current.state == MovementState.DIVING) {
                 double horizontalDist = Math.abs(current.pos.getX() - end.getX()) + Math.abs(current.pos.getZ() - end.getZ());
                 if (horizontalDist < minEarlyExitScore) {
@@ -71,7 +75,8 @@ public class SimplePathfinder {
                 return smoothPath(world, reconstructPath(current));
             }
 
-            for (Node neighbor : getNeighbors(world, current, end, blockCounts)) {
+            // 【注意】：将 blacklist 传递给 getNeighbors
+            for (Node neighbor : getNeighbors(world, current, end, blockCounts, blacklist)) {
                 if (neighbor.pos.getX() < minX || neighbor.pos.getX() > maxX ||
                         neighbor.pos.getZ() < minZ || neighbor.pos.getZ() > maxZ) {
                     continue;
@@ -97,8 +102,7 @@ public class SimplePathfinder {
         return minCost + (maxCost - minCost) * scarcityRatio;
     }
 
-    private static List<Node> getNeighbors(World world, Node current, BlockPos end, InventoryHelper.BlockCounts counts) {
-        List<Node> neighbors = new ArrayList<>();
+    private static List<Node> getNeighbors(World world, Node current, BlockPos end, InventoryHelper.BlockCounts counts, Set<BlockPos> blacklist) {        List<Node> neighbors = new ArrayList<>();
         Direction[] directions = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
 
         // ==========================================
@@ -184,8 +188,7 @@ public class SimplePathfinder {
         }
 
         BlockPos headPos = current.pos.up(2);
-        double overheadMineCost = getMiningCost(world, headPos);
-
+        double overheadMineCost = getMiningCost(world, headPos, blacklist);
         if (remainingPillaring > 0 && overheadMineCost < 9999.0 && !isCurrentWater && !isStandingOnWater) {
             BlockPos pillarPos = current.pos.up();
             double dynamicPillarCost = getDynamicCost(remainingPillaring, 1.2, 3.5);
@@ -193,7 +196,7 @@ public class SimplePathfinder {
 
             // 【动态库存】：垂直垫脚会消耗 1 个方块。如果头顶有障碍被挖掉了，就变相获得了 1 个方块，一进一出抵消！
             int netBlocksUsed = current.blocksUsed + 1;
-            if (!isPassable(world, headPos)) {
+            if (yieldsBuildingBlock(world, headPos)) {
                 netBlocksUsed -= 1;
             }
             neighbors.add(new Node(pillarPos, headPos, current, totalCost, calculateHeuristic(pillarPos, end), MovementState.BUILDING_PILLAR, netBlocksUsed));
@@ -214,12 +217,12 @@ public class SimplePathfinder {
             }
 
             if (!isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
-                double mineCost = getMiningCost(world, adjacent) + getMiningCost(world, adjacentUp);
+                double mineCost = getMiningCost(world, adjacent, blacklist) + getMiningCost(world, adjacentUp, blacklist);
                 if (mineCost < 9999.0) {
                     // 【动态库存】：预演挖掘行为。每挖开一个实体方块，大脑就会假定背包里多了一块石头/泥土。
                     int blocksGained = 0;
-                    if (!isPassable(world, adjacent)) blocksGained++;
-                    if (!isPassable(world, adjacentUp)) blocksGained++;
+                    if (yieldsBuildingBlock(world, adjacent)) blocksGained++;
+                    if (yieldsBuildingBlock(world, adjacentUp)) blocksGained++;
 
                     // 用负消耗代表库存的增加！
                     int nextBlocksUsed = current.blocksUsed - blocksGained;
@@ -309,6 +312,15 @@ public class SimplePathfinder {
         return path;
     }
 
+    private static boolean yieldsBuildingBlock(World world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (state.isAir() || state.getMaterial().isLiquid() || state.getMaterial().isReplaceable()) return false;
+        if (state.isIn(BlockTags.LEAVES)) return false;
+        if(state.getBlock().is(Blocks.SNOW))return false;
+
+        return state.getMaterial().isSolid();
+    }
+
     private static boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return false;
@@ -330,13 +342,16 @@ public class SimplePathfinder {
         return state.getCollisionShape(world, pos).isEmpty();
     }
 
-    private static double getMiningCost(World world, BlockPos pos) {
+    private static double getMiningCost(World world, BlockPos pos, Set<BlockPos> blacklist) {
+        // 如果方块在黑名单中，将其挖掘代价设为无限大，寻路器将永远不会尝试去挖它！
+        if (blacklist != null && blacklist.contains(pos)) return 9999.0;
+
         BlockState state = world.getBlockState(pos);
         if (isPassable(world, pos)) return 0.0;
         if (!state.getFluidState().isEmpty()) return 9999.0;
 
         float hardness = state.getHardness(world, pos);
-        if (hardness < 0) return 9999.0;
+        if (hardness < 0) return 9999.0; // 类似基岩不可破坏
         return hardness * 8.0;
     }
 
