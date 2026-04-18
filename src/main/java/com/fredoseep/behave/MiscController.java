@@ -174,7 +174,7 @@ public class MiscController implements IBotModule {
 
                 if (!isBlockMined) {
                     double distSq = player.squaredDistanceTo(net.minecraft.util.math.Vec3d.ofCenter(targetPos));
-                    if (distSq > 2.25) {
+                    if (distSq > 9) {
                         if (!pathExecutor.isBusy()) {
                             pathExecutor.setGoal(targetPos);
                         }

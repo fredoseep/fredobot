@@ -141,14 +141,15 @@ public class MovementController implements IBotModule {
         if (targetNode.state == SimplePathfinder.MovementState.SWIMMING && lastState != SimplePathfinder.MovementState.SWIMMING && !player.isTouchingWater() && !PlayerHelper.isDrivingBoat(player)) {
             targetNode.state = SimplePathfinder.MovementState.WALKING;
         }
-        if (lastState == SimplePathfinder.MovementState.SWIMMING && (targetNode.state != SimplePathfinder.MovementState.SWIMMING&&targetNode.state!= SimplePathfinder.MovementState.DIVING)) {
+        if (lastState == SimplePathfinder.MovementState.SWIMMING && (targetNode.state != SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.DIVING)) {
             pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING, targetNode.pos);
             return;
         }
 
 
-        if(targetNode.pos.getY()>player.getY()&&targetNode.state!= SimplePathfinder.MovementState.SWIMMING)targetPitch = -60f;
+        if (targetNode.pos.getY() > player.getY() && targetNode.state != SimplePathfinder.MovementState.SWIMMING)
+            targetPitch = -60f;
         else targetPitch = -2f;
         if (lastState == SimplePathfinder.MovementState.BUILDING_PILLAR && targetNode.state != SimplePathfinder.MovementState.BUILDING_BRIDGE) {
             targetPitch = 0.0F;
@@ -190,7 +191,7 @@ public class MovementController implements IBotModule {
             case WALKING:
                 pressSprint = true;
             case FALLING:
-                if(targetNode.state== SimplePathfinder.MovementState.FALLING){
+                if (targetNode.state == SimplePathfinder.MovementState.FALLING) {
                     pressForward = player.isOnGround();
                 }
                 if (MinecraftClient.getInstance().world.getBlockState(targetNode.pos).getBlock() == Blocks.SWEET_BERRY_BUSH) {
@@ -409,7 +410,7 @@ public class MovementController implements IBotModule {
                     if (swimStateStabilizationTicks <= 25) {
                         swimStateStabilizationTicks++;
                     } else {
-                        pressJump = player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D;
+                        pressJump = (player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D) || player.getY() < 62;
                     }
                 } else if (!isBoatingNeeded(player) || (!InventoryHelper.hasBoat(player)) && !boatHasBeenPlacedDown) {
                     if (MinecraftClient.getInstance().world != null && (!isWaterDeepEnough() || MinecraftClient.getInstance().world.getBlockState(new BlockPos(player.getX(), player.getY(), player.getZ()).down()).getMaterial() != Material.WATER) || player.getHungerManager().getFoodLevel() <= 6) {
@@ -453,7 +454,7 @@ public class MovementController implements IBotModule {
             }
         }
 
-        if (!player.isOnGround() && targetNode.state != SimplePathfinder.MovementState.JUMPING_AIR && targetNode.state != SimplePathfinder.MovementState.SWIMMING&&targetNode.state!= SimplePathfinder.MovementState.DIVING)
+        if (!player.isOnGround() && targetNode.state != SimplePathfinder.MovementState.JUMPING_AIR && targetNode.state != SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.DIVING)
             pressSprint = false;
         setLookDirection(player, targetYaw, targetPitch);
         lastState = targetNode.state;
@@ -601,28 +602,38 @@ public class MovementController implements IBotModule {
     }
 
     private static boolean selectBuildingBlock(PlayerEntity player) {
-        if (!player.inventory.getMainHandStack().isEmpty() &&
-                InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.getMainHandStack().getItem()) != null) {
+        int bestSlot = -1;
+        int lowestCost = Integer.MAX_VALUE;
+
+        for (int i = 0; i < 36; i++) {
+            if (!player.inventory.main.get(i).isEmpty()) {
+                InventoryHelper.PlaceableBlock block = InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem());
+
+                if (block != null) {
+                    if (block.getCost() < lowestCost) {
+                        lowestCost = block.getCost();
+                        bestSlot = i;
+                    } else if (block.getCost() == lowestCost) {
+                        if (i < 9 && bestSlot >= 9) {
+                            bestSlot = i;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (bestSlot == -1) {
+            return false;
+        }
+
+        if (bestSlot < 9) {
+            player.inventory.selectedSlot = bestSlot;
             return true;
         }
-        for (int i = 0; i < 9; i++) {
-            if (!player.inventory.main.get(i).isEmpty()) {
-                if (InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem()) != null) {
-                    player.inventory.selectedSlot = i;
-                    return true;
-                }
-            }
-        }
-        for (int i = 9; i < 36; i++) {
-            if (!player.inventory.main.get(i).isEmpty()) {
-                if (InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem()) != null) {
-                    MinecraftClient.getInstance().interactionManager.clickSlot(0, i, 5, net.minecraft.screen.slot.SlotActionType.SWAP, player);
-                    player.inventory.selectedSlot = 5;
-                    return true;
-                }
-            }
-        }
-        return false;
+
+        MinecraftClient.getInstance().interactionManager.clickSlot(0, bestSlot, 5, net.minecraft.screen.slot.SlotActionType.SWAP, player);
+        player.inventory.selectedSlot = 5;
+        return true;
     }
 
     public static boolean canPlace(MinecraftClient client, PlayerEntity player, BlockPos targetPos) {

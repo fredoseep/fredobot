@@ -11,6 +11,7 @@ import net.minecraft.tag.BlockTags;
 import net.minecraft.util.math.Box;
 import net.minecraft.world.World;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -69,35 +70,51 @@ public class InventoryHelper {
 
     public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player, int itemInventorySlot, int targetHotbarSlot) {
         if (client.interactionManager == null || player == null) return false;
+
+        // 1. 拦截目标快捷栏越界
         if (targetHotbarSlot < 0 || targetHotbarSlot > 8) {
-            System.out.println("out of targetHotbarSlot range");
+            System.out.println("FredoBot: 目标快捷栏越界 (" + targetHotbarSlot + ")");
             return false;
         }
-        if (itemInventorySlot == targetHotbarSlot) return true;
+
+        // 2. 拦截物品不存在的情况，防止走到最后的 out of range
+        if (itemInventorySlot == -1) {
+            System.out.println("FredoBot: 无法移动物品 -> 背包中未找到该物品 (-1)");
+            return false;
+        }
+
+        // 3. 【核心修复】拦截已经在对应位置的物品（原版 2x2 容器中，快捷栏的偏移量是 36）
+        if (itemInventorySlot == targetHotbarSlot + 36) {
+            return true; // 已经在那里了，直接放行
+        }
+
+        // 4. 合法的全局包裹位置 (9-45 包含主背包、快捷栏和副手)
         if (itemInventorySlot >= 9 && itemInventorySlot <= 45) {
             int syncId = player.currentScreenHandler.syncId;
-            int containerSlot = itemInventorySlot;
             client.interactionManager.clickSlot(
                     syncId,
-                    containerSlot,
-                    targetHotbarSlot,
+                    itemInventorySlot,
+                    targetHotbarSlot, // 发给服务器的 SWAP 目标索引只接受 0~8
                     SlotActionType.SWAP,
                     player
             );
             return true;
         }
-        System.out.println("itemInventorySlot out of range");
+
+        System.out.println("FredoBot: 未知异常，槽位坐标错乱: " + itemInventorySlot);
         return false;
     }
 
-    public static boolean putShovelToHotbar(PlayerEntity player){
+    public static boolean putShovelToHotbar(PlayerEntity player) {
         int shovelSlot = findItemSlot(player, ShovelItem.class);
-        return moveItemToHotbar(MinecraftClient.getInstance(),player,shovelSlot,2);
+        return moveItemToHotbar(MinecraftClient.getInstance(), player, shovelSlot, 2);
     }
+
     public static boolean putAxeToHotbar(PlayerEntity player) {
-        int axeSlot = findItemSlot(player,AxeItem.class);
-        return moveItemToHotbar(MinecraftClient.getInstance(),player,axeSlot,0);
+        int axeSlot = findItemSlot(player, AxeItem.class);
+        return moveItemToHotbar(MinecraftClient.getInstance(), player, axeSlot, 0);
     }
+
     public static ItemEntity findNearestDroppedItem(PlayerEntity player, double searchRadius, Predicate<ItemStack> condition) {
         World world = player.world;
         if (world == null) return null;
@@ -145,22 +162,24 @@ public class InventoryHelper {
         return findNearestDroppedItem(player, searchRadius, stack -> itemClass.isInstance(stack.getItem()));
     }
 
-    // 给垫脚方块增加 isGravity (是否受重力影响) 属性
+
     public enum PlaceableBlock {
-        DIRT(Items.DIRT, false),
-        COBBLESTONE(Items.COBBLESTONE, false),
-        NETHERRACK(Items.NETHERRACK, false),
-        OAK_PLANKS(Items.OAK_PLANKS, false),
-        STONE(Items.STONE, false),
-        SAND(Items.SAND, true),     // 重力方块
-        GRAVEL(Items.GRAVEL, true); // 重力方块
+        DIRT(Items.DIRT, false, 3),            // 泥土最便宜，首选
+        COBBLESTONE(Items.COBBLESTONE, false, 4), // 圆石第二
+        NETHERRACK(Items.NETHERRACK, false, 3),   // 地狱岩第三
+        SAND(Items.SAND, true, 1),             // 沙子/沙砾受重力影响，酌情使用
+        GRAVEL(Items.GRAVEL, true, 2),
+        STONE(Items.STONE, false, 3),         // 烧好的石头比较贵
+        OAK_PLANKS(Items.OAK_PLANKS, false, 20); // 木板最贵，极其不舍得用！
 
         private final Item item;
         private final boolean isGravity;
+        private final int cost; // 【新增】价格属性
 
-        PlaceableBlock(Item item, boolean isGravity) {
+        PlaceableBlock(Item item, boolean isGravity, int cost) {
             this.item = item;
             this.isGravity = isGravity;
+            this.cost = cost;
         }
 
         public Item getItem() {
@@ -169,6 +188,11 @@ public class InventoryHelper {
 
         public boolean isGravity() {
             return isGravity;
+        }
+
+        // 【新增】获取价格的方法
+        public int getCost() {
+            return cost;
         }
 
         public static PlaceableBlock getPlaceable(Item itemToCheck) {
@@ -235,6 +259,7 @@ public class InventoryHelper {
         public Item getItem() {
             return item;
         }
+
         public static boolean isUseful(Item itemToCheck) {
             for (BtUsefulStaff staff : values()) {
                 if (staff.getItem() == itemToCheck) {
@@ -243,91 +268,121 @@ public class InventoryHelper {
             }
             return false;
         }
+
         public static boolean isUseful(ItemStack stack) {
             if (stack == null || stack.isEmpty()) return false;
             return isUseful(stack.getItem());
         }
     }
 
-    public static boolean craftViaRecipe(PlayerEntity player, net.minecraft.item.Item targetOutput) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        int syncId = player.playerScreenHandler.syncId; // 自带 2x2 背包的 SyncId 永远是 0
 
-        // 遍历客户端缓存的配方管理器，找到输出目标物品的配方
-        net.minecraft.recipe.Recipe<?> targetRecipe = null;
-        for (net.minecraft.recipe.Recipe<?> recipe : client.world.getRecipeManager().values()) {
-            if (recipe.getOutput().getItem() == targetOutput) {
-                targetRecipe = recipe;
-                break;
-            }
-        }
-
-        if (targetRecipe != null) {
-            // 【发包 1】：调用 Recipe Book 协议，请求服务器自动将材料摆入网格
-            client.interactionManager.clickRecipe(syncId, targetRecipe, false);
-            // 【发包 2】：Shift-Click (QUICK_MOVE) 第 0 格（输出格），瞬间拿走合成产物
-            client.interactionManager.clickSlot(syncId, 0, 0, net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, player);
-            return true;
-        }
-        return false;
-    }
-    // ==========================================
-    // 1. 发送 Search Crafting 请求 (通知服务器摆配方)
-    // ==========================================
-    public static boolean requestSearchCrafting(PlayerEntity player, net.minecraft.item.Item targetOutput) {
+    public static boolean requestSearchCrafting(PlayerEntity player, net.minecraft.item.Item targetOutput, int times) {
         MinecraftClient client = MinecraftClient.getInstance();
-        int syncId = player.playerScreenHandler.syncId;
+        int syncId = player.currentScreenHandler.syncId;
+        boolean foundAny = false;
 
         // 遍历配方本寻找目标
-        net.minecraft.recipe.Recipe<?> targetRecipe = null;
         for (net.minecraft.recipe.Recipe<?> recipe : client.world.getRecipeManager().values()) {
             if (recipe.getOutput().getItem() == targetOutput) {
-                targetRecipe = recipe;
-                break;
+                foundAny = true;
+
+                // 【核心修复】：不要 break！向服务器发送所有可能产出该物品的配方！
+                // 服务器会自动丢弃缺少材料的配方（比如竹子），只执行有材料的配方（比如木板）
+                if (times == 0) {
+                    client.interactionManager.clickRecipe(syncId, recipe, true);
+                } else {
+                    for (int i = 0; i < times; i++) {
+                        client.interactionManager.clickRecipe(syncId, recipe, false);
+                    }
+                }
             }
         }
 
-        if (targetRecipe != null) {
-            // 纯发包：告诉服务器“我要合成这个，帮我把包里的材料填进 2x2 网格”
-            client.interactionManager.clickRecipe(syncId, targetRecipe, false);
-            return true;
+        if (!foundAny) {
+            System.out.println("FredoBot [警告]: 客户端未找到该物品的任何配方 -> " + targetOutput.toString());
         }
-        System.out.println("FredoBot [警告]: 客户端未找到该物品的配方或未解锁 -> " + targetOutput.toString());
-        return false;
+        return foundAny;
     }
 
-    // ==========================================
-    // 2. 拿走成品 (发包拿取)
-    // ==========================================
     public static void collectCraftingResult(PlayerEntity player) {
         MinecraftClient client = MinecraftClient.getInstance();
-        int syncId = player.playerScreenHandler.syncId;
-        // Shift-Click 第 0 格（输出格），瞬间拿走合成产物
+        int syncId = player.currentScreenHandler.syncId;
         client.interactionManager.clickSlot(syncId, 0, 0, net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, player);
     }
 
-    // ==========================================
-    // 3. 动态木材嗅探器
-    // ==========================================
-    public static net.minecraft.item.Item getTargetButtonType(PlayerEntity player) {
+    public static Item getTargetButtonType(PlayerEntity player) {
         for (int i = 0; i < 36; i++) {
             net.minecraft.item.Item item = player.inventory.getStack(i).getItem();
-            if (item == net.minecraft.item.Items.SPRUCE_PLANKS || item == net.minecraft.item.Items.SPRUCE_LOG) return net.minecraft.item.Items.SPRUCE_BUTTON;
-            if (item == net.minecraft.item.Items.BIRCH_PLANKS || item == net.minecraft.item.Items.BIRCH_LOG) return net.minecraft.item.Items.BIRCH_BUTTON;
-            if (item == net.minecraft.item.Items.JUNGLE_PLANKS || item == net.minecraft.item.Items.JUNGLE_LOG) return net.minecraft.item.Items.JUNGLE_BUTTON;
-            if (item == net.minecraft.item.Items.ACACIA_PLANKS || item == net.minecraft.item.Items.ACACIA_LOG) return net.minecraft.item.Items.ACACIA_BUTTON;
-            if (item == net.minecraft.item.Items.DARK_OAK_PLANKS || item == net.minecraft.item.Items.DARK_OAK_LOG) return net.minecraft.item.Items.DARK_OAK_BUTTON;
+            if (item == Items.SPRUCE_PLANKS || item == Items.SPRUCE_LOG) return Items.SPRUCE_BUTTON;
+            if (item == Items.BIRCH_PLANKS || item == Items.BIRCH_LOG) return Items.BIRCH_BUTTON;
+            if (item == Items.JUNGLE_PLANKS || item == Items.JUNGLE_LOG) return Items.JUNGLE_BUTTON;
+            if (item == Items.ACACIA_PLANKS || item == Items.ACACIA_LOG) return Items.ACACIA_BUTTON;
+            if (item == Items.DARK_OAK_PLANKS || item == Items.DARK_OAK_LOG) return Items.DARK_OAK_BUTTON;
         }
-        return net.minecraft.item.Items.OAK_BUTTON; // 默认兜底
+        return Items.OAK_BUTTON; // 默认兜底 (包含橡木)
     }
 
-    public static net.minecraft.item.Item getTargetPlankType(Item buttonType) {
-        if (buttonType == net.minecraft.item.Items.SPRUCE_BUTTON) return net.minecraft.item.Items.SPRUCE_PLANKS;
-        if (buttonType == net.minecraft.item.Items.BIRCH_BUTTON) return net.minecraft.item.Items.BIRCH_PLANKS;
-        if (buttonType == net.minecraft.item.Items.JUNGLE_BUTTON) return net.minecraft.item.Items.JUNGLE_PLANKS;
-        if (buttonType == net.minecraft.item.Items.ACACIA_BUTTON) return net.minecraft.item.Items.ACACIA_PLANKS;
-        if (buttonType == net.minecraft.item.Items.DARK_OAK_BUTTON) return net.minecraft.item.Items.DARK_OAK_PLANKS;
-        return net.minecraft.item.Items.OAK_PLANKS;
+    public static List<Item> getTargetPlankType(PlayerEntity player) {
+        List<Item> plankType = new ArrayList<>();
+        for (int i = 0; i < 36; i++) {
+            net.minecraft.item.Item item = player.inventory.getStack(i).getItem();
+            if ((item == Items.SPRUCE_PLANKS || item == Items.SPRUCE_LOG || item == Items.SPRUCE_WOOD || item == Items.STRIPPED_SPRUCE_LOG || item == Items.STRIPPED_SPRUCE_WOOD) && !plankType.contains(Items.SPRUCE_PLANKS))
+                plankType.add(Items.SPRUCE_PLANKS);
+            if ((item == Items.BIRCH_PLANKS || item == Items.BIRCH_LOG || item == Items.BIRCH_WOOD || item == Items.STRIPPED_BIRCH_LOG || item == Items.STRIPPED_BIRCH_WOOD) && !plankType.contains(Items.BIRCH_PLANKS))
+                plankType.add(Items.BIRCH_PLANKS);
+            if ((item == Items.JUNGLE_PLANKS || item == Items.JUNGLE_LOG || item == Items.JUNGLE_WOOD || item == Items.STRIPPED_JUNGLE_LOG || item == Items.STRIPPED_JUNGLE_WOOD) && !plankType.contains(Items.JUNGLE_PLANKS))
+                plankType.add(Items.JUNGLE_PLANKS);
+            if ((item == Items.ACACIA_PLANKS || item == Items.ACACIA_LOG || item == Items.ACACIA_WOOD || item == Items.STRIPPED_ACACIA_LOG || item == Items.STRIPPED_ACACIA_WOOD) && !plankType.contains(Items.ACACIA_PLANKS))
+                plankType.add(Items.ACACIA_PLANKS);
+            if ((item == Items.DARK_OAK_PLANKS || item == Items.DARK_OAK_LOG || item == Items.DARK_OAK_WOOD || item == Items.STRIPPED_DARK_OAK_LOG || item == Items.STRIPPED_DARK_OAK_WOOD) && !plankType.contains(Items.DARK_OAK_PLANKS))
+                plankType.add(Items.DARK_OAK_PLANKS);
+            // 【关键补全】：加上最常见的橡木！
+            if ((item == Items.OAK_PLANKS || item == Items.OAK_LOG || item == Items.OAK_WOOD || item == Items.STRIPPED_OAK_LOG || item == Items.STRIPPED_OAK_WOOD) && !plankType.contains(Items.OAK_PLANKS))
+                plankType.add(Items.OAK_PLANKS);
+        }
+        return plankType;
+    }
+    public static List<Item> getPlankTypesToCraftFromLogs(PlayerEntity player) {
+        List<Item> plankTypes = new ArrayList<>();
+        for (int i = 0; i < 36; i++) {
+            Item item = player.inventory.getStack(i).getItem();
+            if ((item == Items.SPRUCE_LOG || item == Items.SPRUCE_WOOD || item == Items.STRIPPED_SPRUCE_LOG || item == Items.STRIPPED_SPRUCE_WOOD) && !plankTypes.contains(Items.SPRUCE_PLANKS))
+                plankTypes.add(Items.SPRUCE_PLANKS);
+            if ((item == Items.BIRCH_LOG || item == Items.BIRCH_WOOD || item == Items.STRIPPED_BIRCH_LOG || item == Items.STRIPPED_BIRCH_WOOD) && !plankTypes.contains(Items.BIRCH_PLANKS))
+                plankTypes.add(Items.BIRCH_PLANKS);
+            if ((item == Items.JUNGLE_LOG || item == Items.JUNGLE_WOOD || item == Items.STRIPPED_JUNGLE_LOG || item == Items.STRIPPED_JUNGLE_WOOD) && !plankTypes.contains(Items.JUNGLE_PLANKS))
+                plankTypes.add(Items.JUNGLE_PLANKS);
+            if ((item == Items.ACACIA_LOG || item == Items.ACACIA_WOOD || item == Items.STRIPPED_ACACIA_LOG || item == Items.STRIPPED_ACACIA_WOOD) && !plankTypes.contains(Items.ACACIA_PLANKS))
+                plankTypes.add(Items.ACACIA_PLANKS);
+            if ((item == Items.DARK_OAK_LOG || item == Items.DARK_OAK_WOOD || item == Items.STRIPPED_DARK_OAK_LOG || item == Items.STRIPPED_DARK_OAK_WOOD) && !plankTypes.contains(Items.DARK_OAK_PLANKS))
+                plankTypes.add(Items.DARK_OAK_PLANKS);
+            if ((item == Items.OAK_LOG || item == Items.OAK_WOOD || item == Items.STRIPPED_OAK_LOG || item == Items.STRIPPED_OAK_WOOD) && !plankTypes.contains(Items.OAK_PLANKS))
+                plankTypes.add(Items.OAK_PLANKS);
+        }
+        return plankTypes;
+    }
+    public static Item getTargetBoatType(PlayerEntity player) {
+        for (int i = 0; i < 36; i++) {
+            Item item = player.inventory.getStack(i).getItem();
+            if (item == Items.SPRUCE_PLANKS) return Items.SPRUCE_BOAT;
+            if (item == Items.BIRCH_PLANKS) return Items.BIRCH_BOAT;
+            if (item == Items.JUNGLE_PLANKS) return Items.JUNGLE_BOAT;
+            if (item == Items.ACACIA_PLANKS) return Items.ACACIA_BOAT;
+            if (item == Items.DARK_OAK_PLANKS) return Items.DARK_OAK_BOAT;
+        }
+        return Items.OAK_BOAT;
+    }
+
+    public static Item getTargetDoorType(PlayerEntity player) {
+        for (int i = 0; i < 36; i++) {
+            Item item = player.inventory.getStack(i).getItem();
+            if (item == Items.SPRUCE_PLANKS) return Items.SPRUCE_DOOR;
+            if (item == Items.BIRCH_PLANKS) return Items.BIRCH_DOOR;
+            if (item == Items.JUNGLE_PLANKS) return Items.JUNGLE_DOOR;
+            if (item == Items.ACACIA_PLANKS) return Items.ACACIA_DOOR;
+            if (item == Items.DARK_OAK_PLANKS) return Items.DARK_OAK_DOOR;
+        }
+        return Items.OAK_DOOR;
     }
 
 }
