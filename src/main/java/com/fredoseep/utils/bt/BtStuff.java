@@ -1,6 +1,7 @@
 package com.fredoseep.utils.bt;
 
 import com.fredoseep.BtPosContext;
+import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
@@ -56,12 +57,21 @@ public class BtStuff {
         INIT, CLEAR_HEAD, CRAFTING, PLACE_TNT_AND_TRIGGER, TAKING_COVER_MOVE, WAIT_EXPLOSION, COLLECT_LOOT, DONE
     }
 
+    public enum BtCraftPhase {
+        CRUSH_LOGS, MAKE_TABLE, PLACE_TABLE, OPEN_TABLE, MAKE_STICKS_1, MAKE_STICKS_2, PROCESS_QUEUE, CHECK_40_PLANKS, GATHER_MISSING_PLANKS, CRUSH_NEW_LOGS, GATHER_MISSING_COBBLE, RETURN_TO_TABLE, OPEN_TABLE_RETURN, BREAK_TABLE, DONE
+    }
+
+    public enum TNTCraftPhase {
+        EVALUATE, CRAFT_PLANKS, CRAFT_TRIGGER, DONE
+    }
+
     public static TNTState tntState = TNTState.INIT;
     private static int tntWaitTicks = 0;
     private static BlockPos coverPos = null;
-    private static int craftingStep = 0;
     private static int craftingWaitTicks = 0;
     public static boolean hasCheckedPlanksForFinalCrafts = false;
+    public static BtCraftPhase btCraftPhase = BtCraftPhase.CRUSH_LOGS;
+    public static TNTCraftPhase tntCraftPhase = TNTCraftPhase.EVALUATE;
 
     public static void reset() {
         hasTNT = false;
@@ -72,7 +82,6 @@ public class BtStuff {
         itemsToCraft.clear();
         tntState = TNTState.INIT;
         tntWaitTicks = 0;
-        craftingStep = 0;
         craftingWaitTicks = 0;
         coverPos = null;
         waitTicks = 0;
@@ -83,6 +92,8 @@ public class BtStuff {
         treeQueueGenerated = false;
         tntQueueGenerated = false;
         hasCheckedPlanksForFinalCrafts = false;
+        btCraftPhase = BtCraftPhase.CRUSH_LOGS;
+        tntCraftPhase = TNTCraftPhase.EVALUATE;
     }
 
     public static int groundYNoLeavesOrTrees(BlockPos checkCol) {
@@ -121,10 +132,7 @@ public class BtStuff {
                     BlockPos surfacePos = new BlockPos(worldX, groundY + 1, worldZ);
                     BlockState surfaceState = world.getBlockState(surfacePos);
 
-                    boolean isSurfaceClear = surfaceState.isAir() ||
-                            surfaceState.isIn(BlockTags.LEAVES) ||
-                            surfaceState.getMaterial().isReplaceable() ||
-                            surfaceState.getHardness(world, surfacePos) == 0.0f;
+                    boolean isSurfaceClear = surfaceState.isAir() || surfaceState.isIn(BlockTags.LEAVES) || surfaceState.getMaterial().isReplaceable() || surfaceState.getHardness(world, surfacePos) == 0.0f;
 
                     if (!isSurfaceClear || surfaceState.getMaterial().isLiquid()) continue;
 
@@ -153,10 +161,7 @@ public class BtStuff {
                     BlockPos candidate = new BlockPos(worldX, targetY, worldZ);
                     BlockState candidateState = world.getBlockState(candidate);
 
-                    boolean canPlaceTNT = candidateState.isAir() ||
-                            candidateState.isIn(BlockTags.LEAVES) ||
-                            candidateState.getMaterial().isReplaceable() ||
-                            candidateState.getHardness(world, candidate) == 0.0f;
+                    boolean canPlaceTNT = candidateState.isAir() || candidateState.isIn(BlockTags.LEAVES) || candidateState.getMaterial().isReplaceable() || candidateState.getHardness(world, candidate) == 0.0f;
 
                     if (!canPlaceTNT || candidateState.getMaterial().isLiquid()) continue;
 
@@ -184,6 +189,7 @@ public class BtStuff {
         TNTSetupPos = calTNTSetupPos(player);
         if (TNTSetupPos.equals(new BlockPos(-1, -1, -1))) {
             BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+            System.out.println("Fredobot: reset because no place to set up TNT");
             return;
         }
 
@@ -197,19 +203,16 @@ public class BtStuff {
                     BotEngine.getInstance().getModule(PathExecutor.class).setGoal(lands.get(0));
                 } else {
                     BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                    System.out.println("Fredobot: reset because no land found");
                 }
                 return;
             }
             MiningHelper.blockToMine.clear();
-            MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(
-                    player,
-                    new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)),
-                    neededBlockCount,
-                    30
-            ));
+            MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), neededBlockCount, 30));
 
             if (MiningHelper.blockToMine.size() < neededBlockCount) {
                 BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                System.out.println("Fredobot : reset because cannot find enough grassblock");
                 return;
             }
             tntQueueGenerated = true;
@@ -224,7 +227,11 @@ public class BtStuff {
         for (Direction dir : new Direction[]{Direction.EAST, Direction.WEST, Direction.NORTH, Direction.SOUTH}) {
             BlockPos currentBlockPos = playerPos.offset(dir);
             if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos).isAir()) return currentBlockPos;
-            if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos.up()).isAir()) return currentBlockPos.up();
+            if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos.up()).isAir())
+                return currentBlockPos.up();
+            if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos.down()).isAir())
+                return currentBlockPos.down();
+
         }
         return null;
     }
@@ -265,8 +272,8 @@ public class BtStuff {
             } else if (player.inventory.getStack(slot).getItem() == Items.TNT) {
                 hasTNT = true;
             }
-            if (ironIngotCount != 0 && goldIngotCount != 0 && diamondCount != 0) break;
-            if (slot == 35) slot = 40;
+            if (ironIngotCount != 0 && goldIngotCount != 0 && diamondCount != 0 && hasTNT) break;
+            if (slot == 35) slot = 39;
         }
 
         if (diamondCount >= 3) MIN_IRON_NEEDED = 4;
@@ -350,10 +357,10 @@ public class BtStuff {
 
         itemsToCraft.add(Items.OAK_BOAT);
         itemsToCraft.add(Items.OAK_DOOR);
-
+        System.out.println("Fredodebug: hasTNT: " + hasTNT);
+        System.out.println("Fredodebug: craftingList: " + itemsToCraft);
         return true;
     }
-
 
 
     public static void lightUpTNT(PlayerEntity player) {
@@ -378,56 +385,63 @@ public class BtStuff {
                 break;
 
             case CRAFTING:
-                if (craftingWaitTicks > 0) {
-                    craftingWaitTicks--;
-                    break;
+                CraftingController tntCrafter = BotEngine.getInstance().getModule(CraftingController.class);
+
+                if (tntCrafter.isBusy() || pathExecutor.isBusy() || BotEngine.getInstance().getModule(MiscController.class).isBusy())
+                    return;
+
+                if (tntCrafter.isFailed()) {
+                    System.out.println("FredoBot: reset because fail to craft trigger");
+                    tntCrafter.resetStatus();
+                    globalExecutor.resetWorld();
+                    return;
                 }
 
-                if (craftingStep == 0) {
-                    boolean needIronPlate = itemsToCraft.contains(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
-                    boolean needGoldPlate = itemsToCraft.contains(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
+                switch (tntCraftPhase) {
+                    case EVALUATE:
+                        boolean needIronPlate = itemsToCraft.contains(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
+                        boolean needGoldPlate = itemsToCraft.contains(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
 
-                    if (needIronPlate) {
-                        tempCraftTarget = Items.HEAVY_WEIGHTED_PRESSURE_PLATE;
-                        craftingStep = 3;
-                    } else if (needGoldPlate) {
-                        tempCraftTarget = Items.LIGHT_WEIGHTED_PRESSURE_PLATE;
-                        craftingStep = 3;
-                    } else {
-                        tempCraftTarget = InventoryHelper.getTargetButtonType(player);
-                        List<Item> plankList = InventoryHelper.getTargetPlankType(player);
-                        tempPlankTarget = plankList.isEmpty() ? Items.OAK_PLANKS : plankList.get(0);
-
-                        if (InventoryHelper.findItemSlot(player, tempPlankTarget) == -1) {
-                            craftingStep = 1;
+                        if (needIronPlate) {
+                            tempCraftTarget = Items.HEAVY_WEIGHTED_PRESSURE_PLATE;
+                            tntCraftPhase = TNTCraftPhase.CRAFT_TRIGGER;
+                        } else if (needGoldPlate) {
+                            tempCraftTarget = Items.LIGHT_WEIGHTED_PRESSURE_PLATE;
+                            tntCraftPhase = TNTCraftPhase.CRAFT_TRIGGER;
                         } else {
-                            craftingStep = 3;
+                            tempCraftTarget = InventoryHelper.getTargetButtonType(player);
+                            List<Item> plankList = InventoryHelper.getTargetPlankType(player);
+                            tempPlankTarget = plankList.isEmpty() ? Items.OAK_PLANKS : plankList.get(0);
+
+                            if (InventoryHelper.findItemSlot(player, tempPlankTarget) == -1) {
+                                tntCraftPhase = TNTCraftPhase.CRAFT_PLANKS;
+                            } else {
+                                tntCraftPhase = TNTCraftPhase.CRAFT_TRIGGER;
+                            }
                         }
-                    }
-                } else if (craftingStep == 1) {
-                    if (!InventoryHelper.requestSearchCrafting(player, tempPlankTarget, 0)) {
-                        globalExecutor.resetWorld();
-                        return;
-                    }
-                    craftingWaitTicks = 2;
-                    craftingStep = 2;
-                } else if (craftingStep == 2) {
-                    InventoryHelper.collectCraftingResult(player);
-                    craftingStep = 3;
-                } else if (craftingStep == 3) {
-                    if (!InventoryHelper.requestSearchCrafting(player, tempCraftTarget, 1)) {
-                        globalExecutor.resetWorld();
-                        return;
-                    }
-                    craftingWaitTicks = 2;
-                    craftingStep = 4;
-                } else if (craftingStep == 4) {
-                    InventoryHelper.collectCraftingResult(player);
-                    itemsToCraft.remove(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
-                    itemsToCraft.remove(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
-                    itemsToCraft.remove(Items.STONE_BUTTON);
-                    tntState = TNTState.PLACE_TNT_AND_TRIGGER;
-                    craftingStep = 0;
+                        break;
+
+                    case CRAFT_PLANKS:
+                        if (tntCrafter.isDone()) {
+                            tntCrafter.resetStatus(); // 结算
+                            tntCraftPhase = TNTCraftPhase.CRAFT_TRIGGER; // 进入下一步
+                        } else {
+                            tntCrafter.startCrafting(tempPlankTarget, 0); // 下达指令
+                        }
+                        break;
+
+                    case CRAFT_TRIGGER:
+                        if (tntCrafter.isDone()) {
+                            tntCrafter.resetStatus(); // 结算
+                            itemsToCraft.remove(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
+                            itemsToCraft.remove(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
+                            itemsToCraft.remove(Items.STONE_BUTTON);
+                            tntState = TNTState.PLACE_TNT_AND_TRIGGER;
+                            tntCraftPhase = TNTCraftPhase.EVALUATE;
+                        } else {
+                            tntCrafter.startCrafting(tempCraftTarget, 1); // 下达指令
+                        }
+                        break;
                 }
                 break;
             case PLACE_TNT_AND_TRIGGER:
@@ -442,6 +456,7 @@ public class BtStuff {
                     int tntSlot = InventoryHelper.findItemSlot(player, Items.TNT);
                     if (tntSlot == -1) {
                         BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                        System.out.println("Fredbot: reset because cannot found TNT");
                         return;
                     }
                     InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(), player, tntSlot, 0);
@@ -468,6 +483,7 @@ public class BtStuff {
                     int triggerSlot = InventoryHelper.findItemSlot(player, triggerItem);
                     if (triggerSlot == -1) {
                         BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                        System.out.println("Fredobot: reset because cannot find trigger item");
                         return;
                     }
 
@@ -523,11 +539,7 @@ public class BtStuff {
                 break;
 
             case COLLECT_LOOT:
-                List<net.minecraft.entity.ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(
-                        net.minecraft.entity.ItemEntity.class,
-                        new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0),
-                        e -> true
-                );
+                List<net.minecraft.entity.ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(net.minecraft.entity.ItemEntity.class, new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0), e -> true);
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
@@ -562,12 +574,14 @@ public class BtStuff {
             if (!minecraftClient.world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) {
                 waitTicks++;
                 if (waitTicks > 60) globalExecutor.resetWorld();
+                System.out.println("Fredobot: reset because bt chunk cannot loaded");
                 return;
             }
 
             setBtPos();
             if (btPos == null) {
                 globalExecutor.resetWorld();
+                System.out.println("Fredobot: reset because btPos is empty");
                 return;
             }
             if (btStandingPos == null) {
@@ -603,7 +617,8 @@ public class BtStuff {
                 if (player.currentScreenHandler instanceof GenericContainerScreenHandler) {
                     int syncId = player.currentScreenHandler.syncId;
                     for (int slot = 0; slot < 27; slot++) {
-                        if (!InventoryHelper.BtUsefulStaff.isUseful(player.currentScreenHandler.getSlot(slot).getStack())) continue;
+                        if (!InventoryHelper.BtUsefulStaff.isUseful(player.currentScreenHandler.getSlot(slot).getStack()))
+                            continue;
                         if (player.currentScreenHandler.getSlot(slot).hasStack()) {
                             minecraftClient.interactionManager.clickSlot(syncId, slot, 0, net.minecraft.screen.slot.SlotActionType.QUICK_MOVE, player);
                         }
@@ -626,6 +641,7 @@ public class BtStuff {
                     MiningHelper.dispatchNextMineAndCollectTask();
                     break;
                 }
+                System.out.println("Fredodebug: hasTNT:" + hasTNT);
                 if (!treeQueueGenerated) {
                     if (pathExecutor.isBusy()) break;
                     if (hasTNT) {
@@ -667,122 +683,136 @@ public class BtStuff {
                 break;
 
             case CRAFTING:
-                if (pathExecutor.isBusy() || BotEngine.getInstance().getModule(MiscController.class).isBusy()) return;
+                CraftingController crafter = BotEngine.getInstance().getModule(CraftingController.class);
+
+                if (crafter.isBusy() || pathExecutor.isBusy() || BotEngine.getInstance().getModule(MiscController.class).isBusy())
+                    return;
+
+                if (crafter.isFailed()) {
+                    System.out.println("FredoBot [异常]: 主流程合成模块报错失败！");
+                    crafter.resetStatus();
+                    globalExecutor.resetWorld();
+                    return;
+                }
+
+                // 专用于等待工作台 GUI 打开的网络延迟
                 if (craftingWaitTicks > 0) {
                     craftingWaitTicks--;
                     return;
                 }
 
-                if (craftingStep == 0) {
-                    List<Item> plankTypes = InventoryHelper.getPlankTypesToCraftFromLogs(player);
-                    if (plankTypes != null && !plankTypes.isEmpty()) {
-                        Item plank = plankTypes.get(0);
-                        if (!InventoryHelper.requestSearchCrafting(player, plank, 0)) {
-                            System.out.println("FredoBot [异常]: 初始原木粉碎失败，触发重置！");
-                            globalExecutor.resetWorld();
-                            return;
+                switch (btCraftPhase) {
+                    case CRUSH_LOGS:
+                        if (crafter.isDone()) {
+                            crafter.resetStatus(); // 结算上一轮粉碎
+                        } else {
+                            List<Item> plankTypes = InventoryHelper.getPlankTypesToCraftFromLogs(player);
+                            if (plankTypes != null && !plankTypes.isEmpty()) {
+                                crafter.startCrafting(plankTypes.get(0), 0); // 发包粉碎
+                            } else {
+                                btCraftPhase = BtCraftPhase.MAKE_TABLE; // 没原木了，下一步！
+                            }
                         }
-                        craftingWaitTicks = 2;
-                        craftingStep = 1;
-                    } else {
-                        craftingStep = 2;
-                    }
-                } else if (craftingStep == 1) {
-                    InventoryHelper.collectCraftingResult(player);
-                    craftingStep = 0;
-                } else if (craftingStep == 2) {
-                    if (InventoryHelper.findItemSlot(player, Items.CRAFTING_TABLE) == -1) {
-                        if (!InventoryHelper.requestSearchCrafting(player, Items.CRAFTING_TABLE, 1)) {
-                            System.out.println("FredoBot [异常]: 工作台配方发包失败，触发重置！");
-                            globalExecutor.resetWorld();
-                            return;
-                        }
-                        craftingWaitTicks = 2;
-                        craftingStep = 3;
-                    } else {
-                        craftingStep = 4;
-                    }
-                } else if (craftingStep == 3) {
-                    InventoryHelper.collectCraftingResult(player);
-                    craftingStep = 4;
-                } else if (craftingStep == 4) {
-                    if (itemsToCraft.isEmpty()) {
-                        craftingStep = 14;
                         break;
-                    }
 
-                    int tableSlot = InventoryHelper.findItemSlot(player, Items.CRAFTING_TABLE);
-                    if (tableSlot == -1) {
-                        craftingStep = 2;
-                        return;
-                    }
+                    case MAKE_TABLE:
+                        if (crafter.isDone()) {
+                            crafter.resetStatus();
+                            btCraftPhase = BtCraftPhase.PLACE_TABLE;
+                        } else {
+                            if (InventoryHelper.findItemSlot(player, Items.CRAFTING_TABLE) == -1) {
+                                crafter.startCrafting(Items.CRAFTING_TABLE, 1);
+                            } else {
+                                btCraftPhase = BtCraftPhase.PLACE_TABLE;
+                            }
+                        }
+                        break;
 
-                    InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(), player, tableSlot, 4);
-                    craftingTablePos = findAProperCraftingTablePos(player);
+                    case PLACE_TABLE:
+                        if (itemsToCraft.isEmpty()) {
+                            btCraftPhase = BtCraftPhase.BREAK_TABLE;
+                            break;
+                        }
 
-                    if (craftingTablePos == null) {
-                        System.out.println("FredoBot [异常]: 找不到合适的地方放置工作台，触发重置！");
-                        globalExecutor.resetWorld();
-                        return;
-                    }
+                        int tableSlot = InventoryHelper.findItemSlot(player, Items.CRAFTING_TABLE);
+                        if (tableSlot == -1) {
+                            btCraftPhase = BtCraftPhase.MAKE_TABLE;
+                            return;
+                        }
 
-                    player.inventory.selectedSlot = 4;
-                    BlockHitResult craftingTablePlaceHit = new BlockHitResult(Vec3d.ofCenter(craftingTablePos), Direction.UP, craftingTablePos.down(), false);
-                    MinecraftClient.getInstance().interactionManager.interactBlock(player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, craftingTablePlaceHit);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, tableSlot, 4);
+                        craftingTablePos = findAProperCraftingTablePos(player);
+                        if (craftingTablePos == null) {
+                            globalExecutor.resetWorld();
+                            return;
+                        }
 
-                    BlockHitResult craftingTableHit = new BlockHitResult(Vec3d.ofCenter(craftingTablePos), Direction.UP, craftingTablePos, false);
-                    MinecraftClient.getInstance().interactionManager.interactBlock(player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, craftingTableHit);
+                        player.inventory.selectedSlot = 4;
 
-                    craftingWaitTicks = 5;
-                    craftingStep = 5;
-                } else if (craftingStep == 5) {
-                    if (player.currentScreenHandler instanceof CraftingScreenHandler) {
-                        InventoryHelper.requestSearchCrafting(player, Items.STICK, 1);
-                        craftingWaitTicks = 2;
-                        craftingStep = 6;
-                    } else {
-                        craftingWaitTicks = 2;
-                    }
-                } else if (craftingStep == 6) {
-                    InventoryHelper.collectCraftingResult(player);
-                    craftingStep = 51;
-                } else if (craftingStep == 51) {
-                    InventoryHelper.requestSearchCrafting(player, Items.STICK, 1);
-                    craftingWaitTicks = 2;
-                    craftingStep = 52;
-                } else if (craftingStep == 52) {
-                    InventoryHelper.collectCraftingResult(player);
-                    craftingStep = 7;
-                } else if (craftingStep == 7) {
-                    if (!itemsToCraft.isEmpty()) {
+                        Vec3d tableTopCenter = new Vec3d(craftingTablePos.getX() + 0.5, craftingTablePos.getY() + 1.0, craftingTablePos.getZ() + 0.5);
+
+                        // 【核心修复 1】：放工作台和开工作台前，强行扭头看向它！
+                        double eyeY = player.getY() + player.getStandingEyeHeight();
+                        double dx = tableTopCenter.x - player.getX();
+                        double dy = tableTopCenter.y - eyeY;
+                        double dz = tableTopCenter.z - player.getZ();
+                        player.yaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90.0F;
+                        player.pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+
+                        BlockHitResult placeHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos.down(), false);
+                        minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit);
+
+                        BlockHitResult openHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos, false);
+                        minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, openHit);
+
+                        craftingWaitTicks = 10; // 【核心修复 2】：将等待开 GUI 的时间增加到 10 Tick
+                        btCraftPhase = BtCraftPhase.OPEN_TABLE;
+                        break;
+
+                    case OPEN_TABLE:
+                        if (player.currentScreenHandler instanceof CraftingScreenHandler) {
+                            btCraftPhase = BtCraftPhase.MAKE_STICKS_1;
+                        } else {
+                            btCraftPhase = BtCraftPhase.PLACE_TABLE;
+                        }
+                        break;
+
+                    case MAKE_STICKS_1:
+                        if (crafter.isDone()) {
+                            crafter.resetStatus();
+                            btCraftPhase = BtCraftPhase.MAKE_STICKS_2;
+                        } else {
+                            crafter.startCrafting(Items.STICK, 1);
+                        }
+                        break;
+
+                    case MAKE_STICKS_2:
+                        if (crafter.isDone()) {
+                            crafter.resetStatus();
+                            btCraftPhase = BtCraftPhase.PROCESS_QUEUE;
+                        } else {
+                            crafter.startCrafting(Items.STICK, 1);
+                        }
+                        break;
+
+                    case PROCESS_QUEUE:
+                        if (itemsToCraft.isEmpty()) {
+                            btCraftPhase = BtCraftPhase.BREAK_TABLE;
+                            break;
+                        }
+
+                        if (crafter.isDone()) {
+                            crafter.resetStatus();
+                            itemsToCraft.remove(0); // 结算成功，划掉清单
+                            break; // 结束本 Tick，下个 Tick 重新进入 PROCESS_QUEUE 处理下一项
+                        }
+
                         Item targetItem = itemsToCraft.get(0);
 
-                        if (targetItem == Items.OAK_BOAT && !hasCheckedPlanksForFinalCrafts) {
-                            int totalPlanks = 0;
-                            for (int i = 0; i < 36; i++) {
-                                Item item = player.inventory.getStack(i).getItem();
-                                if (item.isIn(net.minecraft.tag.ItemTags.PLANKS)) {
-                                    totalPlanks += player.inventory.getStack(i).getCount();
-                                }
-                            }
-
-                            if (totalPlanks < 40) {
-                                int logsNeeded = (int) Math.ceil((40.0 - totalPlanks) / 4.0);
-                                System.out.println("FredoBot: 准备造船/门！木板不足40个 (当前 " + totalPlanks + ")，去砍 " + logsNeeded + " 个原木！");
-
-                                player.closeHandledScreen();
-                                MinecraftClient.getInstance().openScreen(null);
-
-                                // 【核心修复】：强行把背包里的斧子切到 0 号快捷栏并拿在手上！(兼容金斧子)
-                                InventoryHelper.putAxeToHotbar(player);
-                                player.inventory.selectedSlot = 0;
-
-                                MiningHelper.mineAndCollect(player, InventoryHelper.anyLogs, logsNeeded, 50);
-                                craftingStep = 16;
-                                return;
-                            } else {
-                                hasCheckedPlanksForFinalCrafts = true;
-                            }
+                        // --- 拦截检查 ---
+                        if ((targetItem == Items.OAK_BOAT || targetItem == Items.OAK_DOOR) && !hasCheckedPlanksForFinalCrafts) {
+                            btCraftPhase = BtCraftPhase.CHECK_40_PLANKS;
+                            break;
                         }
 
                         if (targetItem == Items.OAK_BOAT) targetItem = InventoryHelper.getTargetBoatType(player);
@@ -792,107 +822,181 @@ public class BtStuff {
                             int cobbleNeeded = (targetItem == Items.STONE_AXE) ? 3 : 1;
                             int cobbleCount = 0;
                             for (int i = 0; i < 36; i++) {
-                                if (player.inventory.getStack(i).getItem() == Items.COBBLESTONE) {
+                                if (player.inventory.getStack(i).getItem() == Items.COBBLESTONE)
                                     cobbleCount += player.inventory.getStack(i).getCount();
-                                }
                             }
                             if (cobbleCount < cobbleNeeded) {
-                                player.closeHandledScreen();
-                                MinecraftClient.getInstance().openScreen(null);
-
-                                // 【核心修复】：强行切出稿子去挖石头
-                                int pickSlot = InventoryHelper.findItemSlot(player, net.minecraft.item.PickaxeItem.class);
-                                if (pickSlot != -1) {
-                                    InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(), player, pickSlot, 0);
-                                    player.inventory.selectedSlot = 0;
-                                }
-
-                                MiningHelper.mineAndCollect(player, new HashSet<>(Collections.singletonList(Blocks.STONE)), cobbleNeeded - cobbleCount, 15);
-                                craftingStep = 11;
-                                return;
+                                btCraftPhase = BtCraftPhase.GATHER_MISSING_COBBLE;
+                                break;
                             }
                         }
 
-                        InventoryHelper.requestSearchCrafting(player, targetItem, 1);
-                        craftingWaitTicks = 2;
-                        craftingStep = 8;
-                    } else {
-                        craftingStep = 14;
-                    }
-                } else if (craftingStep == 8) {
-                    InventoryHelper.collectCraftingResult(player);
-                    itemsToCraft.remove(0);
-                    craftingStep = 7;
-                } else if (craftingStep == 11) {
-                    if (!MiningHelper.blockToMine.isEmpty()) {
-                        if (!pathExecutor.isBusy() && !BotEngine.getInstance().getModule(MiscController.class).isBusy()) {
-                            MiningHelper.dispatchNextMineAndCollectTask();
-                        }
-                        return;
-                    }
-                    craftingStep = 12;
-                } else if (craftingStep == 12) {
-                    if (craftingTablePos == null) {
-                        System.out.println("FredoBot [异常]: 返回时工作台坐标丢失，触发重置！");
-                        globalExecutor.resetWorld();
-                        return;
-                    }
-                    double dSq = player.squaredDistanceTo(Vec3d.ofCenter(craftingTablePos));
-                    if (dSq > 16.0) {
-                        if (!pathExecutor.isBusy()) pathExecutor.setGoal(craftingTablePos);
-                        return;
-                    }
-                    BlockHitResult craftingTableHit = new BlockHitResult(Vec3d.ofCenter(craftingTablePos), Direction.UP, craftingTablePos, false);
-                    MinecraftClient.getInstance().interactionManager.interactBlock(player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, craftingTableHit);
-                    craftingWaitTicks = 5;
-                    craftingStep = 13;
-                } else if (craftingStep == 13) {
-                    if (player.currentScreenHandler instanceof CraftingScreenHandler) {
-                        craftingStep = 7;
-                    } else {
-                        craftingWaitTicks = 2;
-                    }
-                } else if (craftingStep == 14) {
-                    player.closeHandledScreen();
-                    MinecraftClient.getInstance().openScreen(null);
+                        crafter.startCrafting(targetItem, 1); // 发起合成
+                        break;
 
-                    // 【核心修复】：挖工作台前强行切出斧子，并将扫描半径从3扩大到10，防止丢失！
-                    InventoryHelper.putAxeToHotbar(player);
-                    player.inventory.selectedSlot = 0;
-                    MiningHelper.mineAndCollect(player, new HashSet<>(Collections.singletonList(Blocks.CRAFTING_TABLE)), 1, 10);
-
-                    craftingStep = 15;
-                } else if (craftingStep == 15) {
-                    craftingTablePos = null;
-                    craftingStep = 0;
-                    System.out.println("FredoBot [完结]: 船与门合成完毕！工作台已回收！所有BT流程结束，进入 NEXT 阶段！");
-                    globalExecutor.currentState = GlobalExecutor.GlobalState.NEXT;
-                } else if (craftingStep == 16) {
-                    if (!MiningHelper.blockToMine.isEmpty()) {
-                        if (!pathExecutor.isBusy() && !BotEngine.getInstance().getModule(MiscController.class).isBusy()) {
-                            MiningHelper.dispatchNextMineAndCollectTask();
+                    case CHECK_40_PLANKS:
+                        int totalPlanks = 0;
+                        for (int i = 0; i < 36; i++) {
+                            if (player.inventory.getStack(i).getItem().isIn(net.minecraft.tag.ItemTags.PLANKS))
+                                totalPlanks += player.inventory.getStack(i).getCount();
                         }
-                        return;
-                    }
-                    craftingStep = 17;
-                } else if (craftingStep == 17) {
-                    List<Item> plankTypes = InventoryHelper.getPlankTypesToCraftFromLogs(player);
-                    if (plankTypes != null && !plankTypes.isEmpty()) {
-                        Item plank = plankTypes.get(0);
-                        if (!InventoryHelper.requestSearchCrafting(player, plank, 0)) {
-                            System.out.println("FredoBot [异常]: 中途补木板时粉碎原木失败，触发重置！");
+                        if (totalPlanks < 40) {
+                            int logsNeeded = (int) Math.ceil((40.0 - totalPlanks) / 4.0);
+                            player.closeHandledScreen();
+                            minecraftClient.openScreen(null);
+
+                            InventoryHelper.putAxeToHotbar(player);
+                            player.inventory.selectedSlot = 0;
+
+                            MiningHelper.mineAndCollect(player, InventoryHelper.anyLogs, logsNeeded, 50);
+
+                            if (MiningHelper.blockToMine.isEmpty()) {
+                                System.out.println("FredoBot [妥协]: 50格内彻底没树了！直接利用现有残余材料尽力造船/门！");
+                                hasCheckedPlanksForFinalCrafts = true;
+                                btCraftPhase = BtCraftPhase.RETURN_TO_TABLE;
+                            } else {
+                                btCraftPhase = BtCraftPhase.GATHER_MISSING_PLANKS;
+                            }
+                        } else {
+                            hasCheckedPlanksForFinalCrafts = true;
+                            btCraftPhase = BtCraftPhase.PROCESS_QUEUE;
+                        }
+                        break;
+
+                    case GATHER_MISSING_PLANKS:
+                        if (!MiningHelper.blockToMine.isEmpty()) {
+                            MiningHelper.dispatchNextMineAndCollectTask();
+                        } else {
+                            btCraftPhase = BtCraftPhase.CRUSH_NEW_LOGS;
+                        }
+                        break;
+
+                    case CRUSH_NEW_LOGS:
+                        if (crafter.isDone()) {
+                            crafter.resetStatus();
+                        } else {
+                            List<Item> newLogs = InventoryHelper.getPlankTypesToCraftFromLogs(player);
+                            if (newLogs != null && !newLogs.isEmpty()) {
+                                crafter.startCrafting(newLogs.get(0), 0);
+                            } else {
+                                hasCheckedPlanksForFinalCrafts = true;
+                                btCraftPhase = BtCraftPhase.RETURN_TO_TABLE;
+                            }
+                        }
+                        break;
+
+                    case GATHER_MISSING_COBBLE:
+                        int neededCobble = (itemsToCraft.get(0) == Items.STONE_AXE) ? 3 : 1;
+                        int currentCobble = 0;
+                        for (int i = 0; i < 36; i++) {
+                            if (player.inventory.getStack(i).getItem() == Items.COBBLESTONE)
+                                currentCobble += player.inventory.getStack(i).getCount();
+                        }
+
+                        player.closeHandledScreen();
+                        minecraftClient.openScreen(null);
+
+                        int pickSlot = InventoryHelper.findItemSlot(player, net.minecraft.item.PickaxeItem.class);
+                        if (pickSlot != -1) {
+                            InventoryHelper.moveItemToHotbar(minecraftClient, player, pickSlot, 0);
+                            player.inventory.selectedSlot = 0;
+                        }
+
+                        MiningHelper.mineAndCollect(player, new HashSet<>(Collections.singletonList(Blocks.STONE)), neededCobble - currentCobble, 15);
+                        btCraftPhase = BtCraftPhase.RETURN_TO_TABLE;
+                        break;
+
+                    case RETURN_TO_TABLE:
+                        if (craftingTablePos == null) {
                             globalExecutor.resetWorld();
                             return;
                         }
-                        craftingWaitTicks = 2;
-                        craftingStep = 18;
-                    } else {
-                        hasCheckedPlanksForFinalCrafts = true;
-                        craftingStep = 12;
-                    }
-                } else if (craftingStep == 18) {
-                    InventoryHelper.collectCraftingResult(player);
-                    craftingStep = 17;
+
+                        // ==========================================
+                        // 【核心修复 2】：物理级防卡死兜底！
+                        // 如果工作台被苦力怕炸了、被玩家挖了，或者之前被误挖了，
+                        // 此时该坐标已经是空气。直接终止死循环，退回放置阶段重新造一个！
+                        // ==========================================
+                        if (minecraftClient.world.getBlockState(craftingTablePos).getBlock() != Blocks.CRAFTING_TABLE) {
+                            System.out.println("FredoBot [严重异常]: 原坐标的工作台不翼而飞！退回重新放置阶段...");
+                            craftingTablePos = null; // 清空无效坐标
+                            btCraftPhase = BtCraftPhase.MAKE_TABLE; // 重新造桌子（包里刚好有40个木板，完美衔接）
+                            return;
+                        }
+
+                        // 原有的免死金牌保留，作为双重保险
+                        if (MiningHelper.blockToMine.contains(craftingTablePos)) {
+                            System.out.println("FredoBot [拦截]: 寻路试图将工作台作为障碍物挖掉，已被拦截！");
+                            MiningHelper.blockToMine.remove(craftingTablePos);
+                        }
+
+                        double distToTable = player.squaredDistanceTo(Vec3d.ofCenter(craftingTablePos));
+
+                        // 如果距离大于 4.0，说明还在路上
+                        if (distToTable > 4.0) {
+                            if (!MiningHelper.blockToMine.isEmpty()) {
+                                MiningHelper.dispatchNextMineAndCollectTask();
+                                break;
+                            }
+                            if (!pathExecutor.isBusy()) {
+                                pathExecutor.setGoal(craftingTablePos.up());
+                            }
+                            return; // 还在路上，结束本 Tick
+                        }
+
+                        // 到达工作台前，刹车并交互... (后续代码保持不变)
+                        if (!MiningHelper.blockToMine.isEmpty()) MiningHelper.blockToMine.clear();
+                        if (pathExecutor.isBusy()) pathExecutor.stop();
+
+                        com.fredoseep.behave.MovementController mc = BotEngine.getInstance().getModule(com.fredoseep.behave.MovementController.class);
+                        if (mc != null) mc.resetKeys();
+
+                        System.out.println("FredoBot [调试]: 已到达工作台前，准备右键打开...");
+
+                        Vec3d tableTopCenterReturn = new Vec3d(craftingTablePos.getX() + 0.5, craftingTablePos.getY() + 1.0, craftingTablePos.getZ() + 0.5);
+
+                        double eyeYRet = player.getY() + player.getStandingEyeHeight();
+                        double dxRet = tableTopCenterReturn.x - player.getX();
+                        double dyRet = tableTopCenterReturn.y - eyeYRet;
+                        double dzRet = tableTopCenterReturn.z - player.getZ();
+                        player.yaw = (float) Math.toDegrees(Math.atan2(dzRet, dxRet)) - 90.0F;
+                        player.pitch = (float) -Math.toDegrees(Math.atan2(dyRet, Math.sqrt(dxRet * dxRet + dzRet * dzRet)));
+
+                        BlockHitResult returnHit = new BlockHitResult(tableTopCenterReturn, Direction.UP, craftingTablePos, false);
+                        minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, returnHit);
+
+                        craftingWaitTicks = 10;
+                        btCraftPhase = BtCraftPhase.OPEN_TABLE_RETURN;
+                        break;
+
+                    case OPEN_TABLE_RETURN:
+                        if (player.currentScreenHandler instanceof CraftingScreenHandler) {
+                            System.out.println("FredoBot [调试]: 成功打开工作台 GUI，进入合成队列！");
+                            btCraftPhase = BtCraftPhase.PROCESS_QUEUE;
+                        } else {
+                            System.out.println("FredoBot [警告]: 工作台打开失败，退回重试交互！");
+                            btCraftPhase = BtCraftPhase.RETURN_TO_TABLE;
+                        }
+                        break;
+                    case BREAK_TABLE:
+                        player.closeHandledScreen();
+                        minecraftClient.openScreen(null);
+                        InventoryHelper.putAxeToHotbar(player);
+                        player.inventory.selectedSlot = 0;
+                        MiningHelper.mineAndCollect(player, new HashSet<>(Collections.singletonList(Blocks.CRAFTING_TABLE)), 1, 10);
+                        btCraftPhase = BtCraftPhase.DONE;
+                        break;
+
+                    case DONE:
+                        if (!MiningHelper.blockToMine.isEmpty()) {
+                            MiningHelper.dispatchNextMineAndCollectTask();
+                            break;
+                        }
+                        craftingTablePos = null;
+                        btCraftPhase = BtCraftPhase.CRUSH_LOGS; // 状态归位
+                        System.out.println("FredoBot [完结]: 船与门合成完毕！工作台已回收！所有BT流程结束，进入 NEXT 阶段！");
+                        globalExecutor.currentState = GlobalExecutor.GlobalState.NEXT;
+                        break;
                 }
                 break;
         }

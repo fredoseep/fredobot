@@ -33,6 +33,9 @@ public class PathExecutor implements IBotModule {
     // 废弃了 nextPath，因为我们将使用无缝拼接流！
     private boolean isCalculatingNext = false;
     private boolean isPaused = false;
+    private int stuckCheckTicks = 0;
+    private int consecutiveStuckCount = 0; // 【新增】：记录连续卡死的次数
+    private Vec3d lastStuckCheckPos = null;
 
 
     @Override
@@ -159,6 +162,10 @@ public class PathExecutor implements IBotModule {
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
+        this.stuckCheckTicks = 0;           // 【新增】
+        this.lastStuckCheckPos = null;
+        this.consecutiveStuckCount = 0; // 【新增】：开始新路径时重置
+
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
@@ -176,6 +183,10 @@ public class PathExecutor implements IBotModule {
         this.currentState = State.IDLE;
         this.isCalculatingNext = false;
         this.isPaused = false;
+        this.stuckCheckTicks = 0;           // 【新增】
+        this.lastStuckCheckPos = null;
+        this.consecutiveStuckCount = 0; // 【新增】：开始新路径时重置
+        tempMissionType = TempMissionType.IDLE;
         resetMovementKeys();
     }
 
@@ -238,6 +249,41 @@ public class PathExecutor implements IBotModule {
         if (isPaused) return;
         if (currentState != State.EXECUTING || currentPath == null) return;
 
+        if (lastStuckCheckPos == null) {
+            lastStuckCheckPos = player.getPos();
+            stuckCheckTicks = 0;
+        } else {
+            stuckCheckTicks++;
+            if (stuckCheckTicks >= 60) { // 3秒 = 60 Tick
+                double dx = player.getX() - lastStuckCheckPos.x;
+                double dz = player.getZ() - lastStuckCheckPos.z;
+                double dy = Math.abs(player.getY() - lastStuckCheckPos.y);
+                double horizontalDistSq = dx * dx + dz * dz;
+
+                // XZ平面移动平方小于1.0 (即距离小于1)，且Y轴移动也小于1
+                if (horizontalDistSq < 1.0 && dy < 1.0) {
+                    consecutiveStuckCount++;
+                    player.sendMessage(new net.minecraft.text.LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
+                    System.out.println("FredoBot: 触发被困保护，连续次数: " + consecutiveStuckCount + "，正在重新计算！");
+
+                    resetMovementKeys();
+                    stuckCheckTicks = 0;
+                    lastStuckCheckPos = player.getPos();
+
+                    // 以当前玩家的坐标为起点，重新向最终目标发起寻路
+                    recalculatePath(new BlockPos(player.getX(), player.getY() + 0.2, player.getZ()));
+                    return; // 结束当前Tick，等待重新计算完成
+                }
+
+                // ==========================================
+                // 【核心修复 2】：真正的脱困结算点
+                // 3秒过去了，距离大于1，说明机器人真实发生物理位移，彻底脱困！
+                // ==========================================
+                consecutiveStuckCount = 0; // 在这里清空计数器！
+                lastStuckCheckPos = player.getPos();
+                stuckCheckTicks = 0;
+            }
+        }
         updateProgress(player);
         if (currentPathIndex > 500) {
             currentPath.subList(0, currentPathIndex - 1).clear();
@@ -357,9 +403,18 @@ public class PathExecutor implements IBotModule {
         World world = MinecraftClient.getInstance().world;
         if (world == null) return;
 
+        // 【核心新增】：如果连续卡住 2 次以上，开启“严格判定模式”，禁用一切碰撞箱扩展！
+        boolean isStrictMode = consecutiveStuckCount >= 2;
+
         net.minecraft.util.math.Box lowerBody;
 
-        if (player.hasVehicle()) {
+        if (isStrictMode) {
+            // 严格模式下：就算在水里或船上，也只使用最原始的死板碰撞箱
+            lowerBody = new net.minecraft.util.math.Box(
+                    player.getX() - 0.3, player.getY(), player.getZ() - 0.3,
+                    player.getX() + 0.3, player.getY() + 0.5, player.getZ() + 0.3
+            );
+        } else if (player.hasVehicle()) {
             lowerBody = player.getVehicle().getBoundingBox().expand(0.5, 0.0, 0.5);
         } else if (player.isSwimming() || player.isTouchingWater()) {
             net.minecraft.util.math.Box baseBox = player.getBoundingBox().expand(0.2, 0.2, 0.2);
@@ -383,26 +438,29 @@ public class PathExecutor implements IBotModule {
             double expandYDown = 0.0;
             double expandYUp = 0.0;
 
-            if (node.state == SimplePathfinder.MovementState.SWIMMING) {
-                expandXZ = 0.35;
-                expandYDown = 0.5;
-                expandYUp = 0.5;
-            } else if (node.state == SimplePathfinder.MovementState.DIVING) {
-                expandXZ = 0.5;
-                expandYDown = 1.0;
-                expandYUp = 1.0;
-            } else if (node.state == SimplePathfinder.MovementState.JUMPING_UP ||
-                    node.state == SimplePathfinder.MovementState.JUMPING_AIR ||
-                    node.state == SimplePathfinder.MovementState.FALLING) {
-                expandXZ = 0.25;
-                expandYDown = 1.0;
-                expandYUp = 1.5;
-            }
-
-            if (node.state == SimplePathfinder.MovementState.WALKING && (i + 1 < currentPath.size())) {
-                SimplePathfinder.Node nextNode = currentPath.get(i + 1);
-                if (nextNode.state == SimplePathfinder.MovementState.JUMPING_UP) {
+            // 只有在非严格模式下，才允许通过碰撞箱扩展来“蹭”节点
+            if (!isStrictMode) {
+                if (node.state == SimplePathfinder.MovementState.SWIMMING) {
                     expandXZ = 0.35;
+                    expandYDown = 0.5;
+                    expandYUp = 0.5;
+                } else if (node.state == SimplePathfinder.MovementState.DIVING) {
+                    expandXZ = 0.5;
+                    expandYDown = 1.0;
+                    expandYUp = 1.0;
+                } else if (node.state == SimplePathfinder.MovementState.JUMPING_UP ||
+                        node.state == SimplePathfinder.MovementState.JUMPING_AIR ||
+                        node.state == SimplePathfinder.MovementState.FALLING) {
+                    expandXZ = 0.25;
+                    expandYDown = 1.0;
+                    expandYUp = 1.5;
+                }
+
+                if (node.state == SimplePathfinder.MovementState.WALKING && (i + 1 < currentPath.size())) {
+                    SimplePathfinder.Node nextNode = currentPath.get(i + 1);
+                    if (nextNode.state == SimplePathfinder.MovementState.JUMPING_UP) {
+                        expandXZ = 0.35;
+                    }
                 }
             }
 
@@ -421,14 +479,16 @@ public class PathExecutor implements IBotModule {
                 double dx = player.getX() - (node.pos.getX() + 0.5);
                 double dz = player.getZ() - (node.pos.getZ() + 0.5);
                 double dy = Math.abs(player.getY() - node.pos.getY());
-                // ==========================================
-                // 【核心修复】：将 dy 容差从 1.0 缩小到 0.5！
-                // 逼迫机器人必须真正跳起来并落在这个方块的同一个水平面上，
-                // 绝不允许在方块正下方 1 格处“隔空”完成任务！
-                // ==========================================
+
                 boolean isWater = node.state == SimplePathfinder.MovementState.SWIMMING || node.state == SimplePathfinder.MovementState.DIVING;
                 double allowedDistSq = isWater ? 0.12 : 0.03;
-                isPhysicallyReached = (dx * dx + dz * dz <= 0.12) && (dy <= 0.5);
+
+                // 【严格模式收紧】：终点判定也必须死板地贴合，不给水域开绿灯
+                if (isStrictMode) {
+                    allowedDistSq = 0.03;
+                }
+
+                isPhysicallyReached = (dx * dx + dz * dz <= allowedDistSq) && (dy <= 0.5);
             }
 
             if (node.state == SimplePathfinder.MovementState.BUILDING_BRIDGE || node.state == SimplePathfinder.MovementState.BUILDING_PILLAR) {

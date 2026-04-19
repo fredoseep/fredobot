@@ -216,71 +216,113 @@ public class SimplePathfinder {
                 continue;
             }
 
-            if (!isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
-                double mineCost = getMiningCost(world, adjacent, blacklist) + getMiningCost(world, adjacentUp, blacklist);
+            BlockPos adjacentDown = adjacent.down();
+            if (!isCurrentWater) {
+                // 【向下阶梯挖掘】修复版：考虑头顶碰撞，需要挖出 3 格高的通行空间
+                // 玩家需要走进 adjacentDown，身体最终占据 adjacentDown (脚) 和 adjacent (头)。
+                // 但在走过去的“瞬间”，玩家的头会划过 adjacentUp，如果这里被挡住，玩家会撞头走不进去！
+                if (!isPassable(world, adjacentDown) || !isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
+                    // 把头顶方块 (adjacentUp) 的挖掘成本也加进来
+                    double stairMineCost = getMiningCost(world, adjacentDown, blacklist)
+                            + getMiningCost(world, adjacent, blacklist)
+                            + getMiningCost(world, adjacentUp, blacklist);
+
+                    // 只要这三个方块都不是基岩/岩浆 (成本 < 9999.0)，且挖完后脚底有方块支撑
+                    if (stairMineCost > 0 && stairMineCost < 9999.0 && isSolid(world, adjacentDown.down())) {
+                        int blocksGained = 0;
+                        if (yieldsBuildingBlock(world, adjacentDown)) blocksGained++;
+                        if (yieldsBuildingBlock(world, adjacent)) blocksGained++;
+                        if (yieldsBuildingBlock(world, adjacentUp)) blocksGained++; // 挖掉头顶方块也能提供建材
+
+                        // 节点的目标位置是 adjacentDown，附加位置设为 adjacent。
+                        neighbors.add(new Node(adjacentDown, adjacent, current, current.costFromStart + 1.5 + stairMineCost, calculateHeuristic(adjacentDown, end), MovementState.MINING, current.blocksUsed - blocksGained));
+                    }
+                }
+            }
+
+            // ==========================================
+            // 【核心修复 3】：整合水平挖掘与移动逻辑
+            // 彻底解决“上半身被树叶挡住”问题，修复双重冗余代码，并增加悬崖安全校验
+            // ==========================================
+            boolean isBlocked = !isPassable(world, adjacent) || !isPassable(world, adjacentUp);
+            double mineCost = 0.0;
+            int blocksGained = 0;
+
+            if (isBlocked) {
+                mineCost = getMiningCost(world, adjacent, blacklist) + getMiningCost(world, adjacentUp, blacklist);
                 if (mineCost < 9999.0) {
-                    // 【动态库存】：预演挖掘行为。每挖开一个实体方块，大脑就会假定背包里多了一块石头/泥土。
-                    int blocksGained = 0;
                     if (yieldsBuildingBlock(world, adjacent)) blocksGained++;
                     if (yieldsBuildingBlock(world, adjacentUp)) blocksGained++;
-
-                    // 用负消耗代表库存的增加！
-                    int nextBlocksUsed = current.blocksUsed - blocksGained;
-
-                    neighbors.add(new Node(adjacent, adjacentUp, current, current.costFromStart + 1.0 + mineCost, calculateHeuristic(adjacent, end), MovementState.MINING, nextBlocksUsed));
                 }
+            }
 
-                if (isSolid(world, adjacent) && isPassable(world, adjacentUp) && isPassable(world, adjacent.up(2)) && isPassable(world, current.pos.up(2))) {
-                    neighbors.add(new Node(adjacentUp, null, current, current.costFromStart + 1.5, calculateHeuristic(adjacentUp, end), MovementState.JUMPING_UP, current.blocksUsed));
+            // 【跳跃判定】：如果前方是固体障碍，且障碍物上方空间足够，可以跳上去
+            if (isSolid(world, adjacent) && isPassable(world, adjacentUp) && isPassable(world, adjacent.up(2)) && isPassable(world, current.pos.up(2))) {
+                neighbors.add(new Node(adjacentUp, null, current, current.costFromStart + 1.5, calculateHeuristic(adjacentUp, end), MovementState.JUMPING_UP, current.blocksUsed));
+            }
+
+            // 【平面移动/挖掘判定】：只有当目标位置脚底下有支撑（或者在水里），才允许走过去或挖过去
+            if (isSolid(world, adjacentDown) || isCurrentWater) {
+                if (isBlocked) {
+                    if (mineCost < 9999.0) {
+                        // 完美契合你的需求：下半身空气，上半身树叶，且脚下有泥土支撑。
+                        // 生成安全 MINING 节点，执行器挖掉头顶树叶后大步向前。
+                        neighbors.add(new Node(adjacent, adjacentUp, current, current.costFromStart + 1.0 + mineCost, calculateHeuristic(adjacent, end), MovementState.MINING, current.blocksUsed - blocksGained));
+                    }
+                } else {
+                    double moveCost = isCurrentWater ? 1.2 : 1.0;
+                    neighbors.add(new Node(adjacent, null, current, current.costFromStart + moveCost, calculateHeuristic(adjacent, end), MovementState.WALKING, current.blocksUsed));
                 }
+                continue; // 既然脚底是安全的，就不需要再去判断悬崖掉落或搭桥了
+            }
+
+            // ==========================================
+            // 【危险地带】：如果走到了这里，说明前方脚底是空的（悬崖、沟壑）
+            // ==========================================
+            // 安全限制：如果前方不仅是沟壑，上半身还被树叶挡住了，我们直接放弃这条路线。
+            // 因为执行器很难处理“一边挖着头顶的树叶，一边向脚下深渊搭桥”这种高难度复合动作。
+            if (isBlocked) {
                 continue;
             }
 
-            if (isCurrentWater && isSolid(world, adjacent.down())) {
-                neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.2, calculateHeuristic(adjacent, end), MovementState.WALKING, current.blocksUsed));
-            } else if (isSolid(world, adjacent.down())) {
-                neighbors.add(new Node(adjacent, null, current, current.costFromStart + 1.0, calculateHeuristic(adjacent, end), MovementState.WALKING, current.blocksUsed));
-            } else {
-                boolean jumpedOverGap = false;
-                Node lastAirNode = current;
+            // 原有逻辑：跨越沟壑、掉落、搭桥（保持不变）
+            boolean jumpedOverGap = false;
+            Node lastAirNode = current;
 
-                for (int distance = 1; distance <= 4; distance++) {
-                    BlockPos forwardPos = current.pos.offset(dir, distance);
-                    if (!isPassable(world, forwardPos) || !isPassable(world, forwardPos.up())) break;
+            for (int distance = 1; distance <= 4; distance++) {
+                BlockPos forwardPos = current.pos.offset(dir, distance);
+                if (!isPassable(world, forwardPos) || !isPassable(world, forwardPos.up())) break;
 
-                    if (isSolid(world, forwardPos.down())) {
-                        neighbors.add(new Node(forwardPos, null, lastAirNode, lastAirNode.costFromStart + 1.2, calculateHeuristic(forwardPos, end), MovementState.WALKING, current.blocksUsed));
-                        jumpedOverGap = true;
+                if (isSolid(world, forwardPos.down())) {
+                    neighbors.add(new Node(forwardPos, null, lastAirNode, lastAirNode.costFromStart + 1.2, calculateHeuristic(forwardPos, end), MovementState.WALKING, current.blocksUsed));
+                    jumpedOverGap = true;
+                    break;
+                } else {
+                    lastAirNode = new Node(forwardPos, null, lastAirNode, lastAirNode.costFromStart + 1.0, calculateHeuristic(forwardPos, end), MovementState.JUMPING_AIR, current.blocksUsed);
+                }
+            }
+
+            if (!jumpedOverGap) {
+                for (int drop = 1; drop <= 3; drop++) {
+                    BlockPos dropPos = adjacent.down(drop);
+                    if (!isPassable(world, dropPos) || !isPassable(world, dropPos.up())) break;
+
+                    if (isWaterBlock(world, dropPos)) {
+                        boolean nextIsSurface = !isWaterBlock(world, dropPos.up());
+                        MovementState fallState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
+                        neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.2, calculateHeuristic(dropPos, end), fallState, current.blocksUsed));
                         break;
-                    } else {
-                        lastAirNode = new Node(forwardPos, null, lastAirNode, lastAirNode.costFromStart + 1.0, calculateHeuristic(forwardPos, end), MovementState.JUMPING_AIR, current.blocksUsed);
+                    } else if (isSolid(world, dropPos.down())) {
+                        neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.0 + (drop * 0.5), calculateHeuristic(dropPos, end), MovementState.FALLING, current.blocksUsed));
+                        break;
                     }
                 }
+            }
 
-                if (!jumpedOverGap) {
-                    for (int drop = 1; drop <= 3; drop++) {
-                        BlockPos dropPos = adjacent.down(drop);
-                        if (!isPassable(world, dropPos) || !isPassable(world, dropPos.up())) break;
-
-                        if (isWaterBlock(world, dropPos)) {
-                            // 【严格水域】: 跨过悬崖掉进水里
-                            boolean nextIsSurface = !isWaterBlock(world, dropPos.up());
-                            MovementState fallState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
-                            neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.2, calculateHeuristic(dropPos, end), fallState, current.blocksUsed));
-                            break;
-                        } else if (isSolid(world, dropPos.down())) {
-                            neighbors.add(new Node(dropPos, null, current, current.costFromStart + 1.0 + (drop * 0.5), calculateHeuristic(dropPos, end), MovementState.FALLING, current.blocksUsed));
-                            break;
-                        }
-                    }
-                }
-
-                if (remainingBridging > 0) {
-                    BlockPos bridgePos = adjacent;
-                    double dynamicBridgeCost = getDynamicCost(remainingBridging, 5.0, 10.0);
-                    // 搭桥消耗 1 个库存
-                    neighbors.add(new Node(bridgePos, null, current, current.costFromStart + dynamicBridgeCost, calculateHeuristic(bridgePos, end), MovementState.BUILDING_BRIDGE, current.blocksUsed + 1));
-                }
+            if (remainingBridging > 0) {
+                BlockPos bridgePos = adjacent;
+                double dynamicBridgeCost = getDynamicCost(remainingBridging, 5.0, 10.0);
+                neighbors.add(new Node(bridgePos, null, current, current.costFromStart + dynamicBridgeCost, calculateHeuristic(bridgePos, end), MovementState.BUILDING_BRIDGE, current.blocksUsed + 1));
             }
         }
         return neighbors;

@@ -1,5 +1,6 @@
 package com.fredoseep.excutor;
 
+import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.utils.bt.BtStuff;
@@ -93,9 +94,10 @@ public class GlobalExecutor implements IBotModule {
         }
         MiscController miscController = BotEngine.getInstance().getModule(MiscController.class);
         miscController.targetEntity = null;
-        if (miscController != null) {
-            miscController.stopTask();
-        }
+        miscController.stopTask();
+
+        CraftingController craftingController = BotEngine.getInstance().getModule(CraftingController.class);
+        craftingController.resetStatus();
         Atum.scheduleReset();
     }
 

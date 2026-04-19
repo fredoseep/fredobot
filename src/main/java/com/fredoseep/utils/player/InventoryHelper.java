@@ -362,27 +362,50 @@ public class InventoryHelper {
         return plankTypes;
     }
     public static Item getTargetBoatType(PlayerEntity player) {
-        for (int i = 0; i < 36; i++) {
-            Item item = player.inventory.getStack(i).getItem();
-            if (item == Items.SPRUCE_PLANKS) return Items.SPRUCE_BOAT;
-            if (item == Items.BIRCH_PLANKS) return Items.BIRCH_BOAT;
-            if (item == Items.JUNGLE_PLANKS) return Items.JUNGLE_BOAT;
-            if (item == Items.ACACIA_PLANKS) return Items.ACACIA_BOAT;
-            if (item == Items.DARK_OAK_PLANKS) return Items.DARK_OAK_BOAT;
-        }
+        // 船需要 5 个同种木板
+        Item abundantPlank = getAbundantPlank(player, 5);
+        if (abundantPlank == Items.SPRUCE_PLANKS) return Items.SPRUCE_BOAT;
+        if (abundantPlank == Items.BIRCH_PLANKS) return Items.BIRCH_BOAT;
+        if (abundantPlank == Items.JUNGLE_PLANKS) return Items.JUNGLE_BOAT;
+        if (abundantPlank == Items.ACACIA_PLANKS) return Items.ACACIA_BOAT;
+        if (abundantPlank == Items.DARK_OAK_PLANKS) return Items.DARK_OAK_BOAT;
         return Items.OAK_BOAT;
     }
 
     public static Item getTargetDoorType(PlayerEntity player) {
-        for (int i = 0; i < 36; i++) {
-            Item item = player.inventory.getStack(i).getItem();
-            if (item == Items.SPRUCE_PLANKS) return Items.SPRUCE_DOOR;
-            if (item == Items.BIRCH_PLANKS) return Items.BIRCH_DOOR;
-            if (item == Items.JUNGLE_PLANKS) return Items.JUNGLE_DOOR;
-            if (item == Items.ACACIA_PLANKS) return Items.ACACIA_DOOR;
-            if (item == Items.DARK_OAK_PLANKS) return Items.DARK_OAK_DOOR;
-        }
+        // 门需要 6 个同种木板
+        Item abundantPlank = getAbundantPlank(player, 6);
+        if (abundantPlank == Items.SPRUCE_PLANKS) return Items.SPRUCE_DOOR;
+        if (abundantPlank == Items.BIRCH_PLANKS) return Items.BIRCH_DOOR;
+        if (abundantPlank == Items.JUNGLE_PLANKS) return Items.JUNGLE_DOOR;
+        if (abundantPlank == Items.ACACIA_PLANKS) return Items.ACACIA_DOOR;
+        if (abundantPlank == Items.DARK_OAK_PLANKS) return Items.DARK_OAK_DOOR;
         return Items.OAK_DOOR;
+    }
+
+    /**
+     * 核心智能分析：统计背包里每种木板的总数，返回数量达标的木板类型
+     */
+    private static Item getAbundantPlank(PlayerEntity player, int requiredCount) {
+        java.util.Map<Item, Integer> plankCounts = new java.util.HashMap<>();
+
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = player.inventory.getStack(i);
+            if (stack.getItem().isIn(net.minecraft.tag.ItemTags.PLANKS)) {
+                // 累计每种木板的数量 (应对分散堆叠的情况)
+                plankCounts.put(stack.getItem(), plankCounts.getOrDefault(stack.getItem(), 0) + stack.getCount());
+            }
+        }
+
+        // 遍历统计结果，只要哪种木头数量满足所需，就立刻拍板用它！
+        for (java.util.Map.Entry<Item, Integer> entry : plankCounts.entrySet()) {
+            if (entry.getValue() >= requiredCount) {
+                return entry.getKey();
+            }
+        }
+
+        // 兜底返回，防止空指针
+        return Items.OAK_PLANKS;
     }
 
 }

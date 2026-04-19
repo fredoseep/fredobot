@@ -1,5 +1,6 @@
 package com.fredoseep.excutor;
 
+import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.behave.MovementController;
@@ -29,6 +30,7 @@ public class BotEngine {
         registerModule(new MovementController());
         registerModule(new MiscController());
         registerModule(new GlobalExecutor());
+        registerModule(new CraftingController());
         // 按照优先级排序 (Priority 越小越排在前面)
         modules.sort(Comparator.comparingInt(IBotModule::getPriority));
 

@@ -3,6 +3,7 @@ package com.fredoseep.behave;
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.PathExecutor;
+import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.*;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -15,13 +16,12 @@ import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.tag.FluidTags;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
+
+import net.minecraft.util.math.*;
 import net.minecraft.world.RayTraceContext;
 import net.minecraft.world.World;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class MovementController implements IBotModule {
@@ -111,14 +111,6 @@ public class MovementController implements IBotModule {
             }
             targetNode.pos = nodeList.get(currentIndex).pos;
         }
-        if (targetNode.state == SimplePathfinder.MovementState.MINING) {
-            boolean extraAir = targetNode.extraPos == null || MinecraftClient.getInstance().world.getBlockState(targetNode.extraPos).isAir();
-            boolean posAir = MinecraftClient.getInstance().world.getBlockState(targetNode.pos).isAir();
-
-            if (extraAir && posAir) {
-                targetNode.state = SimplePathfinder.MovementState.WALKING;
-            }
-        }
 
         double targetX = targetNode.pos.getX() + 0.5D;
         double targetZ = targetNode.pos.getZ() + 0.5D;
@@ -145,6 +137,9 @@ public class MovementController implements IBotModule {
             pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING, targetNode.pos);
             return;
+        }
+        if(targetNode.state == SimplePathfinder.MovementState.BUILDING_PILLAR&&!targetNode.pos.isWithinDistance(player.getBlockPos(),2.5)){
+            targetNode.state = SimplePathfinder.MovementState.JUMPING_UP;
         }
 
 
@@ -235,7 +230,7 @@ public class MovementController implements IBotModule {
 
                 RelevantDirectionHelper.RelevantDirection jumpDir = RelevantDirectionHelper.getRelevantDirection(player, targetNode.pos);
 
-                if (isApproachingEdge(MinecraftClient.getInstance().world, player, jumpDir, 0.5)) {
+                if (isApproachingEdge(MinecraftClient.getInstance().world, player, jumpDir, 0.1)) {
                     pressJump = true;
                 }
                 break;
@@ -314,19 +309,54 @@ public class MovementController implements IBotModule {
                 break;
 
             case MINING:
-                BlockPos targetToMine = targetNode.pos;
-                if (targetNode.extraPos != null && !MinecraftClient.getInstance().world.getBlockState(targetNode.extraPos).isAir()) {
-                    targetToMine = targetNode.extraPos;
+                // 1. 获取动态隧道中的所有障碍物
+                List<BlockPos> obstacles = getObstaclesInTunnel(player, client.world, targetNode.pos);
+
+                if (!obstacles.isEmpty()) {
+                    // 2. 有障碍物挡路！必须停下脚步，优先挖掘最高处的方块
+                    pressForward = false;
+                    pressJump = false;
+                    pressSprint = false;
+
+                    BlockPos blockToMine = obstacles.get(0); // 永远先挖最上面的，防沙子埋人
+
+                    // 获取挖掘角度并应用
+                    float[] miningAngles = MiningHelper.getValidMiningAngle(player, blockToMine);
+                    targetYaw = miningAngles[0];
+                    targetPitch = miningAngles[1];
+
+                    // 切换工具并发包挖掘
+                    ToolsHelper.equipBestTool(player, blockToMine, false);
+                    client.interactionManager.updateBlockBreakingProgress(blockToMine, Direction.UP);
+
+                    if (!player.handSwinging) {
+                        player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                    }
+                } else {
+                    // 3. 面前干干净净没有任何碰撞体积，可以直接走过去了！
+                    pressForward = true;
+                    pressSprint = true;
+
+                    // 计算走向目标方块的 Yaw
+                    double tX = targetNode.pos.getX() + 0.5D;
+                    double tZ = targetNode.pos.getZ() + 0.5D;
+                    targetYaw = (float) Math.toDegrees(Math.atan2(-(tX - player.getX()), tZ - player.getZ()));
+
+                    // 如果是向下走阶梯，稍微低头看着路
+                    if (targetNode.pos.getY() < player.getY()) {
+                        targetPitch = 15f;
+                    } else {
+                        targetPitch = 0f;
+                    }
+
+                    // 防卡死：如果在通过隧道时擦到边缘产生物理碰撞，尝试小跳一下
+                    if (player.horizontalCollision) {
+                        horizontalCollisionTicks++;
+                        if (horizontalCollisionTicks >= 3) pressJump = true;
+                    } else {
+                        horizontalCollisionTicks = 0;
+                    }
                 }
-
-                float[] angles = MiningHelper.getValidMiningAngle(player, targetToMine);
-                targetYaw = angles[0];
-                targetPitch = angles[1];
-
-                ToolsHelper.equipBestTool(player, targetToMine, false);
-
-                client.interactionManager.updateBlockBreakingProgress(targetToMine, Direction.UP);
-                pressForward = true;
                 break;
             case DIVING:
                 double dX = targetX - player.getX();
@@ -528,6 +558,7 @@ public class MovementController implements IBotModule {
     private void tryToSwim(PlayerEntity player) {
         pressForward = true;
         pressSprint = true;
+        if(player.isTouchingWater()&&MinecraftClient.getInstance().world.getBlockState(player.getBlockPos().down()).getMaterial().isLiquid())pressSneak = true;
         swimStateStabilizationTicks = 0;
     }
 
@@ -536,7 +567,100 @@ public class MovementController implements IBotModule {
         pressSprint = true;
         pressForward = true;
     }
+    /**
+     * 动态获取阻挡玩家前往目标位置的方块 (基于碰撞箱隧道检测)
+     */
+    public static List<BlockPos> getObstaclesInTunnel(PlayerEntity player, World world, BlockPos targetPos) {
+        List<BlockPos> obstacles = new ArrayList<>();
+        BlockPos playerPos = player.getBlockPos();
 
+        // ==========================================
+        // 【核心修复 1】：垂直下挖特判 (拯救 TNT 躲避)
+        // 如果 X 和 Z 没变，说明是纯纯的垂直下挖！
+        // 直接闭着眼睛挖脚下这条柱子，绝对不触发任何射线和阶梯逻辑！
+        // ==========================================
+        if (playerPos.getX() == targetPos.getX() && playerPos.getZ() == targetPos.getZ() && targetPos.getY() < playerPos.getY()) {
+            for (int y = playerPos.getY() - 1; y >= targetPos.getY(); y--) {
+                BlockPos p = new BlockPos(playerPos.getX(), y, playerPos.getZ());
+                BlockState state = world.getBlockState(p);
+                // 免死金牌
+                if (com.fredoseep.utils.bt.BtStuff.craftingTablePos != null && p.equals(com.fredoseep.utils.bt.BtStuff.craftingTablePos)) continue;
+
+                if (!state.isAir() && state.getMaterial().isSolid()) {
+                    obstacles.add(p);
+                }
+            }
+            return obstacles;
+        }
+
+        // ==========================================
+        // 【核心修复 2】：射线“瘦身”与防贴墙偏移
+        // ==========================================
+        // 将 X 和 Z 的膨胀半径从 0.2 极度收缩到 0.05，只检测正前方的核心障碍物
+        double radiusX = 0.05;
+        double radiusY = 0.9;
+        double radiusZ = 0.05;
+
+        // 防止玩家贴墙走导致射线起点陷入墙内，将起点坐标强行向当前方块中心拉拢 50%
+        double startX = player.getX();
+        double startZ = player.getZ();
+        double centerX = playerPos.getX() + 0.5;
+        double centerZ = playerPos.getZ() + 0.5;
+        startX = startX * 0.5 + centerX * 0.5;
+        startZ = startZ * 0.5 + centerZ * 0.5;
+
+        Vec3d startCenter = new Vec3d(startX, player.getBoundingBox().getCenter().y, startZ);
+        Vec3d targetCenter = new Vec3d(
+                targetPos.getX() + 0.5, targetPos.getY() + 0.9, targetPos.getZ() + 0.5
+        );
+
+        Box targetBox = new Box(
+                targetPos.getX() + 0.5 - radiusX, targetPos.getY(), targetPos.getZ() + 0.5 - radiusZ,
+                targetPos.getX() + 0.5 + radiusX, targetPos.getY() + 1.8, targetPos.getZ() + 0.5 + radiusZ
+        );
+        Box movementTunnel = player.getBoundingBox().union(targetBox).expand(0.01);
+
+        int minX = MathHelper.floor(movementTunnel.minX);
+        int maxX = MathHelper.ceil(movementTunnel.maxX);
+        int minY = MathHelper.floor(movementTunnel.minY);
+        int maxY = MathHelper.ceil(movementTunnel.maxY);
+        int minZ = MathHelper.floor(movementTunnel.minZ);
+        int maxZ = MathHelper.ceil(movementTunnel.maxZ);
+
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        for (int x = minX; x < maxX; x++) {
+            for (int y = minY; y < maxY; y++) {
+                for (int z = minZ; z < maxZ; z++) {
+                    mutable.set(x, y, z);
+
+                    if (y < targetPos.getY()) continue;
+
+                    // 工作台免死金牌
+                    if (com.fredoseep.utils.bt.BtStuff.craftingTablePos != null && mutable.equals(com.fredoseep.utils.bt.BtStuff.craftingTablePos)) {
+                        continue;
+                    }
+
+                    BlockState state = world.getBlockState(mutable);
+
+                    if (!state.isAir() && !state.getMaterial().isLiquid() && state.getMaterial().isSolid()) {
+                        net.minecraft.util.shape.VoxelShape shape = state.getCollisionShape(world, mutable);
+
+                        if (!shape.isEmpty()) {
+                            Box blockBox = shape.getBoundingBox().offset(mutable);
+                            Box expandedBox = blockBox.expand(radiusX, radiusY, radiusZ);
+
+                            if (com.fredoseep.utils.player.PlayerHelper.isLineIntersectingBox(startCenter, targetCenter, expandedBox)) {
+                                obstacles.add(mutable.toImmutable());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        obstacles.sort((p1, p2) -> Integer.compare(p2.getY(), p1.getY()));
+        return obstacles;
+    }
     private float adjustPostureForSpeedbridging(PlayerEntity player, BlockPos pos, RelevantDirectionHelper.RelevantDirection relevantDirection) {
         float adjustedYaw = (float) relevantDirection.getAdjustPostureForSpeedbridgingYaw();
         pressSneak = true;
@@ -688,7 +812,7 @@ public class MovementController implements IBotModule {
             return false;
         }
 
-        net.minecraft.util.math.Box box = player.getBoundingBox().offset(dx, -0.1, dz);
+        Box box = player.getBoundingBox().offset(dx, -0.1, dz);
 
         int minX = MathHelper.floor(box.minX);
         int maxX = MathHelper.floor(box.maxX - 1.0E-7D);
