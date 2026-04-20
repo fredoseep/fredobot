@@ -161,8 +161,22 @@ public class InventoryHelper {
         SAND(Items.SAND, true, 1),            
         GRAVEL(Items.GRAVEL, true, 2),
         STONE(Items.STONE, false, 3),         
-        OAK_PLANKS(Items.OAK_PLANKS, false, 20);
-
+        OAK_PLANKS(Items.OAK_PLANKS, false, 20),
+        SPRUCE_PLANKS(Items.SPRUCE_PLANKS, false,20),
+        BIRCH_PLANKS(Items.BIRCH_PLANKS,false,20),
+        JUNGLE_PLANKS(Items.JUNGLE_PLANKS,false,20),
+        ACACIA_PLANKS(Items.ACACIA_PLANKS,false,20),
+        DARK_OAK_PLANKS(Items.DARK_OAK_PLANKS,false,20),
+        CRIMSON_PLANKS(Items.CRIMSON_PLANKS,false,20),
+        WARPED_PLANKS(Items.WARPED_PLANKS,false,20),
+        OAK_LEAVES(Items.OAK_LEAVES,false,3),
+        SPRUCE_LEAVES(Items.SPRUCE_LEAVES,false,3),
+        BIRCH_LEAVES(Items.BIRCH_LEAVES,false,3),
+        JUNGLE_LEAVES(Items.JUNGLE_LEAVES,false,3),
+        ACACIA_LEAVES(Items.ACACIA_LEAVES,false,3),
+        DARK_OAK_LEAVES(Items.DARK_OAK_LEAVES,false,3);
+        
+        
         private final Item item;
         private final boolean isGravity;
         private final int cost; 
@@ -193,7 +207,7 @@ public class InventoryHelper {
         }
     }
 
-   
+
     public static class BlockCounts {
         public int bridgingBlocks = 0;  // 非重力
         public int pillaringBlocks = 0; // 含重力方块
@@ -320,7 +334,6 @@ public class InventoryHelper {
                 plankType.add(Items.ACACIA_PLANKS);
             if ((item == Items.DARK_OAK_PLANKS || item == Items.DARK_OAK_LOG || item == Items.DARK_OAK_WOOD || item == Items.STRIPPED_DARK_OAK_LOG || item == Items.STRIPPED_DARK_OAK_WOOD) && !plankType.contains(Items.DARK_OAK_PLANKS))
                 plankType.add(Items.DARK_OAK_PLANKS);
-            // 【关键补全】：加上最常见的橡木！
             if ((item == Items.OAK_PLANKS || item == Items.OAK_LOG || item == Items.OAK_WOOD || item == Items.STRIPPED_OAK_LOG || item == Items.STRIPPED_OAK_WOOD) && !plankType.contains(Items.OAK_PLANKS))
                 plankType.add(Items.OAK_PLANKS);
         }
