@@ -26,17 +26,14 @@ public class Fredobot implements ModInitializer {
 												int z = IntegerArgumentType.getInteger(context, "z");
 												BlockPos target = new BlockPos(x, y, z);
 
-												// 【核心修复 1】：先启动整个 Bot 引擎！
 												BotEngine.getInstance().start();
 
-												// 然后再下达寻路目标
 												BotEngine.getInstance().getModule(PathExecutor.class).setGoal(target);
 
 												context.getSource().sendFeedback(new LiteralText("§e[服务器侧] 接收到寻路请求: " + target.toShortString()), false);
 												return 1;
 											})))).then(CommandManager.literal("stop").executes(context -> {
 
-						// 【核心修复 2】：不仅要停止寻路器，最好把整个引擎也停掉，彻底释放键盘
 						BotEngine.getInstance().stop();
 
 						context.getSource().sendFeedback(new LiteralText("§c[服务器侧] 机器人已彻底停止"), false);
