@@ -71,30 +71,26 @@ public class InventoryHelper {
     public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player, int itemInventorySlot, int targetHotbarSlot) {
         if (client.interactionManager == null || player == null) return false;
 
-        // 1. 拦截目标快捷栏越界
         if (targetHotbarSlot < 0 || targetHotbarSlot > 8) {
             System.out.println("FredoBot: 目标快捷栏越界 (" + targetHotbarSlot + ")");
             return false;
         }
 
-        // 2. 拦截物品不存在的情况，防止走到最后的 out of range
         if (itemInventorySlot == -1) {
             System.out.println("FredoBot: 无法移动物品 -> 背包中未找到该物品 (-1)");
             return false;
         }
 
-        // 3. 【核心修复】拦截已经在对应位置的物品（原版 2x2 容器中，快捷栏的偏移量是 36）
         if (itemInventorySlot == targetHotbarSlot + 36) {
-            return true; // 已经在那里了，直接放行
+            return true; 
         }
 
-        // 4. 合法的全局包裹位置 (9-45 包含主背包、快捷栏和副手)
         if (itemInventorySlot >= 9 && itemInventorySlot <= 45) {
             int syncId = player.currentScreenHandler.syncId;
             client.interactionManager.clickSlot(
                     syncId,
                     itemInventorySlot,
-                    targetHotbarSlot, // 发给服务器的 SWAP 目标索引只接受 0~8
+                    targetHotbarSlot, 
                     SlotActionType.SWAP,
                     player
             );
@@ -119,10 +115,8 @@ public class InventoryHelper {
         World world = player.world;
         if (world == null) return null;
 
-        // 1. 划定扫描范围
         Box searchArea = player.getBoundingBox().expand(searchRadius, searchRadius, searchRadius);
 
-        // 2. 扫描区域内的所有 ItemEntity，并立刻用调用者传来的 condition 进行过滤
         List<ItemEntity> droppedItems = world.getEntities(
                 ItemEntity.class,
                 searchArea,
@@ -131,7 +125,6 @@ public class InventoryHelper {
 
         if (droppedItems.isEmpty()) return null;
 
-        // 3. 寻找距离玩家最近的那一个
         ItemEntity closestItem = null;
         double minDistanceSq = Double.MAX_VALUE;
 
@@ -150,7 +143,6 @@ public class InventoryHelper {
      * 重载 1：精准寻找特定的某个物品 (找泥土、钻石专用)
      */
     public static ItemEntity findNearestDroppedItem(PlayerEntity player, double searchRadius, Item targetItem) {
-        // 直接调用核心方法，传入一个比对 targetItem 的 Lambda 表达式
         return findNearestDroppedItem(player, searchRadius, stack -> stack.getItem() == targetItem);
     }
 
@@ -158,23 +150,22 @@ public class InventoryHelper {
      * 重载 2：模糊寻找某一大类物品 (找任何船、任何剑专用)
      */
     public static ItemEntity findNearestDroppedItem(PlayerEntity player, double searchRadius, Class<? extends Item> itemClass) {
-        // 直接调用核心方法，传入一个 isInstance 的 Lambda 表达式
         return findNearestDroppedItem(player, searchRadius, stack -> itemClass.isInstance(stack.getItem()));
     }
 
 
     public enum PlaceableBlock {
-        DIRT(Items.DIRT, false, 3),            // 泥土最便宜，首选
-        COBBLESTONE(Items.COBBLESTONE, false, 4), // 圆石第二
-        NETHERRACK(Items.NETHERRACK, false, 3),   // 地狱岩第三
-        SAND(Items.SAND, true, 1),             // 沙子/沙砾受重力影响，酌情使用
+        DIRT(Items.DIRT, false, 3),           
+        COBBLESTONE(Items.COBBLESTONE, false, 4), 
+        NETHERRACK(Items.NETHERRACK, false, 3),  
+        SAND(Items.SAND, true, 1),            
         GRAVEL(Items.GRAVEL, true, 2),
-        STONE(Items.STONE, false, 3),         // 烧好的石头比较贵
-        OAK_PLANKS(Items.OAK_PLANKS, false, 20); // 木板最贵，极其不舍得用！
+        STONE(Items.STONE, false, 3),         
+        OAK_PLANKS(Items.OAK_PLANKS, false, 20);
 
         private final Item item;
         private final boolean isGravity;
-        private final int cost; // 【新增】价格属性
+        private final int cost; 
 
         PlaceableBlock(Item item, boolean isGravity, int cost) {
             this.item = item;
@@ -190,7 +181,6 @@ public class InventoryHelper {
             return isGravity;
         }
 
-        // 【新增】获取价格的方法
         public int getCost() {
             return cost;
         }
@@ -203,10 +193,10 @@ public class InventoryHelper {
         }
     }
 
-    // 内部类：用于同时储存两种方块数量
+   
     public static class BlockCounts {
-        public int bridgingBlocks = 0;  // 只能用于悬空搭桥的方块 (非重力)
-        public int pillaringBlocks = 0; // 可以用于原地垫高的方块 (包含重力方块)
+        public int bridgingBlocks = 0;  // 非重力
+        public int pillaringBlocks = 0; // 含重力方块
     }
 
     /**
@@ -216,12 +206,10 @@ public class InventoryHelper {
         BlockCounts counts = new BlockCounts();
         if (player == null) return counts;
 
-        // 统计主手及快捷栏
         for (int i = 0; i < player.inventory.main.size(); i++) {
             ItemStack stack = player.inventory.main.get(i);
             addStackToCounts(stack, counts);
         }
-        // 统计副手
         ItemStack offHand = player.inventory.offHand.get(0);
         addStackToCounts(offHand, counts);
 
@@ -233,7 +221,6 @@ public class InventoryHelper {
             PlaceableBlock pb = PlaceableBlock.getPlaceable(stack.getItem());
             if (pb != null) {
                 counts.pillaringBlocks += stack.getCount();
-                // 只有非重力方块才计入搭桥储备
                 if (!pb.isGravity()) {
                     counts.bridgingBlocks += stack.getCount();
                 }
@@ -281,13 +268,10 @@ public class InventoryHelper {
         int syncId = player.currentScreenHandler.syncId;
         boolean foundAny = false;
 
-        // 遍历配方本寻找目标
         for (net.minecraft.recipe.Recipe<?> recipe : client.world.getRecipeManager().values()) {
             if (recipe.getOutput().getItem() == targetOutput) {
                 foundAny = true;
 
-                // 【核心修复】：不要 break！向服务器发送所有可能产出该物品的配方！
-                // 服务器会自动丢弃缺少材料的配方（比如竹子），只执行有材料的配方（比如木板）
                 if (times == 0) {
                     client.interactionManager.clickRecipe(syncId, recipe, true);
                 } else {
@@ -319,7 +303,7 @@ public class InventoryHelper {
             if (item == Items.ACACIA_PLANKS || item == Items.ACACIA_LOG) return Items.ACACIA_BUTTON;
             if (item == Items.DARK_OAK_PLANKS || item == Items.DARK_OAK_LOG) return Items.DARK_OAK_BUTTON;
         }
-        return Items.OAK_BUTTON; // 默认兜底 (包含橡木)
+        return Items.OAK_BUTTON;
     }
 
     public static List<Item> getTargetPlankType(PlayerEntity player) {
@@ -362,7 +346,6 @@ public class InventoryHelper {
         return plankTypes;
     }
     public static Item getTargetBoatType(PlayerEntity player) {
-        // 船需要 5 个同种木板
         Item abundantPlank = getAbundantPlank(player, 5);
         if (abundantPlank == Items.SPRUCE_PLANKS) return Items.SPRUCE_BOAT;
         if (abundantPlank == Items.BIRCH_PLANKS) return Items.BIRCH_BOAT;
@@ -373,7 +356,6 @@ public class InventoryHelper {
     }
 
     public static Item getTargetDoorType(PlayerEntity player) {
-        // 门需要 6 个同种木板
         Item abundantPlank = getAbundantPlank(player, 6);
         if (abundantPlank == Items.SPRUCE_PLANKS) return Items.SPRUCE_DOOR;
         if (abundantPlank == Items.BIRCH_PLANKS) return Items.BIRCH_DOOR;
@@ -392,19 +374,15 @@ public class InventoryHelper {
         for (int i = 0; i < 36; i++) {
             ItemStack stack = player.inventory.getStack(i);
             if (stack.getItem().isIn(net.minecraft.tag.ItemTags.PLANKS)) {
-                // 累计每种木板的数量 (应对分散堆叠的情况)
                 plankCounts.put(stack.getItem(), plankCounts.getOrDefault(stack.getItem(), 0) + stack.getCount());
             }
         }
 
-        // 遍历统计结果，只要哪种木头数量满足所需，就立刻拍板用它！
         for (java.util.Map.Entry<Item, Integer> entry : plankCounts.entrySet()) {
             if (entry.getValue() >= requiredCount) {
                 return entry.getKey();
             }
         }
-
-        // 兜底返回，防止空指针
         return Items.OAK_PLANKS;
     }
 
