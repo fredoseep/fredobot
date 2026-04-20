@@ -162,9 +162,9 @@ public class PathExecutor implements IBotModule {
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
-        this.stuckCheckTicks = 0;           // 【新增】
+        this.stuckCheckTicks = 0;
         this.lastStuckCheckPos = null;
-        this.consecutiveStuckCount = 0; // 【新增】：开始新路径时重置
+        this.consecutiveStuckCount = 0;
 
 
         MinecraftClient client = MinecraftClient.getInstance();
@@ -260,7 +260,6 @@ public class PathExecutor implements IBotModule {
                 double dy = Math.abs(player.getY() - lastStuckCheckPos.y);
                 double horizontalDistSq = dx * dx + dz * dz;
 
-                // XZ平面移动平方小于1.0 (即距离小于1)，且Y轴移动也小于1
                 if (horizontalDistSq < 1.0 && dy < 1.0) {
                     consecutiveStuckCount++;
                     player.sendMessage(new net.minecraft.text.LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
@@ -270,16 +269,10 @@ public class PathExecutor implements IBotModule {
                     stuckCheckTicks = 0;
                     lastStuckCheckPos = player.getPos();
 
-                    // 以当前玩家的坐标为起点，重新向最终目标发起寻路
                     recalculatePath(new BlockPos(player.getX(), player.getY() + 0.2, player.getZ()));
-                    return; // 结束当前Tick，等待重新计算完成
+                    return;
                 }
-
-                // ==========================================
-                // 【核心修复 2】：真正的脱困结算点
-                // 3秒过去了，距离大于1，说明机器人真实发生物理位移，彻底脱困！
-                // ==========================================
-                consecutiveStuckCount = 0; // 在这里清空计数器！
+                consecutiveStuckCount = 0;
                 lastStuckCheckPos = player.getPos();
                 stuckCheckTicks = 0;
             }
@@ -403,13 +396,11 @@ public class PathExecutor implements IBotModule {
         World world = MinecraftClient.getInstance().world;
         if (world == null) return;
 
-        // 【核心新增】：如果连续卡住 2 次以上，开启“严格判定模式”，禁用一切碰撞箱扩展！
         boolean isStrictMode = consecutiveStuckCount >= 2;
 
         net.minecraft.util.math.Box lowerBody;
 
         if (isStrictMode) {
-            // 严格模式下：就算在水里或船上，也只使用最原始的死板碰撞箱
             lowerBody = new net.minecraft.util.math.Box(
                     player.getX() - 0.3, player.getY(), player.getZ() - 0.3,
                     player.getX() + 0.3, player.getY() + 0.5, player.getZ() + 0.3
@@ -438,7 +429,6 @@ public class PathExecutor implements IBotModule {
             double expandYDown = 0.0;
             double expandYUp = 0.0;
 
-            // 只有在非严格模式下，才允许通过碰撞箱扩展来“蹭”节点
             if (!isStrictMode) {
                 if (node.state == SimplePathfinder.MovementState.SWIMMING) {
                     expandXZ = 0.35;
@@ -483,7 +473,6 @@ public class PathExecutor implements IBotModule {
                 boolean isWater = node.state == SimplePathfinder.MovementState.SWIMMING || node.state == SimplePathfinder.MovementState.DIVING;
                 double allowedDistSq = isWater ? 0.12 : 0.03;
 
-                // 【严格模式收紧】：终点判定也必须死板地贴合，不给水域开绿灯
                 if (isStrictMode) {
                     allowedDistSq = 0.03;
                 }

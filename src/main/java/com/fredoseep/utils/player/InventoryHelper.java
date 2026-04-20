@@ -11,6 +11,7 @@ import net.minecraft.tag.BlockTags;
 import net.minecraft.util.math.Box;
 import net.minecraft.world.World;
 
+import java.time.chrono.MinguoEra;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -19,6 +20,7 @@ import java.util.function.Predicate;
 
 public class InventoryHelper {
     public static Set<Block> anyLogs = new HashSet<>(BlockTags.LOGS.values());
+    public static Item doorType = null;
 
     public static boolean hasBoat(PlayerEntity player) {
         if (player == null || player.inventory == null) return false;
@@ -68,7 +70,16 @@ public class InventoryHelper {
         return -1;
     }
 
-    public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player, int itemInventorySlot, int targetHotbarSlot) {
+
+    public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player,Item itemClass , int targetHotbarSlot) {
+        return moveItemToHotbar(MinecraftClient.getInstance(),player,findItemSlot(player,itemClass),targetHotbarSlot);
+    }
+
+        public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player,Class<? extends Item> itemClass , int targetHotbarSlot) {
+        return moveItemToHotbar(MinecraftClient.getInstance(),player,findItemSlot(player,itemClass),targetHotbarSlot);
+    }
+
+        public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player, int itemInventorySlot, int targetHotbarSlot) {
         if (client.interactionManager == null || player == null) return false;
 
         if (targetHotbarSlot < 0 || targetHotbarSlot > 8) {
@@ -378,9 +389,7 @@ public class InventoryHelper {
         return Items.OAK_DOOR;
     }
 
-    /**
-     * 核心智能分析：统计背包里每种木板的总数，返回数量达标的木板类型
-     */
+
     private static Item getAbundantPlank(PlayerEntity player, int requiredCount) {
         java.util.Map<Item, Integer> plankCounts = new java.util.HashMap<>();
 
@@ -398,5 +407,49 @@ public class InventoryHelper {
         }
         return Items.OAK_PLANKS;
     }
+    public static int countItem(PlayerEntity player, Item targetItem) {
+        return countItem(player, stack -> stack.getItem() == targetItem);
+    }
+    public static int countItem(PlayerEntity player, net.minecraft.tag.Tag<Item> tag) {
+        return countItem(player, stack -> stack.getItem().isIn(tag));
+    }
 
+    public static int countItem(PlayerEntity player, Predicate<ItemStack> condition) {
+        if (player == null || player.inventory == null) return 0;
+
+        int totalCount = 0;
+
+        for (int i = 0; i < player.inventory.size(); i++) {
+            ItemStack stack = player.inventory.getStack(i);
+            if (!stack.isEmpty() && condition.test(stack)) {
+                totalCount += stack.getCount();
+            }
+        }
+        return totalCount;
+    }
+    public static Item getCheapestBlock(PlayerEntity player, boolean needGravityBlock) {
+        Item bestItem = null;
+        int minCost = Integer.MAX_VALUE;
+
+        for (int i = 0; i < player.inventory.size(); i++) {
+            net.minecraft.item.ItemStack stack = player.inventory.getStack(i);
+
+            if (stack.isEmpty()) {
+                continue;
+            }
+            Item currentItem = stack.getItem();
+            PlaceableBlock placeable = PlaceableBlock.getPlaceable(currentItem);
+
+            if (placeable != null) {
+                if (placeable.isGravity() == needGravityBlock) {
+                    if (placeable.getCost() < minCost) {
+                        minCost = placeable.getCost();
+                        bestItem = currentItem;
+                    }
+                }
+            }
+        }
+
+        return bestItem;
+    }
 }

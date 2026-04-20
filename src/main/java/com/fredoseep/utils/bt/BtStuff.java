@@ -10,17 +10,18 @@ import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
 import com.fredoseep.utils.player.PlayerHelper;
 import com.fredoseep.utils.player.ToolsHelper;
+import net.fabricmc.loader.impl.lib.sat4j.specs.IVec;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.Item;
-import net.minecraft.item.Items;
+import net.minecraft.item.*;
 import net.minecraft.screen.CraftingScreenHandler;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.tag.BlockTags;
+import net.minecraft.tag.ItemTags;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -58,7 +59,7 @@ public class BtStuff {
     }
 
     public enum BtCraftPhase {
-        CRUSH_LOGS, MAKE_TABLE, PLACE_TABLE, OPEN_TABLE, MAKE_STICKS_1, MAKE_STICKS_2, PROCESS_QUEUE, CHECK_40_PLANKS, GATHER_MISSING_PLANKS, CRUSH_NEW_LOGS, GATHER_MISSING_COBBLE, RETURN_TO_TABLE, OPEN_TABLE_RETURN, BREAK_TABLE, DONE
+        CRUSH_LOGS, MAKE_TABLE, PLACE_TABLE, OPEN_TABLE, MAKE_STICKS_1, MAKE_STICKS_2, PROCESS_QUEUE, CHECK_40_PLANKS, GATHER_MISSING_PLANKS, CRUSH_NEW_LOGS, GATHER_MISSING_COBBLE, RETURN_TO_TABLE, OPEN_TABLE_RETURN, BREAK_TABLE, GETTING_LEAVES, DONE,INVENTORY_MANAGEMENT;
     }
 
     public enum TNTCraftPhase {
@@ -94,6 +95,7 @@ public class BtStuff {
         hasCheckedPlanksForFinalCrafts = false;
         btCraftPhase = BtCraftPhase.CRUSH_LOGS;
         tntCraftPhase = TNTCraftPhase.EVALUATE;
+        InventoryHelper.doorType = null;
     }
 
     public static int groundYNoLeavesOrTrees(BlockPos checkCol) {
@@ -357,7 +359,6 @@ public class BtStuff {
 
         itemsToCraft.add(Items.OAK_BOAT);
         itemsToCraft.add(Items.OAK_DOOR);
-        System.out.println("Fredodebug: hasTNT: " + hasTNT);
         System.out.println("Fredodebug: craftingList: " + itemsToCraft);
         return true;
     }
@@ -641,7 +642,6 @@ public class BtStuff {
                     MiningHelper.dispatchNextMineAndCollectTask();
                     break;
                 }
-                System.out.println("Fredodebug: hasTNT:" + hasTNT);
                 if (!treeQueueGenerated) {
                     if (pathExecutor.isBusy()) break;
                     if (hasTNT) {
@@ -773,7 +773,8 @@ public class BtStuff {
                         if (player.currentScreenHandler instanceof CraftingScreenHandler) {
                             btCraftPhase = BtCraftPhase.MAKE_STICKS_1;
                         } else {
-                            btCraftPhase = BtCraftPhase.PLACE_TABLE;
+                            System.out.println("FredoBot [警告]: 初次打开工作台 GUI 超时，转入重新右键交互...");
+                            btCraftPhase = BtCraftPhase.RETURN_TO_TABLE;
                         }
                         break;
 
@@ -816,7 +817,10 @@ public class BtStuff {
                         }
 
                         if (targetItem == Items.OAK_BOAT) targetItem = InventoryHelper.getTargetBoatType(player);
-                        if (targetItem == Items.OAK_DOOR) targetItem = InventoryHelper.getTargetDoorType(player);
+                        if (targetItem == Items.OAK_DOOR) {
+                            targetItem = InventoryHelper.getTargetDoorType(player);
+                            InventoryHelper.doorType = targetItem;
+                        }
 
                         if (targetItem == Items.STONE_AXE || targetItem == Items.STONE_SHOVEL) {
                             int cobbleNeeded = (targetItem == Items.STONE_AXE) ? 3 : 1;
@@ -896,7 +900,7 @@ public class BtStuff {
                         player.closeHandledScreen();
                         minecraftClient.openScreen(null);
 
-                        int pickSlot = InventoryHelper.findItemSlot(player, net.minecraft.item.PickaxeItem.class);
+                        int pickSlot = InventoryHelper.findItemSlot(player, PickaxeItem.class);
                         if (pickSlot != -1) {
                             InventoryHelper.moveItemToHotbar(minecraftClient, player, pickSlot, 0);
                             player.inventory.selectedSlot = 0;
@@ -911,12 +915,6 @@ public class BtStuff {
                             globalExecutor.resetWorld();
                             return;
                         }
-
-                        // ==========================================
-                        // 【核心修复 2】：物理级防卡死兜底！
-                        // 如果工作台被苦力怕炸了、被玩家挖了，或者之前被误挖了，
-                        // 此时该坐标已经是空气。直接终止死循环，退回放置阶段重新造一个！
-                        // ==========================================
                         if (minecraftClient.world.getBlockState(craftingTablePos).getBlock() != Blocks.CRAFTING_TABLE) {
                             System.out.println("FredoBot [严重异常]: 原坐标的工作台不翼而飞！退回重新放置阶段...");
                             craftingTablePos = null; // 清空无效坐标
@@ -924,15 +922,12 @@ public class BtStuff {
                             return;
                         }
 
-                        // 原有的免死金牌保留，作为双重保险
                         if (MiningHelper.blockToMine.contains(craftingTablePos)) {
                             System.out.println("FredoBot [拦截]: 寻路试图将工作台作为障碍物挖掉，已被拦截！");
                             MiningHelper.blockToMine.remove(craftingTablePos);
                         }
 
                         double distToTable = player.squaredDistanceTo(Vec3d.ofCenter(craftingTablePos));
-
-                        // 如果距离大于 4.0，说明还在路上
                         if (distToTable > 4.0) {
                             if (!MiningHelper.blockToMine.isEmpty()) {
                                 MiningHelper.dispatchNextMineAndCollectTask();
@@ -941,10 +936,8 @@ public class BtStuff {
                             if (!pathExecutor.isBusy()) {
                                 pathExecutor.setGoal(craftingTablePos.up());
                             }
-                            return; // 还在路上，结束本 Tick
+                            return;
                         }
-
-                        // 到达工作台前，刹车并交互... (后续代码保持不变)
                         if (!MiningHelper.blockToMine.isEmpty()) MiningHelper.blockToMine.clear();
                         if (pathExecutor.isBusy()) pathExecutor.stop();
 
@@ -987,15 +980,60 @@ public class BtStuff {
                         btCraftPhase = BtCraftPhase.DONE;
                         break;
 
+
                     case DONE:
                         if (!MiningHelper.blockToMine.isEmpty()) {
                             MiningHelper.dispatchNextMineAndCollectTask();
                             break;
                         }
                         craftingTablePos = null;
-                        btCraftPhase = BtCraftPhase.CRUSH_LOGS; // 状态归位
-                        System.out.println("FredoBot [完结]: 船与门合成完毕！工作台已回收！所有BT流程结束，进入 NEXT 阶段！");
+                        btCraftPhase = BtCraftPhase.CRUSH_LOGS;
+
+                        boolean hasShears = InventoryHelper.findItemSlot(player, Items.SHEARS) != -1;
+                        int currentLeaves = InventoryHelper.countItem(player, net.minecraft.tag.ItemTags.LEAVES);
+                        if (!hasShears || currentLeaves >= 64) {
+                            if (!hasShears) {
+                                System.out.println("FredoBot : no shears go next");
+                            } else {
+                                System.out.println("FredoBot : 64 leaves done go next");
+                            }
+                            btCraftPhase = BtCraftPhase.INVENTORY_MANAGEMENT;
+                        } else {
+                            System.out.println("FredoBot: current leaves count:  " + currentLeaves );
+                            btCraftPhase = BtCraftPhase.GETTING_LEAVES;
+                        }
+                        break;
+
+                    case GETTING_LEAVES:
+                        int existingLeaves = InventoryHelper.countItem(player, net.minecraft.tag.ItemTags.LEAVES);
+                        int neededLeaves = 64 - existingLeaves;
+
+                        if (neededLeaves > 0) {
+                            MiningHelper.mineAndCollect(player, new HashSet<>(BlockTags.LEAVES.values()), neededLeaves, 80);
+                            if (MiningHelper.blockToMine.isEmpty()) {
+                                System.out.println("FredoBot : leaves is not enough go next");
+                                btCraftPhase = BtCraftPhase.INVENTORY_MANAGEMENT;
+                            } else {
+                                btCraftPhase = BtCraftPhase.DONE;
+                            }
+                        } else {
+                            btCraftPhase = BtCraftPhase.INVENTORY_MANAGEMENT;
+                        }
+                        break;
+                    case INVENTORY_MANAGEMENT:
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,AxeItem.class,0);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,PickaxeItem.class,1);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player, ShovelItem.class,2);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,Items.BUCKET,3);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player, Items.COOKED_SALMON,4);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,Items.COOKED_COD,4);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,false),5);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,false),6);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,true),6);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,BoatItem.class,7);
+                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.doorType,8);
                         globalExecutor.currentState = GlobalExecutor.GlobalState.NEXT;
+                        System.out.println("Fredobot: Inventory management done");
                         break;
                 }
                 break;

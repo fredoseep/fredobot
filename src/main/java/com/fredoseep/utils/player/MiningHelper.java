@@ -149,11 +149,7 @@ public class MiningHelper {
     public static List<BlockPos> findNearestBlocks(PlayerEntity player, Map<Block, Integer> targetCounts,int maxRadius) {
         List<BlockPos> result = new ArrayList<>();
         if (targetCounts == null || targetCounts.isEmpty()) return result;
-
-        // 复制一份配额表（剩余需求表），防止修改外部传入的 Map
         Map<Block, Integer> remainingCounts = new HashMap<>(targetCounts);
-
-        // 计算我们总共需要找多少个方块，如果总数是 0 直接结束
         int totalNeeded = remainingCounts.values().stream().mapToInt(Integer::intValue).sum();
         if (totalNeeded <= 0) return result;
 
@@ -163,7 +159,6 @@ public class MiningHelper {
                 Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos))
         );
 
-        // 依然是单次雷达扫描
         for (int x = -maxRadius; x <= maxRadius; x++) {
             for (int y = -maxRadius; y <= maxRadius; y++) {
                 for (int z = -maxRadius; z <= maxRadius; z++) {
@@ -172,7 +167,6 @@ public class MiningHelper {
                     if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) continue;
 
                     Block currentBlock = world.getBlockState(checkPos).getBlock();
-                    // 只有当这个方块在我们的清单里，我们才把它塞进队列
                     if (remainingCounts.containsKey(currentBlock)) {
                         queue.add(checkPos);
                     }
@@ -180,22 +174,17 @@ public class MiningHelper {
             }
         }
 
-        // ==========================================
-        // 【核心分配逻辑】：按距离从小到大拿取，并检查各个方块的“配额”
-        // ==========================================
         while (!queue.isEmpty() && totalNeeded > 0) {
             BlockPos pos = queue.poll();
             Block block = world.getBlockState(pos).getBlock();
 
-            // 检查这个方块我们还需要多少个
             int needed = remainingCounts.getOrDefault(block, 0);
 
             if (needed > 0) {
-                result.add(pos); // 确实还需要，加入结果！
-                remainingCounts.put(block, needed - 1); // 这种方块的配额 -1
-                totalNeeded--; // 总需求 -1
+                result.add(pos);
+                remainingCounts.put(block, needed - 1);
+                totalNeeded--;
             }
-            // 如果 needed 已经是 0 了，说明这种方块找够了，直接丢弃（循环进入下一次），继续找别的。
         }
 
         return result;
@@ -204,7 +193,7 @@ public class MiningHelper {
 
     public static void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [混合方块] 挖掘拾取队列...");
-        MiningHelper.blockToMine.clear(); // 清空上次的残留
+        MiningHelper.blockToMine.clear();
         MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetBlocks, totalCount, maxRadius));
         if (MiningHelper.blockToMine.isEmpty()) {
             System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetBlocks.toString());
@@ -226,7 +215,7 @@ public class MiningHelper {
             BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
             return;
         }
-        dispatchNextMineAndCollectTask(); // 启动第一个任务
+        dispatchNextMineAndCollectTask();
     }
 
     /**
@@ -234,10 +223,7 @@ public class MiningHelper {
      */
     public static void dispatchNextMineAndCollectTask() {
         if (!MiningHelper.blockToMine.isEmpty()) {
-            // 拿出列表里的第一个坐标，并从列表中删掉它
             BlockPos nextTarget = MiningHelper.blockToMine.remove(0);
-
-            // 启动 MiscController 里的挖+捡一体化分支
             BotEngine.getInstance().getModule(MiscController.class).startTask(
                     MiscController.MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP,
                     nextTarget

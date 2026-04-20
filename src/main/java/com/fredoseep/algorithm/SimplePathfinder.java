@@ -17,7 +17,6 @@ public class SimplePathfinder {
     private static final int ABUNDANT_BLOCK_THRESHOLD = 64;
 
     public enum MovementState {
-        // 【新增】：剥离出独立的 DIVING（潜水）状态
         WALKING, FALLING, JUMPING_UP, JUMPING_AIR, BUILDING_BRIDGE, BUILDING_PILLAR, MINING, SWIMMING, DIVING
     }
 
@@ -104,13 +103,6 @@ public class SimplePathfinder {
 
     private static List<Node> getNeighbors(World world, Node current, BlockPos end, InventoryHelper.BlockCounts counts, Set<BlockPos> blacklist) {        List<Node> neighbors = new ArrayList<>();
         Direction[] directions = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
-
-        // ==========================================
-        // 【核心修复 2】：动态可用方块结算
-        // 抛弃 Math.max() 限制！允许 blocksUsed 变成负数。
-        // 如果预演时挖了 3 个方块，blocksUsed 就是 -3，
-        // 那么 remaining 就会变成 counts - (-3) = counts + 3，越走越多！
-        // ==========================================
         int remainingBridging = counts.bridgingBlocks - current.blocksUsed;
         int remainingPillaring = counts.pillaringBlocks - current.blocksUsed;
 
@@ -194,7 +186,6 @@ public class SimplePathfinder {
             double dynamicPillarCost = getDynamicCost(remainingPillaring, 1.2, 3.5);
             double totalCost = current.costFromStart + dynamicPillarCost + overheadMineCost;
 
-            // 【动态库存】：垂直垫脚会消耗 1 个方块。如果头顶有障碍被挖掉了，就变相获得了 1 个方块，一进一出抵消！
             int netBlocksUsed = current.blocksUsed + 1;
             if (yieldsBuildingBlock(world, headPos)) {
                 netBlocksUsed -= 1;
@@ -218,32 +209,21 @@ public class SimplePathfinder {
 
             BlockPos adjacentDown = adjacent.down();
             if (!isCurrentWater) {
-                // 【向下阶梯挖掘】修复版：考虑头顶碰撞，需要挖出 3 格高的通行空间
-                // 玩家需要走进 adjacentDown，身体最终占据 adjacentDown (脚) 和 adjacent (头)。
-                // 但在走过去的“瞬间”，玩家的头会划过 adjacentUp，如果这里被挡住，玩家会撞头走不进去！
                 if (!isPassable(world, adjacentDown) || !isPassable(world, adjacent) || !isPassable(world, adjacentUp)) {
-                    // 把头顶方块 (adjacentUp) 的挖掘成本也加进来
                     double stairMineCost = getMiningCost(world, adjacentDown, blacklist)
                             + getMiningCost(world, adjacent, blacklist)
                             + getMiningCost(world, adjacentUp, blacklist);
 
-                    // 只要这三个方块都不是基岩/岩浆 (成本 < 9999.0)，且挖完后脚底有方块支撑
                     if (stairMineCost > 0 && stairMineCost < 9999.0 && isSolid(world, adjacentDown.down())) {
                         int blocksGained = 0;
                         if (yieldsBuildingBlock(world, adjacentDown)) blocksGained++;
                         if (yieldsBuildingBlock(world, adjacent)) blocksGained++;
-                        if (yieldsBuildingBlock(world, adjacentUp)) blocksGained++; // 挖掉头顶方块也能提供建材
-
-                        // 节点的目标位置是 adjacentDown，附加位置设为 adjacent。
+                        if (yieldsBuildingBlock(world, adjacentUp)) blocksGained++;
                         neighbors.add(new Node(adjacentDown, adjacent, current, current.costFromStart + 1.5 + stairMineCost, calculateHeuristic(adjacentDown, end), MovementState.MINING, current.blocksUsed - blocksGained));
                     }
                 }
             }
 
-            // ==========================================
-            // 【核心修复 3】：整合水平挖掘与移动逻辑
-            // 彻底解决“上半身被树叶挡住”问题，修复双重冗余代码，并增加悬崖安全校验
-            // ==========================================
             boolean isBlocked = !isPassable(world, adjacent) || !isPassable(world, adjacentUp);
             double mineCost = 0.0;
             int blocksGained = 0;
@@ -256,36 +236,26 @@ public class SimplePathfinder {
                 }
             }
 
-            // 【跳跃判定】：如果前方是固体障碍，且障碍物上方空间足够，可以跳上去
             if (isSolid(world, adjacent) && isPassable(world, adjacentUp) && isPassable(world, adjacent.up(2)) && isPassable(world, current.pos.up(2))) {
                 neighbors.add(new Node(adjacentUp, null, current, current.costFromStart + 1.5, calculateHeuristic(adjacentUp, end), MovementState.JUMPING_UP, current.blocksUsed));
             }
 
-            // 【平面移动/挖掘判定】：只有当目标位置脚底下有支撑（或者在水里），才允许走过去或挖过去
             if (isSolid(world, adjacentDown) || isCurrentWater) {
                 if (isBlocked) {
                     if (mineCost < 9999.0) {
-                        // 完美契合你的需求：下半身空气，上半身树叶，且脚下有泥土支撑。
-                        // 生成安全 MINING 节点，执行器挖掉头顶树叶后大步向前。
                         neighbors.add(new Node(adjacent, adjacentUp, current, current.costFromStart + 1.0 + mineCost, calculateHeuristic(adjacent, end), MovementState.MINING, current.blocksUsed - blocksGained));
                     }
                 } else {
                     double moveCost = isCurrentWater ? 1.2 : 1.0;
                     neighbors.add(new Node(adjacent, null, current, current.costFromStart + moveCost, calculateHeuristic(adjacent, end), MovementState.WALKING, current.blocksUsed));
                 }
-                continue; // 既然脚底是安全的，就不需要再去判断悬崖掉落或搭桥了
+                continue;
             }
 
-            // ==========================================
-            // 【危险地带】：如果走到了这里，说明前方脚底是空的（悬崖、沟壑）
-            // ==========================================
-            // 安全限制：如果前方不仅是沟壑，上半身还被树叶挡住了，我们直接放弃这条路线。
-            // 因为执行器很难处理“一边挖着头顶的树叶，一边向脚下深渊搭桥”这种高难度复合动作。
             if (isBlocked) {
                 continue;
             }
 
-            // 原有逻辑：跨越沟壑、掉落、搭桥（保持不变）
             boolean jumpedOverGap = false;
             Node lastAirNode = current;
 
@@ -424,11 +394,6 @@ public class SimplePathfinder {
 
     private static List<Node> smoothPath(World world, List<Node> path) {
         if (path == null || path.size() <= 2) return path;
-
-        // ==========================================
-        // 第一步：垂直潜水共线消除 (Vertical Collinear Reduction)
-        // 采用你的神级思路：把垂直方向连续的 DIVING 节点全部压缩，只留头尾！
-        // ==========================================
         List<Node> verticallySmoothed = new ArrayList<>();
         verticallySmoothed.add(path.get(0));
 
@@ -437,28 +402,20 @@ public class SimplePathfinder {
             Node curr = path.get(i);
             Node next = path.get(i + 1);
 
-            // 如果连续三个节点都是潜水状态
             if (prev.state == MovementState.DIVING && curr.state == MovementState.DIVING && next.state == MovementState.DIVING) {
-                // 且它们的 X 和 Z 完全一样（即在同一个垂直柱子上）
                 if (prev.pos.getX() == curr.pos.getX() && curr.pos.getX() == next.pos.getX() &&
                         prev.pos.getZ() == curr.pos.getZ() && curr.pos.getZ() == next.pos.getZ()) {
-
-                    // 确保它们是沿着同一个方向移动（比如都在往下潜，没有折返）
                     int dy1 = curr.pos.getY() - prev.pos.getY();
                     int dy2 = next.pos.getY() - curr.pos.getY();
 
                     if (dy1 == dy2) {
-                        continue; // 核心：直接跳过这个中间节点，把它“平滑”掉！
+                        continue;
                     }
                 }
             }
             verticallySmoothed.add(curr);
         }
         verticallySmoothed.add(path.get(path.size() - 1));
-
-        // ==========================================
-        // 第二步：原有的水平方向平滑 (Horizontal Smoothing)
-        // ==========================================
         List<Node> smoothedPath = new ArrayList<>();
         smoothedPath.add(verticallySmoothed.get(0));
 
@@ -511,15 +468,11 @@ public class SimplePathfinder {
                 }
 
                 boolean isWater = isWaterBlock(world, checkPos);
-
-                // ==========================================
-                // 【核心修复 1】：水陆绝对隔离
-                // ==========================================
                 if (start.state == MovementState.SWIMMING || start.state == MovementState.DIVING) {
-                    if (!isWater) return false; // 游泳的平滑直线上，绝对不允许出现空气和陆地！
+                    if (!isWater) return false;
                 } else if (start.state == MovementState.WALKING) {
-                    if (isWater) return false; // 走路的平滑直线上，绝对不允许踩过水面！
-                    if (!isSolid(world, checkPos.down())) return false; // 走路必须脚踏实地
+                    if (isWater) return false;
+                    if (!isSolid(world, checkPos.down())) return false;
                 }
             }
         }

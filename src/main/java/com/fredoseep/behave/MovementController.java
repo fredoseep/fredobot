@@ -243,7 +243,7 @@ public class MovementController implements IBotModule {
                 BlockState footState = MinecraftClient.getInstance().world.getBlockState(footPos);
 
                 boolean isFlowerOrTorch = !footState.getMaterial().isReplaceable() && footState.getCollisionShape(MinecraftClient.getInstance().world, footPos).isEmpty();
-                boolean isSnowLayer = footState.getBlock() == net.minecraft.block.Blocks.SNOW; // 识别薄雪层
+                boolean isSnowLayer = footState.getBlock() == Blocks.SNOW; // 识别薄雪层
 
                 if (isFlowerOrTorch || isSnowLayer) {
                     InventoryHelper.putShovelToHotbar(player);
@@ -558,7 +558,7 @@ public class MovementController implements IBotModule {
     private void tryToSwim(PlayerEntity player) {
         pressForward = true;
         pressSprint = true;
-        if(player.isTouchingWater()&&MinecraftClient.getInstance().world.getBlockState(player.getBlockPos().down()).getMaterial().isLiquid())pressSneak = true;
+        if(player.isTouchingWater()&&MinecraftClient.getInstance().world.getBlockState(player.getBlockPos().down(2)).getMaterial().isLiquid())pressSneak = true;
         swimStateStabilizationTicks = 0;
     }
 
@@ -574,18 +574,27 @@ public class MovementController implements IBotModule {
         List<BlockPos> obstacles = new ArrayList<>();
         BlockPos playerPos = player.getBlockPos();
 
-        // ==========================================
-        // 【核心修复 1】：垂直下挖特判 (拯救 TNT 躲避)
-        // 如果 X 和 Z 没变，说明是纯纯的垂直下挖！
-        // 直接闭着眼睛挖脚下这条柱子，绝对不触发任何射线和阶梯逻辑！
-        // ==========================================
-        if (playerPos.getX() == targetPos.getX() && playerPos.getZ() == targetPos.getZ() && targetPos.getY() < playerPos.getY()) {
-            for (int y = playerPos.getY() - 1; y >= targetPos.getY(); y--) {
-                BlockPos p = new BlockPos(playerPos.getX(), y, playerPos.getZ());
-                BlockState state = world.getBlockState(p);
-                // 免死金牌
-                if (com.fredoseep.utils.bt.BtStuff.craftingTablePos != null && p.equals(com.fredoseep.utils.bt.BtStuff.craftingTablePos)) continue;
+        // 计算水平方向的坐标差
+        int dx = Math.abs(playerPos.getX() - targetPos.getX());
+        int dz = Math.abs(playerPos.getZ() - targetPos.getZ());
 
+        // ==========================================
+        // 【核心修复 1】：扩展的“跳坑/垂直下挖”特判
+        // 只要目标在水平方向的距离 <= 1（即原地或紧挨着的方块），并且目标高度比当前低，
+        // 绝对不要触发倾斜射线检测！直接清空目标位置的那一根垂直柱子！
+        // ==========================================
+        if (dx <= 1 && dz <= 1 && targetPos.getY() < playerPos.getY()) {
+            // 从玩家当前高度 + 1（保证头不磕碰）开始，一路挖到目标坑底
+            int maxY = Math.max(playerPos.getY() + 1, targetPos.getY() + 1);
+            for (int y = maxY; y >= targetPos.getY(); y--) {
+                BlockPos p = new BlockPos(targetPos.getX(), y, targetPos.getZ());
+
+                // 工作台免死金牌
+                if (com.fredoseep.utils.bt.BtStuff.craftingTablePos != null && p.equals(com.fredoseep.utils.bt.BtStuff.craftingTablePos)) {
+                    continue;
+                }
+
+                BlockState state = world.getBlockState(p);
                 if (!state.isAir() && state.getMaterial().isSolid()) {
                     obstacles.add(p);
                 }
@@ -596,7 +605,6 @@ public class MovementController implements IBotModule {
         // ==========================================
         // 【核心修复 2】：射线“瘦身”与防贴墙偏移
         // ==========================================
-        // 将 X 和 Z 的膨胀半径从 0.2 极度收缩到 0.05，只检测正前方的核心障碍物
         double radiusX = 0.05;
         double radiusY = 0.9;
         double radiusZ = 0.05;
