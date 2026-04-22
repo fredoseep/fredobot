@@ -113,26 +113,63 @@ public class MiningHelper {
         return new float[]{bestYaw, bestPitch};
     }
 
-    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Set<Block> targetBlocks, int totalCount,int maxRadius) {
+    public static List<BlockPos> findNearestBlocks(BlockPos blockPos, Map<Block, Integer> targetCounts, int maxRadius) {
+        List<BlockPos> result = new ArrayList<>();
+        if (targetCounts == null || targetCounts.isEmpty()) return result;
+        Map<Block, Integer> remainingCounts = new HashMap<>(targetCounts);
+        int totalNeeded = remainingCounts.values().stream().mapToInt(Integer::intValue).sum();
+        if (totalNeeded <= 0) return result;
+
+        PriorityQueue<BlockPos> queue = new PriorityQueue<>(
+                Comparator.comparingDouble(pos -> pos.getSquaredDistance(blockPos))
+        );
+
+        for (int x = -maxRadius; x <= maxRadius; x++) {
+            for (int y = -maxRadius; y <= maxRadius; y++) {
+                for (int z = -maxRadius; z <= maxRadius; z++) {
+                    BlockPos checkPos = blockPos.add(x, y, z);
+
+                    if (checkPos.getSquaredDistance(blockPos) > maxRadius * maxRadius) continue;
+
+                    Block currentBlock = MinecraftClient.getInstance().world.getBlockState(checkPos).getBlock();
+                    if (remainingCounts.containsKey(currentBlock)) {
+                        queue.add(checkPos);
+                    }
+                }
+            }
+        }
+
+        while (!queue.isEmpty() && totalNeeded > 0) {
+            BlockPos pos = queue.poll();
+            Block block = MinecraftClient.getInstance().world.getBlockState(pos).getBlock();
+
+            int needed = remainingCounts.getOrDefault(block, 0);
+
+            if (needed > 0) {
+                result.add(pos);
+                remainingCounts.put(block, needed - 1);
+                totalNeeded--;
+            }
+        }
+
+        return result;
+    }
+
+    public static List<BlockPos> findNearestBlocks(BlockPos blockPos, Set<Block> targetBlocks, int totalCount, int maxRadius) {
         List<BlockPos> result = new ArrayList<>();
         if (totalCount <= 0 || targetBlocks == null || targetBlocks.isEmpty()) return result;
-
-        World world = player.world;
-        BlockPos playerPos = player.getBlockPos();
         PriorityQueue<BlockPos> queue = new PriorityQueue<>(
-                Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos))
+                Comparator.comparingDouble(pos -> pos.getSquaredDistance(blockPos))
         );
 
 
         for (int x = -maxRadius; x <= maxRadius; x++) {
             for (int y = -maxRadius; y <= maxRadius; y++) {
                 for (int z = -maxRadius; z <= maxRadius; z++) {
-                    BlockPos checkPos = playerPos.add(x, y, z);
+                    BlockPos checkPos = blockPos.add(x, y, z);
 
-                    if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) continue;
-
-                    // 【核心变化】：检查当前方块是否存在于我们的“目标池”中
-                    Block currentBlock = world.getBlockState(checkPos).getBlock();
+                    if (checkPos.getSquaredDistance(blockPos) > maxRadius * maxRadius) continue;
+                    Block currentBlock = MinecraftClient.getInstance().world.getBlockState(checkPos).getBlock();
                     if (targetBlocks.contains(currentBlock)) {
                         queue.add(checkPos);
                     }
@@ -146,48 +183,13 @@ public class MiningHelper {
 
         return result;
     }
-    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Map<Block, Integer> targetCounts,int maxRadius) {
-        List<BlockPos> result = new ArrayList<>();
-        if (targetCounts == null || targetCounts.isEmpty()) return result;
-        Map<Block, Integer> remainingCounts = new HashMap<>(targetCounts);
-        int totalNeeded = remainingCounts.values().stream().mapToInt(Integer::intValue).sum();
-        if (totalNeeded <= 0) return result;
 
-        World world = player.world;
-        BlockPos playerPos = player.getBlockPos();
-        PriorityQueue<BlockPos> queue = new PriorityQueue<>(
-                Comparator.comparingDouble(pos -> pos.getSquaredDistance(playerPos))
-        );
+    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
+        return findNearestBlocks(player.getBlockPos(), targetBlocks, totalCount, maxRadius);
+    }
 
-        for (int x = -maxRadius; x <= maxRadius; x++) {
-            for (int y = -maxRadius; y <= maxRadius; y++) {
-                for (int z = -maxRadius; z <= maxRadius; z++) {
-                    BlockPos checkPos = playerPos.add(x, y, z);
-
-                    if (checkPos.getSquaredDistance(playerPos) > maxRadius * maxRadius) continue;
-
-                    Block currentBlock = world.getBlockState(checkPos).getBlock();
-                    if (remainingCounts.containsKey(currentBlock)) {
-                        queue.add(checkPos);
-                    }
-                }
-            }
-        }
-
-        while (!queue.isEmpty() && totalNeeded > 0) {
-            BlockPos pos = queue.poll();
-            Block block = world.getBlockState(pos).getBlock();
-
-            int needed = remainingCounts.getOrDefault(block, 0);
-
-            if (needed > 0) {
-                result.add(pos);
-                remainingCounts.put(block, needed - 1);
-                totalNeeded--;
-            }
-        }
-
-        return result;
+    public static List<BlockPos> findNearestBlocks(PlayerEntity player, Map<Block, Integer> targetCounts, int maxRadius) {
+        return findNearestBlocks(player.getBlockPos(), targetCounts, maxRadius);
     }
 
 

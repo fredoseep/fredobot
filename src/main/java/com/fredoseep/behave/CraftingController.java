@@ -75,7 +75,7 @@ public class CraftingController implements IBotModule {
 
             case WAITING_FOR_RESULT:
                 if (player.currentScreenHandler != null &&
-                        player.currentScreenHandler.slots.size() > 0 &&
+                        !player.currentScreenHandler.slots.isEmpty() &&
                         player.currentScreenHandler.getSlot(0).hasStack()) {
 
                     state = CraftState.COLLECTING;

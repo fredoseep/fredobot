@@ -5,6 +5,7 @@ import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.MiningHelper;
+import com.fredoseep.utils.prenether.PreNether;
 import me.voidxwalker.autoreset.Atum;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -24,6 +25,7 @@ public class GlobalExecutor implements IBotModule {
         LOOTING_BT(4),
         LOOKING_FOR_TREES(5),
         CRAFTING(6),
+        PRE_NETHER(7),
         NEXT(0x7FFFFFF);
 
         private final int missionOrder;
@@ -57,6 +59,9 @@ public class GlobalExecutor implements IBotModule {
 
         if (currentState.getMissionOrder() < 7) {
             BtStuff.btStaff((ClientPlayerEntity) player);
+        }
+        if(currentState.getMissionOrder()==7){
+            PreNether.preNetherStuff(player);
         }
     }
 
@@ -106,6 +111,7 @@ public class GlobalExecutor implements IBotModule {
         debugTick = 0;
         globalInitialized = false;
         BtStuff.reset();
+        PreNether.reset();
         MiningHelper.blockToMine.clear();
     }
 }

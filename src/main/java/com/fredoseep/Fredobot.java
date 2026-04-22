@@ -3,9 +3,11 @@ package com.fredoseep;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
+import com.fredoseep.utils.prenether.PreNether;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v1.CommandRegistrationCallback;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.text.LiteralText;
 import net.minecraft.util.math.BlockPos;
@@ -52,6 +54,14 @@ public class Fredobot implements ModInitializer {
 				return 1;
 					}))
 			);
+		});
+		CommandRegistrationCallback.EVENT.register((commandDispatcher, b) -> {
+			commandDispatcher.register((CommandManager.literal("findravine")).executes(commandContext -> {
+				BlockPos result = PreNether.findOceanRavine(MinecraftClient.getInstance().player,MinecraftClient.getInstance().world, 100);
+				if(result == null) System.out.println("Fredodebug: No ravine found");
+				else System.out.println(result.toShortString());
+				return 1;
+			}));
 		});
 
 		System.out.println("SpeedrunBot 初始化成功！");

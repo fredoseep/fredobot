@@ -1,6 +1,7 @@
 package com.fredoseep.utils.bt;
 
 import com.fredoseep.BtPosContext;
+import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.excutor.BotEngine;
@@ -28,6 +29,8 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
+import net.minecraft.world.biome.Biome;
+import net.minecraft.world.biome.Biomes;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -53,6 +56,20 @@ public class BtStuff {
     public static boolean tntQueueGenerated = false;
 
     public static final List<Item> itemsToCraft = new ArrayList<>();
+
+    public static BlockPos oceanFloorNoKelp(BlockPos magmaPos) {
+        World world = MinecraftClient.getInstance().world;
+        Biome biome = world.getBiome(magmaPos);
+        if(biome != Biomes.OCEAN&&biome !=Biomes.WARM_OCEAN&&biome !=Biomes.COLD_OCEAN&&biome !=Biomes.DEEP_COLD_OCEAN&&biome !=Biomes.DEEP_OCEAN&&biome !=Biomes.DEEP_FROZEN_OCEAN&&biome !=Biomes.DEEP_LUKEWARM_OCEAN&&biome !=Biomes.DEEP_WARM_OCEAN&&biome !=Biomes.FROZEN_OCEAN&&biome !=Biomes.LUKEWARM_OCEAN&&biome !=Biomes.BEACH&&biome !=Biomes.SNOWY_BEACH){
+            System.out.println("Fredodebug: not an ocean biome");
+            return null;
+        }
+       BlockPos currentBlockPos = new BlockPos(magmaPos.getX(),62,magmaPos.getZ());
+        while(!world.getBlockState(currentBlockPos).getMaterial().isSolid()&&currentBlockPos.getY()>11){
+            currentBlockPos = currentBlockPos.down();
+        }
+        return currentBlockPos;
+    }
 
     public enum TNTState {
         INIT, CLEAR_HEAD, CRAFTING, PLACE_TNT_AND_TRIGGER, TAKING_COVER_MOVE, WAIT_EXPLOSION, COLLECT_LOOT, DONE
@@ -110,6 +127,7 @@ public class BtStuff {
         }
         return groundY;
     }
+
 
     public static BlockPos calTNTSetupPos(PlayerEntity player) {
         World world = player.world;
@@ -200,7 +218,7 @@ public class BtStuff {
 
         if (InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks < neededBlockCount) {
             if (player.isTouchingWater() || player.isSwimming()) {
-                List<BlockPos> lands = MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), 1, 50);
+                List<BlockPos> lands = MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), 1, 30);
                 if (!lands.isEmpty()) {
                     BotEngine.getInstance().getModule(PathExecutor.class).setGoal(lands.get(0));
                 } else {
@@ -496,9 +514,16 @@ public class BtStuff {
 
                     if (triggerItem.isIn(net.minecraft.tag.ItemTags.BUTTONS)) {
                         MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity) player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(triggerPos), Direction.UP, triggerPos, false));
+                        tntState = TNTState.TAKING_COVER_MOVE;
+                        tntWaitTicks = 0;
+                    } else {
+
+                        if (player.getY() > TNTSetupPos.getY() + 1.1) {
+                            return;
+                        }
+                        tntState = TNTState.TAKING_COVER_MOVE;
+                        tntWaitTicks = 0;
                     }
-                    tntState = TNTState.TAKING_COVER_MOVE;
-                    tntWaitTicks = 0;
                 }
                 break;
 
@@ -516,7 +541,8 @@ public class BtStuff {
                     Set<BlockPos> blacklist = new HashSet<>();
                     blacklist.add(TNTSetupPos);
                     blacklist.add(TNTSetupPos.down());
-                    pathExecutor.setGoal(coverPos.down(2), blacklist);
+                    List<SimplePathfinder.Node> takeCoverBehave = calcTakeCoverBehave(coverPos);
+                    pathExecutor.executeCustomPath(takeCoverBehave);
                 }
 
                 if (tntWaitTicks > 90) {
@@ -561,6 +587,16 @@ public class BtStuff {
                 }
                 break;
         }
+    }
+
+    private static List<SimplePathfinder.Node> calcTakeCoverBehave(BlockPos coverPos) {
+        List<SimplePathfinder.Node> result = new ArrayList<>();
+        result.add(new SimplePathfinder.Node(coverPos.up(2),null,null,0,0, SimplePathfinder.MovementState.WALKING,0));
+        result.add(new SimplePathfinder.Node(coverPos.up(1),null,null,0,0, SimplePathfinder.MovementState.MINING,0));
+        result.add(new SimplePathfinder.Node(coverPos,null,null,0,0, SimplePathfinder.MovementState.MINING,0));
+        result.add(new SimplePathfinder.Node(coverPos.down(1),null,null,0,0, SimplePathfinder.MovementState.MINING,0));
+        result.add(new SimplePathfinder.Node(coverPos.down(2),null,null,0,0, SimplePathfinder.MovementState.MINING,0));
+        return result;
     }
 
     public static void btStaff(ClientPlayerEntity player) {
@@ -916,6 +952,7 @@ public class BtStuff {
                             return;
                         }
                         if (minecraftClient.world.getBlockState(craftingTablePos).getBlock() != Blocks.CRAFTING_TABLE) {
+                            System.out.println("Fredodebug: craftingtablePos: " + craftingTablePos.toShortString());
                             System.out.println("FredoBot [严重异常]: 原坐标的工作台不翼而飞！退回重新放置阶段...");
                             craftingTablePos = null; // 清空无效坐标
                             btCraftPhase = BtCraftPhase.MAKE_TABLE; // 重新造桌子（包里刚好有40个木板，完美衔接）
@@ -1032,7 +1069,7 @@ public class BtStuff {
                         InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,true),6);
                         InventoryHelper.moveItemToHotbar(minecraftClient,player,BoatItem.class,7);
                         InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.doorType,8);
-                        globalExecutor.currentState = GlobalExecutor.GlobalState.NEXT;
+                        globalExecutor.currentState = GlobalExecutor.GlobalState.PRE_NETHER;
                         System.out.println("Fredobot: Inventory management done");
                         break;
                 }

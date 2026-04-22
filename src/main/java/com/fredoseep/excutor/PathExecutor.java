@@ -514,6 +514,36 @@ public class PathExecutor implements IBotModule {
             }
         }
     }
+    /**
+     * 强制接管寻路：直接输入自定义的节点列表供机器人执行。
+     * 非常适合用于硬编码的微操、短距离精确移动或规避特殊地形。
+     * * @param customPath 你手动组装的 Node 列表
+     */
+    public void executeCustomPath(List<SimplePathfinder.Node> customPath) {
+        if (customPath == null || customPath.isEmpty()) {
+            stop();
+            return;
+        }
+
+        this.isCalculatingNext = false;
+        this.isPaused = false;
+        this.stuckCheckTicks = 0;
+        this.lastStuckCheckPos = null;
+        this.consecutiveStuckCount = 0;
+        resetMovementKeys();
+
+        this.currentPath = customPath;
+        this.currentPathIndex = 0;
+
+        this.finalDestination = customPath.get(customPath.size() - 1).pos;
+
+        this.currentState = State.EXECUTING;
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) {
+            client.player.sendMessage(new LiteralText("§d[Bot] 收到微操指令，已接管自定义路线！"), false);
+        }
+    }
     public enum TempMissionType{
         IDLE,GO_TO_ENTITY;
     }
