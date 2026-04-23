@@ -244,14 +244,22 @@ public class BtStuff {
 
     public static BlockPos findAProperCraftingTablePos(PlayerEntity player) {
         BlockPos playerPos = player.getBlockPos();
+        World world = MinecraftClient.getInstance().world;
         for (Direction dir : new Direction[]{Direction.EAST, Direction.WEST, Direction.NORTH, Direction.SOUTH}) {
             BlockPos currentBlockPos = playerPos.offset(dir);
-            if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos).isAir()) return currentBlockPos;
-            if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos.up()).isAir())
-                return currentBlockPos.up();
-            if (MinecraftClient.getInstance().world.getBlockState(currentBlockPos.down()).isAir())
-                return currentBlockPos.down();
 
+            // 优先放同一层 (要求目标位置可替换，且脚下必须是实心方块)
+            if (world.getBlockState(currentBlockPos).getMaterial().isReplaceable() && world.getBlockState(currentBlockPos.down()).getMaterial().isSolid()) {
+                return currentBlockPos;
+            }
+            // 其次放高一层
+            if (world.getBlockState(currentBlockPos.up()).getMaterial().isReplaceable() && world.getBlockState(currentBlockPos).getMaterial().isSolid()) {
+                return currentBlockPos.up();
+            }
+            // 最后放低一层
+            if (world.getBlockState(currentBlockPos.down()).getMaterial().isReplaceable() && world.getBlockState(currentBlockPos.down().down()).getMaterial().isSolid()) {
+                return currentBlockPos.down();
+            }
         }
         return null;
     }
@@ -787,7 +795,6 @@ public class BtStuff {
 
                         Vec3d tableTopCenter = new Vec3d(craftingTablePos.getX() + 0.5, craftingTablePos.getY() + 1.0, craftingTablePos.getZ() + 0.5);
 
-                        // 【核心修复 1】：放工作台和开工作台前，强行扭头看向它！
                         double eyeY = player.getY() + player.getStandingEyeHeight();
                         double dx = tableTopCenter.x - player.getX();
                         double dy = tableTopCenter.y - eyeY;
@@ -795,13 +802,34 @@ public class BtStuff {
                         player.yaw = (float) Math.toDegrees(Math.atan2(dz, dx)) - 90.0F;
                         player.pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
 
+                        // 放置工作台
                         BlockHitResult placeHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos.down(), false);
                         minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit);
 
-                        BlockHitResult openHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos, false);
+                        // ==========================================
+                        // 【核心修复】：智能识别被挡住的顶面
+                        // 如果工作台上面有实体方块，绝不去点 UP 面，找一个露出来的侧面点！
+                        // ==========================================
+                        Direction openFace = Direction.UP;
+                        if (!minecraftClient.world.getBlockState(craftingTablePos.up()).isAir()) {
+                            for (Direction d : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+                                if (minecraftClient.world.getBlockState(craftingTablePos.offset(d)).isAir()) {
+                                    openFace = d;
+                                    break;
+                                }
+                            }
+                        }
+
+                        Vec3d clickPos = new Vec3d(
+                                craftingTablePos.getX() + 0.5 + openFace.getOffsetX() * 0.5,
+                                craftingTablePos.getY() + 0.5 + openFace.getOffsetY() * 0.5,
+                                craftingTablePos.getZ() + 0.5 + openFace.getOffsetZ() * 0.5
+                        );
+
+                        BlockHitResult openHit = new BlockHitResult(clickPos, openFace, craftingTablePos, false);
                         minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, openHit);
 
-                        craftingWaitTicks = 10; // 【核心修复 2】：将等待开 GUI 的时间增加到 10 Tick
+                        craftingWaitTicks = 10;
                         btCraftPhase = BtCraftPhase.OPEN_TABLE;
                         break;
 
@@ -992,7 +1020,23 @@ public class BtStuff {
                         player.yaw = (float) Math.toDegrees(Math.atan2(dzRet, dxRet)) - 90.0F;
                         player.pitch = (float) -Math.toDegrees(Math.atan2(dyRet, Math.sqrt(dxRet * dxRet + dzRet * dzRet)));
 
-                        BlockHitResult returnHit = new BlockHitResult(tableTopCenterReturn, Direction.UP, craftingTablePos, false);
+                        Direction openFaceRet = Direction.UP;
+                        if (!minecraftClient.world.getBlockState(craftingTablePos.up()).isAir()) {
+                            for (Direction d : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+                                if (minecraftClient.world.getBlockState(craftingTablePos.offset(d)).isAir()) {
+                                    openFaceRet = d;
+                                    break;
+                                }
+                            }
+                        }
+
+                        Vec3d clickPosRet = new Vec3d(
+                                craftingTablePos.getX() + 0.5 + openFaceRet.getOffsetX() * 0.5,
+                                craftingTablePos.getY() + 0.5 + openFaceRet.getOffsetY() * 0.5,
+                                craftingTablePos.getZ() + 0.5 + openFaceRet.getOffsetZ() * 0.5
+                        );
+
+                        BlockHitResult returnHit = new BlockHitResult(clickPosRet, openFaceRet, craftingTablePos, false);
                         minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, returnHit);
 
                         craftingWaitTicks = 10;

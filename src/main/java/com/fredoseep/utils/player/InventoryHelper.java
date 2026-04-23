@@ -79,7 +79,7 @@ public class InventoryHelper {
         return moveItemToHotbar(MinecraftClient.getInstance(),player,findItemSlot(player,itemClass),targetHotbarSlot);
     }
 
-        public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player, int itemInventorySlot, int targetHotbarSlot) {
+    public static boolean moveItemToHotbar(MinecraftClient client, PlayerEntity player, int itemInventorySlot, int targetHotbarSlot) {
         if (client.interactionManager == null || player == null) return false;
 
         if (targetHotbarSlot < 0 || targetHotbarSlot > 8) {
@@ -92,23 +92,53 @@ public class InventoryHelper {
             return false;
         }
 
-        if (itemInventorySlot == targetHotbarSlot + 36) {
-            return true; 
+        // ==========================================
+        // 【核心修复 1】：双坐标系统一的“防冗余”校验
+        // 提取真实的快捷栏格子序号，无论它是0-8还是36-44
+        // ==========================================
+        int sourceHotbarIndex = -1;
+        if (itemInventorySlot >= 0 && itemInventorySlot <= 8) {
+            sourceHotbarIndex = itemInventorySlot;
+        } else if (itemInventorySlot >= 36 && itemInventorySlot <= 44) {
+            sourceHotbarIndex = itemInventorySlot - 36;
         }
 
-        if (itemInventorySlot >= 9 && itemInventorySlot <= 45) {
-            int syncId = player.currentScreenHandler.syncId;
+        // 如果物品已经在我们想要的快捷栏格子里了，直接完工不发包！
+        if (sourceHotbarIndex == targetHotbarSlot) {
+            return true;
+        }
+
+        int syncId = player.currentScreenHandler.syncId;
+        int screenSlotId = -1;
+
+        // ==========================================
+        // 【核心修复 2】：双坐标系自适应映射
+        // 将不同来源的乱七八糟的序号，统统翻译成网络包认识的 ScreenHandler 序号
+        // ==========================================
+        if (itemInventorySlot >= 0 && itemInventorySlot <= 8) {
+            // 来源 A：PlayerInventory 找出的快捷栏物品
+            screenSlotId = itemInventorySlot + 36;
+        } else if (itemInventorySlot >= 9 && itemInventorySlot <= 35) {
+            // 主背包区，两套坐标系在这里碰巧是一模一样的
+            screenSlotId = itemInventorySlot;
+        } else if (itemInventorySlot >= 36 && itemInventorySlot <= 45) {
+            // 来源 B：ScreenHandler 找出的快捷栏物品 (36-44) 或 副手 (45)
+            // 已经是网络包要的格式了，直接照抄
+            screenSlotId = itemInventorySlot;
+        }
+
+        if (screenSlotId != -1) {
             client.interactionManager.clickSlot(
                     syncId,
-                    itemInventorySlot,
-                    targetHotbarSlot, 
-                    SlotActionType.SWAP,
+                    screenSlotId,
+                    targetHotbarSlot,
+                    net.minecraft.screen.slot.SlotActionType.SWAP,
                     player
             );
             return true;
         }
 
-        System.out.println("FredoBot: 未知异常，槽位坐标错乱: " + itemInventorySlot);
+        System.out.println("FredoBot: 未知异常，槽位坐标错乱, Inv: " + itemInventorySlot + " target: " + targetHotbarSlot);
         return false;
     }
 

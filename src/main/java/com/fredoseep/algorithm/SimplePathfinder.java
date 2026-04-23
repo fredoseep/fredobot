@@ -136,8 +136,9 @@ public class SimplePathfinder {
         }
 
         if (isCurrentWater) {
-            boolean isTargetWater = isWaterBlock(world, end);
             double dist2D = Math.sqrt(Math.pow(current.pos.getX() - end.getX(), 2) + Math.pow(current.pos.getZ() - end.getZ(), 2));
+
+            boolean isTargetWater = isWaterBlock(world, end) || isWaterBlock(world, end.up()) || (dist2D <= 5.0 && end.getY() < current.pos.getY());
             boolean isSurface = !isWaterBlock(world, current.pos.up());
 
             Direction[] allDirs = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP, Direction.DOWN};
@@ -145,7 +146,6 @@ public class SimplePathfinder {
 
             for (Direction dir : allDirs) {
                 BlockPos nextPos = current.pos.offset(dir);
-                // 【严格水域】：遗漏的 Material 替换，全部统一为 isWaterBlock
                 if (isWaterBlock(world, nextPos)) {
                     boolean nextIsSurface = !isWaterBlock(world, nextPos.up());
                     MovementState nextState = nextIsSurface ? MovementState.SWIMMING : MovementState.DIVING;
@@ -175,10 +175,26 @@ public class SimplePathfinder {
                     if (moveCost < 9990.0 && isPassable(world, nextPos) && isPassable(world, nextPos.up())) {
                         neighbors.add(new Node(nextPos, null, current, current.costFromStart + moveCost, calculateHeuristic(nextPos, end), nextState, current.blocksUsed));
                     }
+                } else if ((dir == Direction.DOWN || dir == Direction.UP) && !isPassable(world, nextPos)) {
+
+                    double mineCost = getMiningCost(world, nextPos, blacklist);
+                    if (mineCost < 9999.0) {
+                        // ==========================================
+                        // 【核心修复】：为水下垂直下挖也装备岩浆避险探针！
+                        // ==========================================
+                        if (dir == Direction.DOWN) {
+                            BlockState dangerState = world.getBlockState(nextPos.down());
+                            // 只有当即将挖开的方块下方不是岩浆时，才允许垂直往下挖
+                            if (dangerState.getMaterial() != net.minecraft.block.Material.LAVA && !dangerState.getFluidState().isIn(net.minecraft.tag.FluidTags.LAVA)) {
+                                neighbors.add(new Node(nextPos, null, current, current.costFromStart + 2.0 + mineCost, calculateHeuristic(nextPos, end), MovementState.MINING, current.blocksUsed));
+                            }
+                        } else {
+                            neighbors.add(new Node(nextPos, null, current, current.costFromStart + 2.0 + mineCost, calculateHeuristic(nextPos, end), MovementState.MINING, current.blocksUsed));
+                        }
+                    }
                 }
             }
         }
-
         BlockPos headPos = current.pos.up(2);
         double overheadMineCost = getMiningCost(world, headPos, blacklist);
         if (remainingPillaring > 0 && overheadMineCost < 9999.0 && !isCurrentWater && !isStandingOnWater) {
@@ -191,6 +207,19 @@ public class SimplePathfinder {
                 netBlocksUsed -= 1;
             }
             neighbors.add(new Node(pillarPos, headPos, current, totalCost, calculateHeuristic(pillarPos, end), MovementState.BUILDING_PILLAR, netBlocksUsed));
+        }
+        if (!isCurrentWater && !isCurrentMidAir) {
+            BlockPos downPos = current.pos.down();
+            if (!isPassable(world, downPos)) {
+                double mineCostDown = getMiningCost(world, downPos, blacklist);
+                if (mineCostDown < 9999.0) {
+                    BlockState dangerState = world.getBlockState(downPos.down());
+                    if (dangerState.getMaterial() != net.minecraft.block.Material.LAVA && !dangerState.getFluidState().isIn(net.minecraft.tag.FluidTags.LAVA)) {
+                        int blocksGained = yieldsBuildingBlock(world, downPos) ? 1 : 0;
+                        neighbors.add(new Node(downPos, null, current, current.costFromStart + 1.5 + mineCostDown, calculateHeuristic(downPos, end), MovementState.MINING, current.blocksUsed - blocksGained));
+                    }
+                }
+            }
         }
 
         for (Direction dir : directions) {

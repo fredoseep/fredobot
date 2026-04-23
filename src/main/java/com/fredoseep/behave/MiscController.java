@@ -1,8 +1,10 @@
 package com.fredoseep.behave;
 
+import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
+import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
 import com.fredoseep.utils.player.PlayerHelper;
@@ -176,6 +178,12 @@ public class MiscController implements IBotModule {
                         }
                     }
                 } else {
+                    if(pathExecutor.getCurrentNode().state == SimplePathfinder.MovementState.DIVING){
+                        System.out.println("FredoBot: start diving");
+                        stopTask();
+                        pathExecutor.resume();
+                        return;
+                    }
                     if (player.isTouchingWater()) {
                         float[] angles = PlayerHelper.getLookAngles(player, targetPos.getX(), targetPos.getY(), targetPos.getZ());
                         MovementController.setLookDirection(player, angles[0], angles[1]);
@@ -388,7 +396,20 @@ public class MiscController implements IBotModule {
 
                     if (distSq > 20.0) {
                         if (!pathExecutor.isBusy() && player.isOnGround()) {
+
+                            BlockPos topPos = new BlockPos(targetPos.getX(),BtStuff.groundYNoLeavesOrTrees(targetPos),targetPos.getZ())  ;
+                            double horizDistSq = Math.pow(player.getX() - (targetPos.getX() + 0.5), 2) + Math.pow(player.getZ() - (targetPos.getZ() + 0.5), 2);
+
+                            // 先设定最终真实地下目标
                             pathExecutor.setGoal(targetPos);
+
+                            // 如果目标深埋地下 (距离地表超过3格)，且我们在水平方向离它很远 (超过16格)
+                            if (targetPos.getY() < topPos.getY() - 3 && horizDistSq > 16.0) {
+                                System.out.println("FredoBot [智能挖掘]: 目标深埋地下，启动降维打击！先前往正上方地表...");
+                                // 利用之前写的挂起机制：挂起地下目标，先导航到地表上方空地！
+                                pathExecutor.setTemporaryGoal(topPos, PathExecutor.TempMissionType.IDLE);
+                            }
+
                             pathingFailTicks++;
                         } else if (pathExecutor.isBusy()) {
                             pathingFailTicks = 0;

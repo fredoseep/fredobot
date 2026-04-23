@@ -49,7 +49,48 @@ public class MovementController implements IBotModule {
     private int horizontalCollisionTicks = 0;
     private int boatHorizontalCollisionTicks = 0;
     private boolean boatHasBeenPlacedDown = false;
+    private BlockPos lastPlacedDoorPos = null;
+    private int collectDoorTicks = 0;
     private SimplePathfinder.MovementState nextState = SimplePathfinder.MovementState.WALKING;
+
+
+    public void resetKeys() {
+        this.pressBack = false;
+        this.pressRight = false;
+        this.pressLeft = false;
+        this.pressForward = false;
+        this.pressJump = false;
+        this.pressUse = false;
+        this.pressSneak = false;
+        this.pressAttack = false;
+        this.pressSprint = false;
+
+        this.aimStabilizationTicks = 0;
+        this.swimStateStabilizationTicks = 0;
+        this.boatInventorySleepingTick = 0;
+        this.boatHasBeenPlacedDown = false;
+        this.horizontalCollisionTicks = 0;
+        this.boatHorizontalCollisionTicks = 0;
+        lastPlacedDoorPos = null;
+        collectDoorTicks = 0;
+
+        lastState = SimplePathfinder.MovementState.WALKING;
+        isAdjustingPosture = false;
+        lastTurningBlockPos = null;
+
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client != null && client.options != null) {
+            KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keyRight.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keyJump.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keyUse.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keyAttack.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(), false);
+        }
+    }
 
     @Override
     public String getName() {
@@ -133,7 +174,7 @@ public class MovementController implements IBotModule {
         if (targetNode.state == SimplePathfinder.MovementState.SWIMMING && lastState != SimplePathfinder.MovementState.SWIMMING && !player.isTouchingWater() && !PlayerHelper.isDrivingBoat(player)) {
             targetNode.state = SimplePathfinder.MovementState.WALKING;
         }
-        if (lastState == SimplePathfinder.MovementState.SWIMMING && (targetNode.state != SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.DIVING)) {
+        if (lastState == SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.SWIMMING ) {
             pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING, targetNode.pos);
             return;
@@ -309,23 +350,85 @@ public class MovementController implements IBotModule {
                 break;
 
             case MINING:
-                // 1. 获取动态隧道中的所有障碍物
                 List<BlockPos> obstacles = getObstaclesInTunnel(player, client.world, targetNode.pos);
 
                 if (!obstacles.isEmpty()) {
-                    // 2. 有障碍物挡路！必须停下脚步，优先挖掘最高处的方块
                     pressForward = false;
                     pressJump = false;
                     pressSprint = false;
 
-                    BlockPos blockToMine = obstacles.get(0); // 永远先挖最上面的，防沙子埋人
+                    BlockPos blockToMine = obstacles.get(0);
 
-                    // 获取挖掘角度并应用
+                    BlockPos playerPos = player.getBlockPos();
+                    boolean isHeadInWater = client.world.getBlockState(new BlockPos(player.getX(), player.getEyeY(), player.getZ())).getMaterial() == net.minecraft.block.Material.WATER;
+
+                    if (isHeadInWater) {
+                        boolean is1x1 = client.world.getBlockState(playerPos.north()).getMaterial().isSolid() &&
+                                client.world.getBlockState(playerPos.south()).getMaterial().isSolid() &&
+                                client.world.getBlockState(playerPos.east()).getMaterial().isSolid() &&
+                                client.world.getBlockState(playerPos.west()).getMaterial().isSolid();
+
+                        if (blockToMine.getY() < playerPos.getY() && is1x1) {
+                            BlockPos roofPos = playerPos.up(2);
+                            if (client.world.getBlockState(roofPos).getMaterial().isLiquid()) {
+                                if (selectBuildingBlock(player)) {
+                                    targetPitch = -90f;
+                                    BlockPos wallPos = roofPos.north();
+                                    if (!client.world.getBlockState(roofPos.south()).getMaterial().isReplaceable()) wallPos = roofPos.south();
+                                    else if (!client.world.getBlockState(roofPos.east()).getMaterial().isReplaceable()) wallPos = roofPos.east();
+                                    else if (!client.world.getBlockState(roofPos.west()).getMaterial().isReplaceable()) wallPos = roofPos.west();
+
+                                    BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(wallPos), Direction.DOWN, wallPos, false);
+                                    client.interactionManager.interactBlock(client.player, client.world, net.minecraft.util.Hand.MAIN_HAND, hit);
+                                    return;
+                                }
+                            }
+                        }
+                        else {
+                            int doorSlot = -1;
+                            for (int i = 0; i < 36; i++) {
+                                if (player.inventory.getStack(i).getItem().isIn(net.minecraft.tag.ItemTags.DOORS)) {
+                                    doorSlot = i;
+                                    break;
+                                }
+                            }
+                            if (doorSlot != -1) {
+                                BlockPos doorPlacePos = null;
+
+                                if (client.world.getBlockState(blockToMine.up()).getMaterial().isLiquid()) {
+                                    doorPlacePos = blockToMine.up();
+                                }
+                                else if (client.world.getBlockState(playerPos).getMaterial().isLiquid() && client.world.getBlockState(playerPos.down()).getMaterial().isSolid()) {
+                                    if (!playerPos.down().equals(blockToMine)) {
+                                        doorPlacePos = playerPos;
+                                    }
+                                }
+
+                                if (doorPlacePos != null && !(client.world.getBlockState(doorPlacePos).getBlock() instanceof net.minecraft.block.DoorBlock)) {
+                                    BlockPos foundation = doorPlacePos.down();
+                                    if (client.world.getBlockState(foundation).getMaterial().isSolid()) {
+                                        InventoryHelper.moveItemToHotbar(client, player, doorSlot, player.inventory.selectedSlot);
+                                        float[] angles = MiningHelper.getValidMiningAngle(player, foundation);
+                                        targetYaw = angles[0];
+                                        targetPitch = angles[1];
+
+                                        if (Math.abs(MathHelper.wrapDegrees(player.yaw - targetYaw)) < 15.0f) {
+                                            BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(foundation), Direction.UP, foundation, false);
+                                            client.interactionManager.interactBlock(client.player, client.world, net.minecraft.util.Hand.MAIN_HAND, hit);
+
+                                            lastPlacedDoorPos = doorPlacePos;
+                                            collectDoorTicks = 0;
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     float[] miningAngles = MiningHelper.getValidMiningAngle(player, blockToMine);
                     targetYaw = miningAngles[0];
                     targetPitch = miningAngles[1];
 
-                    // 切换工具并发包挖掘
                     ToolsHelper.equipBestTool(player, blockToMine, false);
                     client.interactionManager.updateBlockBreakingProgress(blockToMine, Direction.UP);
 
@@ -333,23 +436,51 @@ public class MovementController implements IBotModule {
                         player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                     }
                 } else {
-                    // 3. 面前干干净净没有任何碰撞体积，可以直接走过去了！
+                    if (lastPlacedDoorPos != null) {
+                        if (!(client.world.getBlockState(lastPlacedDoorPos).getBlock() instanceof net.minecraft.block.DoorBlock)) {
+                            collectDoorTicks++;
+                            if (collectDoorTicks < 25) {
+                                net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(lastPlacedDoorPos).expand(4.0);
+                                java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
+                                        net.minecraft.entity.ItemEntity.class, searchBox,
+                                        e -> e.getStack().getItem().isIn(net.minecraft.tag.ItemTags.DOORS)
+                                );
+
+                                if (!drops.isEmpty()) {
+                                    net.minecraft.entity.ItemEntity nearest = drops.get(0);
+                                    targetYaw = (float) Math.toDegrees(Math.atan2(-(nearest.getX() - player.getX()), nearest.getZ() - player.getZ()));
+                                    targetPitch = 30f;
+                                    pressForward = true;
+                                    pressSprint = true;
+                                    return;
+                                } else if (collectDoorTicks <= 5) {
+                                    pressForward = false;
+                                    return;
+                                } else {
+                                    lastPlacedDoorPos = null;
+                                }
+                            } else {
+                                lastPlacedDoorPos = null;
+                            }
+                        } else {
+                            if (player.squaredDistanceTo(Vec3d.ofCenter(lastPlacedDoorPos)) > 16.0) {
+                                lastPlacedDoorPos = null;
+                            }
+                        }
+                    }
                     pressForward = true;
                     pressSprint = true;
 
-                    // 计算走向目标方块的 Yaw
                     double tX = targetNode.pos.getX() + 0.5D;
                     double tZ = targetNode.pos.getZ() + 0.5D;
                     targetYaw = (float) Math.toDegrees(Math.atan2(-(tX - player.getX()), tZ - player.getZ()));
 
-                    // 如果是向下走阶梯，稍微低头看着路
                     if (targetNode.pos.getY() < player.getY()) {
                         targetPitch = 15f;
                     } else {
                         targetPitch = 0f;
                     }
 
-                    // 防卡死：如果在通过隧道时擦到边缘产生物理碰撞，尝试小跳一下
                     if (player.horizontalCollision) {
                         horizontalCollisionTicks++;
                         if (horizontalCollisionTicks >= 3) pressJump = true;
@@ -503,41 +634,7 @@ public class MovementController implements IBotModule {
         KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(), pressSprint);
     }
 
-    public void resetKeys() {
-        this.pressBack = false;
-        this.pressRight = false;
-        this.pressLeft = false;
-        this.pressForward = false;
-        this.pressJump = false;
-        this.pressUse = false;
-        this.pressSneak = false;
-        this.pressAttack = false;
-        this.pressSprint = false;
 
-        this.aimStabilizationTicks = 0;
-        this.swimStateStabilizationTicks = 0;
-        this.boatInventorySleepingTick = 0;
-        this.boatHasBeenPlacedDown = false;
-        this.horizontalCollisionTicks = 0;
-        this.boatHorizontalCollisionTicks = 0;
-
-        lastState = SimplePathfinder.MovementState.WALKING;
-        isAdjustingPosture = false;
-        lastTurningBlockPos = null;
-
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client != null && client.options != null) {
-            KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keyRight.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keyJump.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keyUse.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keyAttack.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(), false);
-        }
-    }
 
     private void tryToBoating(PlayerEntity player) {
         if (InventoryHelper.putBoatToHotBar(player)) {
