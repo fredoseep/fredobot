@@ -92,7 +92,54 @@ public class SimplePathfinder {
         }
 
         System.out.println("[SimplePathfinder] 触及算力上限！执行安全港截断。实际评估节点数: " + nodesEvaluated);
+        if (startPos.getY() > end.getY() && Math.abs(startPos.getX() - end.getX()) <= 5 && Math.abs(startPos.getZ() - end.getZ()) <= 5) {
+            System.out.println("FredoBot [保底机制]: 寻路算力超载！已切入【直下打桩机】模式！");
+            return smoothPath(world, buildVerticalFallbackPath(world, startPos, end));
+        }
+
         return smoothPath(world, reconstructPath(closestNode == startNode ? null : closestNode));
+    }
+    private static List<Node> buildVerticalFallbackPath(World world, BlockPos startPos, BlockPos end) {
+        List<Node> path = new ArrayList<>();
+        Node current = new Node(startPos, null, null, 0, 0, MovementState.WALKING, 0);
+        path.add(current);
+
+        BlockPos currPos = startPos;
+
+        // 1. 水平微调对齐 (如果 MiscController 没能完美送到同一格)
+        while (currPos.getX() != end.getX() || currPos.getZ() != end.getZ()) {
+            int stepX = Integer.compare(end.getX(), currPos.getX());
+            int stepZ = Integer.compare(end.getZ(), currPos.getZ());
+            currPos = currPos.add(stepX, 0, stepZ);
+
+            MovementState state = MovementState.WALKING;
+            if (isWaterBlock(world, currPos)) {
+                state = !isWaterBlock(world, currPos.up()) ? MovementState.SWIMMING : MovementState.DIVING;
+            } else if (!isPassable(world, currPos) || !isPassable(world, currPos.up())) {
+                state = MovementState.MINING;
+            }
+            Node next = new Node(currPos, null, current, current.costFromStart + 1, 0, state, 0);
+            path.add(next);
+            current = next;
+        }
+
+        // 2. 暴力垂直下钻
+        while (currPos.getY() > end.getY()) {
+            currPos = currPos.down();
+            MovementState state = MovementState.FALLING; // 默认如果是空气就掉下去
+
+            if (isWaterBlock(world, currPos)) {
+                state = MovementState.DIVING;
+            } else if (!isPassable(world, currPos)) {
+                state = MovementState.MINING;
+            }
+
+            Node next = new Node(currPos, null, current, current.costFromStart + 1, 0, state, 0);
+            path.add(next);
+            current = next;
+        }
+
+        return path;
     }
 
     private static double getDynamicCost(int blocksRemaining, double minCost, double maxCost) {
@@ -344,7 +391,6 @@ public class SimplePathfinder {
 
         return horizontalDist + dy * yWeight;
     }
-
     private static List<Node> reconstructPath(Node node) {
         if (node == null) return new ArrayList<>();
         List<Node> path = new ArrayList<>();
@@ -365,9 +411,11 @@ public class SimplePathfinder {
     private static boolean isSolid(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return false;
-        // 【修改这里】：使用万能助手
         if (state.getMaterial() == net.minecraft.block.Material.LAVA || isWaterBlock(world, pos)) return false;
         if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return false;
+
+        // 【核心修复 1】：告诉寻路器门不是实心墙！
+        if (state.getBlock() instanceof net.minecraft.block.DoorBlock) return false;
 
         return !state.getCollisionShape(world, pos).isEmpty();
     }
@@ -375,10 +423,12 @@ public class SimplePathfinder {
     private static boolean isPassable(World world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) return true;
-        // 【修改这里】：使用万能助手
         if (isWaterBlock(world, pos)) return true;
         if (state.getMaterial() == net.minecraft.block.Material.LAVA) return false;
         if (state.getBlock() == net.minecraft.block.Blocks.LILY_PAD) return true;
+
+        // 【核心修复 2】：告诉寻路器门是可以自由走进去的！
+        if (state.getBlock() instanceof net.minecraft.block.DoorBlock) return true;
 
         return state.getCollisionShape(world, pos).isEmpty();
     }

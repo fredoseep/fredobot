@@ -350,6 +350,40 @@ public class MovementController implements IBotModule {
                 break;
 
             case MINING:
+
+                if (lastPlacedDoorPos != null) {
+                    if (!(client.world.getBlockState(lastPlacedDoorPos).getBlock() instanceof net.minecraft.block.DoorBlock)) {
+                        collectDoorTicks++;
+                        if (collectDoorTicks < 25) {
+                            net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(lastPlacedDoorPos).expand(4.0);
+                            java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
+                                    net.minecraft.entity.ItemEntity.class, searchBox,
+                                    e -> e.getStack().getItem().isIn(net.minecraft.tag.ItemTags.DOORS)
+                            );
+
+                            if (!drops.isEmpty()) {
+                                net.minecraft.entity.ItemEntity nearest = drops.get(0);
+                                targetYaw = (float) Math.toDegrees(Math.atan2(-(nearest.getX() - player.getX()), nearest.getZ() - player.getZ()));
+                                targetPitch = 30f;
+                                pressForward = true;
+                                pressSprint = true;
+                                pressJump = false; // 防止乱跳
+                                return; // 拦截成功！在捡到门之前，强行 return，绝不执行后续的任何挖掘逻辑！
+                            } else if (collectDoorTicks <= 5) {
+                                pressForward = false;
+                                return; // 拦截！等待服务器爆出掉落物
+                            } else {
+                                lastPlacedDoorPos = null; // 门被水流冲没了或烧了，放弃
+                            }
+                        } else {
+                            lastPlacedDoorPos = null; // 捡太久了，强行放行
+                        }
+                    } else {
+                        if (player.squaredDistanceTo(Vec3d.ofCenter(lastPlacedDoorPos)) > 16.0) {
+                            lastPlacedDoorPos = null; // 走太远了，忘掉这扇门
+                        }
+                    }
+                }
                 List<BlockPos> obstacles = getObstaclesInTunnel(player, client.world, targetNode.pos);
 
                 if (!obstacles.isEmpty()) {
@@ -436,38 +470,6 @@ public class MovementController implements IBotModule {
                         player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                     }
                 } else {
-                    if (lastPlacedDoorPos != null) {
-                        if (!(client.world.getBlockState(lastPlacedDoorPos).getBlock() instanceof net.minecraft.block.DoorBlock)) {
-                            collectDoorTicks++;
-                            if (collectDoorTicks < 25) {
-                                net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(lastPlacedDoorPos).expand(4.0);
-                                java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
-                                        net.minecraft.entity.ItemEntity.class, searchBox,
-                                        e -> e.getStack().getItem().isIn(net.minecraft.tag.ItemTags.DOORS)
-                                );
-
-                                if (!drops.isEmpty()) {
-                                    net.minecraft.entity.ItemEntity nearest = drops.get(0);
-                                    targetYaw = (float) Math.toDegrees(Math.atan2(-(nearest.getX() - player.getX()), nearest.getZ() - player.getZ()));
-                                    targetPitch = 30f;
-                                    pressForward = true;
-                                    pressSprint = true;
-                                    return;
-                                } else if (collectDoorTicks <= 5) {
-                                    pressForward = false;
-                                    return;
-                                } else {
-                                    lastPlacedDoorPos = null;
-                                }
-                            } else {
-                                lastPlacedDoorPos = null;
-                            }
-                        } else {
-                            if (player.squaredDistanceTo(Vec3d.ofCenter(lastPlacedDoorPos)) > 16.0) {
-                                lastPlacedDoorPos = null;
-                            }
-                        }
-                    }
                     pressForward = true;
                     pressSprint = true;
 
@@ -571,7 +573,7 @@ public class MovementController implements IBotModule {
                     if (swimStateStabilizationTicks <= 25) {
                         swimStateStabilizationTicks++;
                     } else {
-                        pressJump = (player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D) || player.getY() < 62;
+                        pressJump = (player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D) || player.getY() <= 61;
                     }
                 } else if (!isBoatingNeeded(player) || (!InventoryHelper.hasBoat(player)) && !boatHasBeenPlacedDown) {
                     if (MinecraftClient.getInstance().world != null && (!isWaterDeepEnough() || MinecraftClient.getInstance().world.getBlockState(new BlockPos(player.getX(), player.getY(), player.getZ()).down()).getMaterial() != Material.WATER) || player.getHungerManager().getFoodLevel() <= 6) {
@@ -643,10 +645,12 @@ public class MovementController implements IBotModule {
             boatInventorySleepingTick++;
         }
         if (boatInventorySleepingTick > 0) boatHasBeenPlacedDown = true;
+        if(boatHasBeenPlacedDown)boatInventorySleepingTick++;
         if (boatInventorySleepingTick >= 4) {
             float deltaYaw = MathHelper.wrapDegrees(player.yaw - targetYaw);
             if (Math.abs(deltaYaw) < 2.0f) {
                 pressJump = player.isTouchingWater();
+                targetPitch = 60;
                 pressUse = true;
             }
         }
@@ -692,6 +696,9 @@ public class MovementController implements IBotModule {
                 }
 
                 BlockState state = world.getBlockState(p);
+                // 【免死金牌 1】：垂直下挖时，绝对不把门当成障碍物
+                if (state.getBlock() instanceof net.minecraft.block.DoorBlock) continue;
+
                 if (!state.isAir() && state.getMaterial().isSolid()) {
                     obstacles.add(p);
                 }
@@ -746,6 +753,9 @@ public class MovementController implements IBotModule {
                     }
 
                     BlockState state = world.getBlockState(mutable);
+
+                    // 【免死金牌 2】：水平扫描时，也绝对不把门当成障碍物
+                    if (state.getBlock() instanceof net.minecraft.block.DoorBlock) continue;
 
                     if (!state.isAir() && !state.getMaterial().isLiquid() && state.getMaterial().isSolid()) {
                         net.minecraft.util.shape.VoxelShape shape = state.getCollisionShape(world, mutable);

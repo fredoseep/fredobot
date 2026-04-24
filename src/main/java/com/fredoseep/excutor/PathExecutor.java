@@ -116,15 +116,15 @@ public class PathExecutor implements IBotModule {
         return this.currentPath.get(currentPathIndex);
     }
 
-    public void setGoal(BlockPos destination) {
-        setGoal(destination, Collections.emptySet()); // 兼容旧接口
+    public void setGoal(BlockPos destination,String targetType) {
+        setGoal(destination, Collections.emptySet(),targetType); // 兼容旧接口
     }
 
     // 支持黑名单的 setGoal
-    public void setGoal(BlockPos destination, Set<BlockPos> blacklist) {
+    public void setGoal(BlockPos destination, Set<BlockPos> blacklist,String targetType) {
         this.suspendedDestinations.clear();
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
-        startNewPath(destination);
+        startNewPath(destination,targetType);
     }
 
     // 兼容 MiscController 的无参数临时任务
@@ -144,7 +144,7 @@ public class PathExecutor implements IBotModule {
             System.out.println("FredoBot: 挂起原目标 -> " + this.finalDestination.toShortString() + "，前往临时目标 -> " + tempDestination.toShortString());
         }
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
-        startNewPath(tempDestination);
+        startNewPath(tempDestination,"temp target");
     }
 
     public void resumeSuspendedGoal() {
@@ -152,13 +152,13 @@ public class PathExecutor implements IBotModule {
         if (!this.suspendedDestinations.isEmpty()) {
             BlockPos target = this.suspendedDestinations.pop();
             System.out.println("FredoBot: 临时任务结束，恢复原目标 -> " + target.toShortString());
-            startNewPath(target);
+            startNewPath(target,"resume original target");
         } else {
             System.out.println("FredoBot: 没有被挂起的任务。");
         }
     }
 
-    private void startNewPath(BlockPos dest) {
+    private void startNewPath(BlockPos dest,String targetType) {
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -170,6 +170,7 @@ public class PathExecutor implements IBotModule {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             client.player.sendMessage(new LiteralText("§e[Bot] 发起寻路计算... -> " + dest.toShortString()), false);
+            System.out.println("Fredodebug: setGoalType: "+ targetType);
             BlockPos startPos = new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ());
             recalculatePath(startPos);
         }
@@ -264,6 +265,14 @@ public class PathExecutor implements IBotModule {
                     consecutiveStuckCount++;
                     player.sendMessage(new net.minecraft.text.LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
                     System.out.println("FredoBot: 触发被困保护，连续次数: " + consecutiveStuckCount + "，正在重新计算！");
+
+                    // 【核心修复 1】：连续卡死 3 次直接放弃治疗！切断无限安全港刷屏。
+                    // 彻底停止寻路，让外层的 MiscController 接手并增加受挫值
+                    if (consecutiveStuckCount >= 3) {
+                        System.out.println("FredoBot: 彻底被困，放弃当前寻路路线！");
+                        stop();
+                        return;
+                    }
 
                     resetMovementKeys();
                     stuckCheckTicks = 0;

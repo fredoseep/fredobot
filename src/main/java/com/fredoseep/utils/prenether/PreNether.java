@@ -39,11 +39,13 @@ public class PreNether {
 
         if (magmaPos == null) {
             magmaPos = findOceanRavine(player, MinecraftClient.getInstance().world, 100);
-            System.out.println("Fredodebug: magmaPos:"+ magmaPos.toShortString());
             if (magmaPos == null) {
                 globalExecutor.resetWorld();
                 System.out.println("Fredodebug: reset because no enterable ravine found");
+                return;
             } else {
+                System.out.println("Fredodebug: magmaPos:"+ magmaPos.toShortString());
+
                 if (InventoryHelper.countItem(player, Items.GRAVEL) >= 4 || InventoryHelper.countItem(player, Items.FLINT) >= 1 || InventoryHelper.countItem(player, Items.FLINT_AND_STEEL) == 1) {
                     System.out.println("Fredodebug: already have lighter");
                     return;
@@ -62,13 +64,13 @@ public class PreNether {
         if(!PlayerHelper.isNear(player,magmaPos.up(),1)) {
             if (InventoryHelper.countItem(player, Items.GRAVEL) >= 4 || InventoryHelper.countItem(player, Items.FLINT) >= 1 || InventoryHelper.countItem(player, Items.FLINT_AND_STEEL) == 1) {
                 System.out.println("Fredodebug: already have lighter goto magma spot");
-                pathExecutor.setGoal(magmaPos.up());
+                pathExecutor.setGoal(magmaPos.up(),"the magmaPos");
                 return;
             } else {
                 if (gravelPos != null) {
                     if (!PlayerHelper.isNear(player, gravelPos, 1)) {
                         System.out.println("Fredodebug : set goal to the gravel Pos");
-                        pathExecutor.setGoal(gravelPos);
+                        pathExecutor.setGoal(gravelPos.up(),"the gravel pos");
                     }
                     else {
                         MiningHelper.mineAndCollect(player, Map.of(Blocks.GRAVEL, 4), 10);
@@ -108,13 +110,20 @@ public class PreNether {
                 mutable.set(px + x, 10, pz + z);
 
                 if (world.getBlockState(mutable).getBlock() == Blocks.MAGMA_BLOCK) {
-                    boolean hasLava = false;
                     boolean isTwoByOne = false;
                     probeMutable.set(px + x, 9, pz + z);
                     BlockState stateBelow = world.getBlockState(probeMutable);
-                    if (stateBelow.getBlock() == Blocks.LAVA || (!stateBelow.getFluidState().isEmpty() && stateBelow.getFluidState().getFluid() == Fluids.LAVA)) {
-                        hasLava = true;
-                    }
+                    probeMutable.set(px + x, 11, pz + z);
+                    BlockState stateAbove1 = world.getBlockState(probeMutable);
+
+                    probeMutable.set(px + x, 12, pz + z);
+                    BlockState stateAbove2 = world.getBlockState(probeMutable);
+
+                    probeMutable.set(px + x, 13, pz + z);
+                    BlockState stateAbove3 = world.getBlockState(probeMutable);
+
+
+                    if (!(stateBelow.getBlock() == Blocks.LAVA && stateAbove1.getBlock() == Blocks.BUBBLE_COLUMN && stateAbove2.getBlock() == Blocks.BUBBLE_COLUMN && stateAbove3.getBlock() == Blocks.BUBBLE_COLUMN)) continue;
                     for (Direction offset : new Direction[]{Direction.EAST, Direction.SOUTH, Direction.WEST, Direction.NORTH}) {
                         BlockPos offsetPos = mutable.offset(offset);
                         if (world.getBlockState(offsetPos).getBlock() == Blocks.MAGMA_BLOCK && world.getBlockState(offsetPos.down()).getBlock() == Blocks.LAVA) {
@@ -122,7 +131,7 @@ public class PreNether {
                             break;
                         }
                     }
-                    if (hasLava && isTwoByOne) {
+                    if (isTwoByOne) {
                         double distSq = playerPos.getSquaredDistance(mutable);
                         if (distSq < minDistanceSq) {
                             minDistanceSq = distSq;

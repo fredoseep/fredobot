@@ -21,37 +21,31 @@ import java.util.*;
 public class MiningHelper {
     public static List<BlockPos> blockToMine = new ArrayList<>();
 
+    // 新增标志位：标记当前是否处于批量挖掘阶段
+    public static boolean isBatchMiningPhase = false;
+
     /**
-     * 计算可行的挖掘视角：避开遮挡，寻找肉眼可见的方块表面。
-     * 优先选择最不需要大幅度转头的那个点，防止视角抽搐。
-     *
-     * @param player    玩家实体
-     * @param targetPos 当前要挖掘的方块坐标
-     * @return 返回一个 float[]，包含 [0]:目标Yaw, [1]:目标Pitch
+     * 计算可行的挖掘视角 (保持原样)
      */
     public static float[] getValidMiningAngle(PlayerEntity player, BlockPos targetPos) {
         World world = player.getEntityWorld();
         Vec3d eyePos = player.getCameraPosVec(1.0F);
 
-        // 1. 生成方块表面探测网格 (每个面 9 个点，6 个面共 54 个点)
         List<Vec3d> testPoints = new ArrayList<>();
         double[] offsets = {0.1D, 0.5D, 0.9D};
 
-        // Y轴面 (上下)
         for (double x : offsets) {
             for (double z : offsets) {
                 testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + 1.0D, targetPos.getZ() + z));
                 testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + 0.0D, targetPos.getZ() + z));
             }
         }
-        // Z轴面 (南北)
         for (double x : offsets) {
             for (double y : offsets) {
                 testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + y, targetPos.getZ() + 0.0D));
                 testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + y, targetPos.getZ() + 1.0D));
             }
         }
-        // X轴面 (东西)
         for (double y : offsets) {
             for (double z : offsets) {
                 testPoints.add(new Vec3d(targetPos.getX() + 0.0D, targetPos.getY() + y, targetPos.getZ() + z));
@@ -61,10 +55,9 @@ public class MiningHelper {
 
         float bestYaw = player.yaw;
         float bestPitch = player.pitch;
-        double minScore = Double.MAX_VALUE; // 评分越低，甩头幅度越小
+        double minScore = Double.MAX_VALUE;
         boolean foundVisiblePoint = false;
 
-        // 2. 遍历测试点，进行物理穿透检测 (无视杂草/水)
         for (Vec3d point : testPoints) {
             RayTraceContext context = new RayTraceContext(
                     eyePos, point,
@@ -74,9 +67,7 @@ public class MiningHelper {
             );
             BlockHitResult hitResult = world.rayTrace(context);
 
-            // 如果打到了我们要挖的方块
             if (hitResult != null && hitResult.getType() == HitResult.Type.BLOCK && hitResult.getBlockPos().equals(targetPos)) {
-
                 double dx = point.x - eyePos.x;
                 double dy = point.y - eyePos.y;
                 double dz = point.z - eyePos.z;
@@ -85,12 +76,10 @@ public class MiningHelper {
                 float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
                 float pitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
 
-                // 3. 评分逻辑：寻找距离玩家当前视角最近的点
                 float deltaYaw = MathHelper.wrapDegrees(yaw - player.yaw);
                 float deltaPitch = pitch - player.pitch;
                 double score = (deltaYaw * deltaYaw) + (deltaPitch * deltaPitch);
 
-                // 记录最小甩头幅度的视角
                 if (score < minScore) {
                     minScore = score;
                     bestYaw = yaw;
@@ -100,7 +89,6 @@ public class MiningHelper {
             }
         }
 
-        // 4. 兜底机制：如果整块石头被完全包裹（没找到任何可视点），强行指正中心
         if (!foundVisiblePoint) {
             double dx = (targetPos.getX() + 0.5D) - eyePos.x;
             double dy = (targetPos.getY() + 0.5D) - eyePos.y;
@@ -113,6 +101,9 @@ public class MiningHelper {
         return new float[]{bestYaw, bestPitch};
     }
 
+    /**
+     * 重构搜索逻辑：使用最近邻居算法，生成平滑的挖掘路径
+     */
     public static List<BlockPos> findNearestBlocks(BlockPos blockPos, Map<Block, Integer> targetCounts, int maxRadius) {
         List<BlockPos> result = new ArrayList<>();
         if (targetCounts == null || targetCounts.isEmpty()) return result;
@@ -120,65 +111,86 @@ public class MiningHelper {
         int totalNeeded = remainingCounts.values().stream().mapToInt(Integer::intValue).sum();
         if (totalNeeded <= 0) return result;
 
-        PriorityQueue<BlockPos> queue = new PriorityQueue<>(
-                Comparator.comparingDouble(pos -> pos.getSquaredDistance(blockPos))
-        );
+        List<BlockPos> rawBlocks = new ArrayList<>();
 
+        // 1. 粗筛：找出范围内所有目标方块
         for (int x = -maxRadius; x <= maxRadius; x++) {
             for (int y = -maxRadius; y <= maxRadius; y++) {
                 for (int z = -maxRadius; z <= maxRadius; z++) {
                     BlockPos checkPos = blockPos.add(x, y, z);
-
                     if (checkPos.getSquaredDistance(blockPos) > maxRadius * maxRadius) continue;
-
                     Block currentBlock = MinecraftClient.getInstance().world.getBlockState(checkPos).getBlock();
                     if (remainingCounts.containsKey(currentBlock)) {
-                        queue.add(checkPos);
+                        rawBlocks.add(checkPos);
                     }
                 }
             }
         }
 
-        while (!queue.isEmpty() && totalNeeded > 0) {
-            BlockPos pos = queue.poll();
-            Block block = MinecraftClient.getInstance().world.getBlockState(pos).getBlock();
+        // 2. 路径优化 (Nearest Neighbor)：确保下一个挖的方块距离当前最近，防止乱跳
+        BlockPos currentPos = blockPos; // 初始起点为玩家位置
+        while (!rawBlocks.isEmpty() && totalNeeded > 0) {
+            BlockPos finalCurrentPos = currentPos;
+            BlockPos closest = rawBlocks.stream()
+                    .min(Comparator.comparingDouble(p -> p.getSquaredDistance(finalCurrentPos)))
+                    .orElse(null);
 
-            int needed = remainingCounts.getOrDefault(block, 0);
+            if (closest != null) {
+                Block block = MinecraftClient.getInstance().world.getBlockState(closest).getBlock();
+                int needed = remainingCounts.getOrDefault(block, 0);
 
-            if (needed > 0) {
-                result.add(pos);
-                remainingCounts.put(block, needed - 1);
-                totalNeeded--;
+                if (needed > 0) {
+                    result.add(closest);
+                    remainingCounts.put(block, needed - 1);
+                    totalNeeded--;
+                }
+                rawBlocks.remove(closest);
+                currentPos = closest; // 移动模拟坐标到刚选中的方块
+            } else {
+                break;
             }
         }
 
         return result;
     }
 
+    /**
+     * 重构搜索逻辑：使用最近邻居算法，生成平滑的挖掘路径
+     */
     public static List<BlockPos> findNearestBlocks(BlockPos blockPos, Set<Block> targetBlocks, int totalCount, int maxRadius) {
         List<BlockPos> result = new ArrayList<>();
         if (totalCount <= 0 || targetBlocks == null || targetBlocks.isEmpty()) return result;
-        PriorityQueue<BlockPos> queue = new PriorityQueue<>(
-                Comparator.comparingDouble(pos -> pos.getSquaredDistance(blockPos))
-        );
 
+        List<BlockPos> rawBlocks = new ArrayList<>();
 
         for (int x = -maxRadius; x <= maxRadius; x++) {
             for (int y = -maxRadius; y <= maxRadius; y++) {
                 for (int z = -maxRadius; z <= maxRadius; z++) {
                     BlockPos checkPos = blockPos.add(x, y, z);
-
                     if (checkPos.getSquaredDistance(blockPos) > maxRadius * maxRadius) continue;
                     Block currentBlock = MinecraftClient.getInstance().world.getBlockState(checkPos).getBlock();
                     if (targetBlocks.contains(currentBlock)) {
-                        queue.add(checkPos);
+                        rawBlocks.add(checkPos);
                     }
                 }
             }
         }
 
-        while (!queue.isEmpty() && result.size() < totalCount) {
-            result.add(queue.poll());
+        // 路径优化：始终寻找距离上一个方块最近的节点
+        BlockPos currentPos = blockPos;
+        while (!rawBlocks.isEmpty() && result.size() < totalCount) {
+            BlockPos finalCurrentPos = currentPos;
+            BlockPos closest = rawBlocks.stream()
+                    .min(Comparator.comparingDouble(p -> p.getSquaredDistance(finalCurrentPos)))
+                    .orElse(null);
+
+            if (closest != null) {
+                result.add(closest);
+                rawBlocks.remove(closest);
+                currentPos = closest;
+            } else {
+                break;
+            }
         }
 
         return result;
@@ -192,7 +204,6 @@ public class MiningHelper {
         return findNearestBlocks(player.getBlockPos(), targetCounts, maxRadius);
     }
 
-
     public static void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [混合方块] 挖掘拾取队列...");
         MiningHelper.blockToMine.clear();
@@ -202,12 +213,9 @@ public class MiningHelper {
             BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
             return;
         }
-        dispatchNextMineAndCollectTask(); // 启动第一个任务
+        dispatchNextMineAndCollectTask();
     }
 
-    /**
-     * 重载 2：扫描精确配额的方块
-     */
     public static void mineAndCollect(PlayerEntity player, java.util.Map<Block, Integer> targetCounts, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [精确配额] 挖掘拾取队列...");
         MiningHelper.blockToMine.clear();
@@ -220,9 +228,6 @@ public class MiningHelper {
         dispatchNextMineAndCollectTask();
     }
 
-    /**
-     * 核心派发器：从列表中取出一个方块，丢给 MiscController 执行
-     */
     public static void dispatchNextMineAndCollectTask() {
         if (!MiningHelper.blockToMine.isEmpty()) {
             BlockPos nextTarget = MiningHelper.blockToMine.remove(0);
@@ -234,5 +239,4 @@ public class MiningHelper {
             System.out.println("FredoBot: 当前挖掘列表已全部执行完毕！");
         }
     }
-
 }

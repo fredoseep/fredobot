@@ -30,7 +30,7 @@ public class Fredobot implements ModInitializer {
 
 												BotEngine.getInstance().start();
 
-												BotEngine.getInstance().getModule(PathExecutor.class).setGoal(target);
+												BotEngine.getInstance().getModule(PathExecutor.class).setGoal(target,"manual goto pos");
 
 												context.getSource().sendFeedback(new LiteralText("§e[服务器侧] 接收到寻路请求: " + target.toShortString()), false);
 												return 1;

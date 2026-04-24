@@ -60,12 +60,12 @@ public class BtStuff {
     public static BlockPos oceanFloorNoKelp(BlockPos magmaPos) {
         World world = MinecraftClient.getInstance().world;
         Biome biome = world.getBiome(magmaPos);
-        if(biome != Biomes.OCEAN&&biome !=Biomes.WARM_OCEAN&&biome !=Biomes.COLD_OCEAN&&biome !=Biomes.DEEP_COLD_OCEAN&&biome !=Biomes.DEEP_OCEAN&&biome !=Biomes.DEEP_FROZEN_OCEAN&&biome !=Biomes.DEEP_LUKEWARM_OCEAN&&biome !=Biomes.DEEP_WARM_OCEAN&&biome !=Biomes.FROZEN_OCEAN&&biome !=Biomes.LUKEWARM_OCEAN&&biome !=Biomes.BEACH&&biome !=Biomes.SNOWY_BEACH){
+        if (biome != Biomes.OCEAN && biome != Biomes.WARM_OCEAN && biome != Biomes.COLD_OCEAN && biome != Biomes.DEEP_COLD_OCEAN && biome != Biomes.DEEP_OCEAN && biome != Biomes.DEEP_FROZEN_OCEAN && biome != Biomes.DEEP_LUKEWARM_OCEAN && biome != Biomes.DEEP_WARM_OCEAN && biome != Biomes.FROZEN_OCEAN && biome != Biomes.LUKEWARM_OCEAN && biome != Biomes.BEACH && biome != Biomes.SNOWY_BEACH && biome != Biomes.RIVER) {
             System.out.println("Fredodebug: not an ocean biome");
             return null;
         }
-       BlockPos currentBlockPos = new BlockPos(magmaPos.getX(),62,magmaPos.getZ());
-        while(!world.getBlockState(currentBlockPos).getMaterial().isSolid()&&currentBlockPos.getY()>11){
+        BlockPos currentBlockPos = new BlockPos(magmaPos.getX(), 62, magmaPos.getZ());
+        while (!world.getBlockState(currentBlockPos).getMaterial().isSolid() && currentBlockPos.getY() > 11) {
             currentBlockPos = currentBlockPos.down();
         }
         return currentBlockPos;
@@ -76,7 +76,7 @@ public class BtStuff {
     }
 
     public enum BtCraftPhase {
-        CRUSH_LOGS, MAKE_TABLE, PLACE_TABLE, OPEN_TABLE, MAKE_STICKS_1, MAKE_STICKS_2, PROCESS_QUEUE, CHECK_40_PLANKS, GATHER_MISSING_PLANKS, CRUSH_NEW_LOGS, GATHER_MISSING_COBBLE, RETURN_TO_TABLE, OPEN_TABLE_RETURN, BREAK_TABLE, GETTING_LEAVES, DONE,INVENTORY_MANAGEMENT;
+        CRUSH_LOGS, MAKE_TABLE, PLACE_TABLE, OPEN_TABLE, MAKE_STICKS_1, MAKE_STICKS_2, PROCESS_QUEUE, CHECK_40_PLANKS, GATHER_MISSING_PLANKS, CRUSH_NEW_LOGS, GATHER_MISSING_COBBLE, RETURN_TO_TABLE, OPEN_TABLE_RETURN, BREAK_TABLE, GETTING_LEAVES, DONE, INVENTORY_MANAGEMENT;
     }
 
     public enum TNTCraftPhase {
@@ -220,7 +220,7 @@ public class BtStuff {
             if (player.isTouchingWater() || player.isSwimming()) {
                 List<BlockPos> lands = MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), 1, 30);
                 if (!lands.isEmpty()) {
-                    BotEngine.getInstance().getModule(PathExecutor.class).setGoal(lands.get(0));
+                    BotEngine.getInstance().getModule(PathExecutor.class).setGoal(lands.get(0), "the land pos");
                 } else {
                     BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
                     System.out.println("Fredobot: reset because no land found");
@@ -588,7 +588,7 @@ public class BtStuff {
                             }
                         }
                         BlockPos safePos = new BlockPos(nearestDrop.getX(), nearestDrop.getY() + 0.5, nearestDrop.getZ());
-                        pathExecutor.setGoal(safePos);
+                        pathExecutor.setGoal(safePos, "drop pos");
                     }
                 } else {
                     tntState = TNTState.DONE;
@@ -599,11 +599,11 @@ public class BtStuff {
 
     private static List<SimplePathfinder.Node> calcTakeCoverBehave(BlockPos coverPos) {
         List<SimplePathfinder.Node> result = new ArrayList<>();
-        result.add(new SimplePathfinder.Node(coverPos.up(2),null,null,0,0, SimplePathfinder.MovementState.WALKING,0));
-        result.add(new SimplePathfinder.Node(coverPos.up(1),null,null,0,0, SimplePathfinder.MovementState.MINING,0));
-        result.add(new SimplePathfinder.Node(coverPos,null,null,0,0, SimplePathfinder.MovementState.MINING,0));
-        result.add(new SimplePathfinder.Node(coverPos.down(1),null,null,0,0, SimplePathfinder.MovementState.MINING,0));
-        result.add(new SimplePathfinder.Node(coverPos.down(2),null,null,0,0, SimplePathfinder.MovementState.MINING,0));
+        result.add(new SimplePathfinder.Node(coverPos.up(2), null, null, 0, 0, SimplePathfinder.MovementState.WALKING, 0));
+        result.add(new SimplePathfinder.Node(coverPos.up(1), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
+        result.add(new SimplePathfinder.Node(coverPos, null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
+        result.add(new SimplePathfinder.Node(coverPos.down(1), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
+        result.add(new SimplePathfinder.Node(coverPos.down(2), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
         return result;
     }
 
@@ -636,14 +636,16 @@ public class BtStuff {
 
         switch (globalExecutor.currentState) {
             case IDLE:
-                pathExecutor.setGoal(btStandingPos);
+                pathExecutor.setGoal(btStandingPos, "bt pos");
                 globalExecutor.currentState = GlobalExecutor.GlobalState.GOING_TO_BT_STANDING_PLACE;
                 break;
 
             case GOING_TO_BT_STANDING_PLACE:
                 if (PlayerHelper.isNear(player, btStandingPos, 1) && !pathExecutor.isBusy()) {
                     globalExecutor.currentState = GlobalExecutor.GlobalState.DIGGING_BT;
+                    break;
                 }
+                if (!pathExecutor.isBusy()) pathExecutor.setGoal(btStandingPos, "bt pos");
                 break;
 
             case DIGGING_BT:
@@ -713,7 +715,7 @@ public class BtStuff {
                         boolean isCentered = (dX * dX + dZ * dZ <= 0.15) && (dY <= 0.5);
 
                         if (!isCentered) {
-                            if (!pathExecutor.isBusy()) pathExecutor.setGoal(TNTSetupPos);
+                            if (!pathExecutor.isBusy()) pathExecutor.setGoal(TNTSetupPos, "tnt setup pos");
                             break;
                         }
                     }
@@ -999,7 +1001,7 @@ public class BtStuff {
                                 break;
                             }
                             if (!pathExecutor.isBusy()) {
-                                pathExecutor.setGoal(craftingTablePos.up());
+                                pathExecutor.setGoal(craftingTablePos.up(), "crafting table pos");
                             }
                             return;
                         }
@@ -1080,7 +1082,7 @@ public class BtStuff {
                             }
                             btCraftPhase = BtCraftPhase.INVENTORY_MANAGEMENT;
                         } else {
-                            System.out.println("FredoBot: current leaves count:  " + currentLeaves );
+                            System.out.println("FredoBot: current leaves count:  " + currentLeaves);
                             btCraftPhase = BtCraftPhase.GETTING_LEAVES;
                         }
                         break;
@@ -1102,17 +1104,17 @@ public class BtStuff {
                         }
                         break;
                     case INVENTORY_MANAGEMENT:
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,AxeItem.class,0);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,PickaxeItem.class,1);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player, ShovelItem.class,2);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,Items.BUCKET,3);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player, Items.COOKED_SALMON,4);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,Items.COOKED_COD,4);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,false),5);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,false),6);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.getCheapestBlock(player,true),6);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,BoatItem.class,7);
-                        InventoryHelper.moveItemToHotbar(minecraftClient,player,InventoryHelper.doorType,8);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, AxeItem.class, 0);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, PickaxeItem.class, 1);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, ShovelItem.class, 2);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.BUCKET, 3);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.COOKED_SALMON, 4);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.COOKED_COD, 4);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, false), 5);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, false), 6);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, true), 6);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, BoatItem.class, 7);
+                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.doorType, 8);
                         globalExecutor.currentState = GlobalExecutor.GlobalState.PRE_NETHER;
                         System.out.println("Fredobot: Inventory management done");
                         break;
