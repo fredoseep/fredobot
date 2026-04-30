@@ -25,11 +25,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class PreNether {
-    private static BlockPos magmaPos = null;
+    public static BlockPos magmaPos = null;
+    public static BlockPos alignedMagmaPos = null;
     private static BlockPos gravelPos = null;
 
     public static void reset() {
         magmaPos = null;
+        alignedMagmaPos = null;
         gravelPos = null;
     }
 
@@ -56,6 +58,7 @@ public class PreNether {
                     return;
                 }
             }
+            if(magmaPos==null)return;
             gravelPos = MiningHelper.findNearestBlocks(BtStuff.oceanFloorNoKelp(magmaPos), Map.of(Blocks.GRAVEL, 4), 40).getFirst();
             System.out.println("Fredodebug: ocean floor gravel: "+ gravelPos.toShortString());
 
@@ -81,8 +84,8 @@ public class PreNether {
             }
         }
         else {
-            globalExecutor.currentState = GlobalExecutor.GlobalState.NEXT;
-            System.out.println("Fredodebug: go Next");
+            globalExecutor.currentState = GlobalExecutor.GlobalState.BUILDING_TWO_BY_ONE_NETHER_PORTAL;
+            System.out.println("Fredodebug: building two by one");
         }
     }
 
@@ -122,10 +125,10 @@ public class PreNether {
                     probeMutable.set(px + x, 13, pz + z);
                     BlockState stateAbove3 = world.getBlockState(probeMutable);
 
-
                     if (!(stateBelow.getBlock() == Blocks.LAVA && stateAbove1.getBlock() == Blocks.BUBBLE_COLUMN && stateAbove2.getBlock() == Blocks.BUBBLE_COLUMN && stateAbove3.getBlock() == Blocks.BUBBLE_COLUMN)) continue;
+                    BlockPos offsetPos = null;
                     for (Direction offset : new Direction[]{Direction.EAST, Direction.SOUTH, Direction.WEST, Direction.NORTH}) {
-                        BlockPos offsetPos = mutable.offset(offset);
+                         offsetPos = mutable.offset(offset);
                         if (world.getBlockState(offsetPos).getBlock() == Blocks.MAGMA_BLOCK && world.getBlockState(offsetPos.down()).getBlock() == Blocks.LAVA) {
                             isTwoByOne = true;
                             break;
@@ -136,6 +139,7 @@ public class PreNether {
                         if (distSq < minDistanceSq) {
                             minDistanceSq = distSq;
                             closestRavine = mutable.toImmutable();
+                            alignedMagmaPos = offsetPos;
                         }
                     }
                 }

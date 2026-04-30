@@ -106,12 +106,37 @@ public class SimplePathfinder {
 
         BlockPos currPos = startPos;
 
-        // 1. 水平微调对齐 (如果 MiscController 没能完美送到同一格)
+        // 1. 水平微调对齐 (带防刮底智能上浮逻辑)
         while (currPos.getX() != end.getX() || currPos.getZ() != end.getZ()) {
             int stepX = Integer.compare(end.getX(), currPos.getX());
             int stepZ = Integer.compare(end.getZ(), currPos.getZ());
-            currPos = currPos.add(stepX, 0, stepZ);
+            BlockPos nextHoriz = currPos.add(stepX, 0, stepZ);
 
+            // ==========================================
+            // 【核心优化】：水下防刮底 / 坑底逃脱机制
+            // 如果前方被挡住了，绝不急着平推挖过去！先看看头顶是不是通的（水或空气）。
+            // 如果头顶是通的，优先“上浮/起跳”来越过障碍物！
+            // ==========================================
+            if (!isPassable(world, nextHoriz) || !isPassable(world, nextHoriz.up())) {
+                BlockPos upPos = currPos.up();
+                // 如果头顶通畅，且没超过世界高度限制，就往上浮！
+                if (isPassable(world, upPos) && currPos.getY() < 255) {
+                    currPos = upPos;
+                    MovementState state = MovementState.JUMPING_UP; // 默认陆地起跳
+                    if (isWaterBlock(world, currPos)) {
+                        // 如果在水里，根据头顶是不是水面决定是游泳还是潜水
+                        state = !isWaterBlock(world, currPos.up()) ? MovementState.SWIMMING : MovementState.DIVING;
+                    }
+                    Node next = new Node(currPos, null, current, current.costFromStart + 1, 0, state, 0);
+                    path.add(next);
+                    current = next;
+                    continue; // 成功上浮一格，中断本次水平判断，下个循环重新判断前方是否畅通
+                }
+            }
+
+            // 如果头顶也不通（比如在海底封闭洞穴里），或者前方本来就没被挡住
+            // 那么正常进行水平移动（如果被挡住了状态会自动切成 MINING 硬挖）
+            currPos = nextHoriz;
             MovementState state = MovementState.WALKING;
             if (isWaterBlock(world, currPos)) {
                 state = !isWaterBlock(world, currPos.up()) ? MovementState.SWIMMING : MovementState.DIVING;
@@ -123,10 +148,10 @@ public class SimplePathfinder {
             current = next;
         }
 
-        // 2. 暴力垂直下钻
+        // 2. 暴力垂直下钻 (对齐后一路向下)
         while (currPos.getY() > end.getY()) {
             currPos = currPos.down();
-            MovementState state = MovementState.FALLING; // 默认如果是空气就掉下去
+            MovementState state = MovementState.FALLING;
 
             if (isWaterBlock(world, currPos)) {
                 state = MovementState.DIVING;

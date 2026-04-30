@@ -63,7 +63,12 @@ public class Fredobot implements ModInitializer {
 				return 1;
 			}));
 		});
-
+		CommandRegistrationCallback.EVENT.register((commandDispatcher, b) -> {
+			commandDispatcher.register((CommandManager.literal("test")).executes(commandContext -> {
+				Test.testBlockPlace();
+				return 1;
+			}));
+		});
 		System.out.println("SpeedrunBot 初始化成功！");
 	}
 }

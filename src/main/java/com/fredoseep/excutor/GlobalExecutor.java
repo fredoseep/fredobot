@@ -5,6 +5,7 @@ import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.MiningHelper;
+import com.fredoseep.utils.prenether.NetherPortalBuilding;
 import com.fredoseep.utils.prenether.PreNether;
 import me.voidxwalker.autoreset.Atum;
 import net.minecraft.client.MinecraftClient;
@@ -26,6 +27,7 @@ public class GlobalExecutor implements IBotModule {
         LOOKING_FOR_TREES(5),
         CRAFTING(6),
         PRE_NETHER(7),
+        BUILDING_TWO_BY_ONE_NETHER_PORTAL(8),
         NEXT(0x7FFFFFF);
 
         private final int missionOrder;
@@ -37,6 +39,33 @@ public class GlobalExecutor implements IBotModule {
         public int getMissionOrder() {
             return missionOrder;
         }
+    }
+
+    public void resetWorld() {
+        resetState();
+        PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+        if (pathExecutor != null) {
+            pathExecutor.stop();
+            pathExecutor.suspendedDestinations.clear();
+        }
+        MiscController miscController = BotEngine.getInstance().getModule(MiscController.class);
+        miscController.targetEntity = null;
+        miscController.stopTask();
+
+        CraftingController craftingController = BotEngine.getInstance().getModule(CraftingController.class);
+        craftingController.resetStatus();
+        Atum.scheduleReset();
+    }
+
+    private void resetState() {
+        currentState = GlobalState.IDLE;
+        debugTick = 0;
+        globalInitialized = false;
+        BtStuff.reset();
+        PreNether.reset();
+        MiningHelper.blockToMine.clear();
+        MiningHelper.currentTargetBlocks.clear();
+        NetherPortalBuilding.resetState();
     }
 
     @Override
@@ -62,6 +91,9 @@ public class GlobalExecutor implements IBotModule {
         }
         if(currentState.getMissionOrder()==7){
             PreNether.preNetherStuff(player);
+        }
+        if(currentState.getMissionOrder()==8){
+            NetherPortalBuilding.twoByOneBuild();
         }
     }
 
@@ -90,28 +122,5 @@ public class GlobalExecutor implements IBotModule {
         return false;
     }
 
-    public void resetWorld() {
-        resetState();
-        PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
-        if (pathExecutor != null) {
-            pathExecutor.stop();
-            pathExecutor.suspendedDestinations.clear();
-        }
-        MiscController miscController = BotEngine.getInstance().getModule(MiscController.class);
-        miscController.targetEntity = null;
-        miscController.stopTask();
 
-        CraftingController craftingController = BotEngine.getInstance().getModule(CraftingController.class);
-        craftingController.resetStatus();
-        Atum.scheduleReset();
-    }
-
-    private void resetState() {
-        currentState = GlobalState.IDLE;
-        debugTick = 0;
-        globalInitialized = false;
-        BtStuff.reset();
-        PreNether.reset();
-        MiningHelper.blockToMine.clear();
-    }
 }

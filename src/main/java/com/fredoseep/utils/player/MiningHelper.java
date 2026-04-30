@@ -3,7 +3,6 @@ package com.fredoseep.utils.player;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
-import com.fredoseep.utils.bt.BtStuff;
 import net.minecraft.block.Block;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
@@ -12,7 +11,6 @@ import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.Heightmap;
 import net.minecraft.world.RayTraceContext;
 import net.minecraft.world.World;
 
@@ -21,6 +19,7 @@ import java.util.*;
 public class MiningHelper {
     public static List<BlockPos> blockToMine = new ArrayList<>();
 
+    public static final Set<Block> currentTargetBlocks = new HashSet<Block>();
     // 新增标志位：标记当前是否处于批量挖掘阶段
     public static boolean isBatchMiningPhase = false;
 
@@ -207,9 +206,14 @@ public class MiningHelper {
     public static void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [混合方块] 挖掘拾取队列...");
         MiningHelper.blockToMine.clear();
+
+        MiningHelper.currentTargetBlocks.clear();
+        MiningHelper.currentTargetBlocks.addAll(targetBlocks);
+
         MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetBlocks, totalCount, maxRadius));
         if (MiningHelper.blockToMine.isEmpty()) {
             System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetBlocks.toString());
+            MiningHelper.currentTargetBlocks.clear();
             BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
             return;
         }
@@ -219,9 +223,14 @@ public class MiningHelper {
     public static void mineAndCollect(PlayerEntity player, java.util.Map<Block, Integer> targetCounts, int maxRadius) {
         System.out.println("FredoBot: 开始扫描并生成 [精确配额] 挖掘拾取队列...");
         MiningHelper.blockToMine.clear();
+
+        MiningHelper.currentTargetBlocks.clear();
+        MiningHelper.currentTargetBlocks.addAll(targetCounts.keySet());
+
         MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, targetCounts, maxRadius));
         if (MiningHelper.blockToMine.isEmpty()) {
             System.out.println("Fredobot: reset because cant find enough blocks");
+            MiningHelper.currentTargetBlocks.clear();
             BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
             return;
         }
@@ -236,6 +245,7 @@ public class MiningHelper {
                     nextTarget
             );
         } else {
+            MiningHelper.currentTargetBlocks.clear(); // 任务结束，释放黑名单
             System.out.println("FredoBot: 当前挖掘列表已全部执行完毕！");
         }
     }

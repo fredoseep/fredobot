@@ -23,6 +23,7 @@ import net.minecraft.screen.CraftingScreenHandler;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.tag.BlockTags;
 import net.minecraft.tag.ItemTags;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -58,13 +59,9 @@ public class BtStuff {
     public static final List<Item> itemsToCraft = new ArrayList<>();
 
     public static BlockPos oceanFloorNoKelp(BlockPos magmaPos) {
-        World world = MinecraftClient.getInstance().world;
+        World world = MinecraftClient.getInstance().world;//127 10 203
         Biome biome = world.getBiome(magmaPos);
-        if (biome != Biomes.OCEAN && biome != Biomes.WARM_OCEAN && biome != Biomes.COLD_OCEAN && biome != Biomes.DEEP_COLD_OCEAN && biome != Biomes.DEEP_OCEAN && biome != Biomes.DEEP_FROZEN_OCEAN && biome != Biomes.DEEP_LUKEWARM_OCEAN && biome != Biomes.DEEP_WARM_OCEAN && biome != Biomes.FROZEN_OCEAN && biome != Biomes.LUKEWARM_OCEAN && biome != Biomes.BEACH && biome != Biomes.SNOWY_BEACH && biome != Biomes.RIVER) {
-            System.out.println("Fredodebug: not an ocean biome");
-            return null;
-        }
-        BlockPos currentBlockPos = new BlockPos(magmaPos.getX(), 62, magmaPos.getZ());
+        BlockPos currentBlockPos = new BlockPos(magmaPos.getX(), 100, magmaPos.getZ());
         while (!world.getBlockState(currentBlockPos).getMaterial().isSolid() && currentBlockPos.getY() > 11) {
             currentBlockPos = currentBlockPos.down();
         }
@@ -98,6 +95,8 @@ public class BtStuff {
         diamondCount = 0;
         MIN_IRON_NEEDED = 7;
         itemsToCraft.clear();
+        tempCraftTarget = null;
+        tempPlankTarget = null;
         tntState = TNTState.INIT;
         tntWaitTicks = 0;
         craftingWaitTicks = 0;
@@ -328,20 +327,21 @@ public class BtStuff {
         itemsToCraft.add(Items.BUCKET);
         currentIronCount -= 3;
 
-        if (currentDiamondCount == 3) {
+        if (currentDiamondCount >= 3) {
             itemsToCraft.add(Items.DIAMOND_AXE);
             axeCrafted = true;
             currentDiamondCount -= 3;
         }
-        if (currentDiamondCount == 2) {
-            itemsToCraft.add(Items.DIAMOND_SWORD);
-            currentDiamondCount -= 2;
-        }
-        if (currentDiamondCount == 1) {
+        if (currentDiamondCount >= 1) {
             itemsToCraft.add(Items.DIAMOND_SHOVEL);
             shovelCrafted = true;
             currentDiamondCount--;
         }
+        if (currentDiamondCount >= 2) {
+            itemsToCraft.add(Items.DIAMOND_SWORD);
+            currentDiamondCount -= 2;
+        }
+
 
         if (hasTNT) {
             if (currentIronCount >= 3) {
@@ -775,7 +775,7 @@ public class BtStuff {
                         break;
 
                     case PLACE_TABLE:
-                        if (itemsToCraft.isEmpty()) {
+                        if (itemsToCraft.isEmpty()&&InventoryHelper.findItemSlot(player,Items.CRAFTING_TABLE)==-1) {
                             btCraftPhase = BtCraftPhase.BREAK_TABLE;
                             break;
                         }
@@ -806,7 +806,9 @@ public class BtStuff {
 
                         // 放置工作台
                         BlockHitResult placeHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos.down(), false);
-                        minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit);
+                        if(minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit) != ActionResult.SUCCESS){
+                            return;
+                        }
 
                         // ==========================================
                         // 【核心修复】：智能识别被挡住的顶面

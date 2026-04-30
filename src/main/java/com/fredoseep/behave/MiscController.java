@@ -5,10 +5,7 @@ import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.bt.BtStuff;
-import com.fredoseep.utils.player.InventoryHelper;
-import com.fredoseep.utils.player.MiningHelper;
-import com.fredoseep.utils.player.PlayerHelper;
-import com.fredoseep.utils.player.ToolsHelper;
+import com.fredoseep.utils.player.*;
 
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
@@ -88,6 +85,7 @@ public class MiscController implements IBotModule {
     }
 
     public void stopTask() {
+        if(currentTask==MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP)MiningHelper.currentTargetBlocks.clear();
         this.currentTask = null;
         this.targetPos = null;
         this.boatEntity = null;
@@ -296,39 +294,10 @@ public class MiscController implements IBotModule {
                                 }
                             }
                             if (dSlot != -1) {
-                                // ==========================================
-                                // 【核心修复 2】：根据玩家的亚方块偏移量，智能调整放置方向！
-                                // 算出玩家偏向哪个象限，然后朝向反方向看，将门生成在最空旷的对侧边上，
-                                // 从而彻底杜绝“玩家碰撞箱卡住门”的 Bug！
-                                // ==========================================
-                                double dx = player.getX() - (doorPos.getX() + 0.5);
-                                double dz = player.getZ() - (doorPos.getZ() + 0.5);
-                                float placeYaw = player.yaw;
-
-                                if (Math.abs(dx) > Math.abs(dz)) {
-                                    if (dx > 0) placeYaw = -90f; // 玩家偏东，朝东看，门就会自动生成在西侧
-                                    else placeYaw = 90f;         // 玩家偏西，朝西看，门就会生成在东侧
-                                } else {
-                                    if (dz > 0) placeYaw = 0f;   // 玩家偏南，朝南看，门放北侧
-                                    else placeYaw = 180f;        // 玩家偏北，朝北看，门放南侧
+                                if (!RelevantDirectionHelper.placeDoorSmartly(client, player, doorPos, dSlot)) {
+                                    return; // 视角未转正，强行 return 等待下一个 tick
                                 }
-
-                                MovementController.setLookDirection(player, placeYaw, 90f);
-
-                                // 【核心拦截】：视角还没彻底转到位时，千万别发包！(防止旧角度导致生成位置错误)
-                                if (Math.abs(net.minecraft.util.math.MathHelper.wrapDegrees(player.yaw - placeYaw)) > 5.0f ||
-                                        Math.abs(player.pitch - 90f) > 5.0f) {
-                                    return; // 挂起，等待下一个 tick 视角继续转动
-                                }
-
-                                // 视角完美到位，切出门，强制选中并放置
-                                InventoryHelper.moveItemToHotbar(client, player, dSlot, 8);
-                                player.inventory.selectedSlot = 8;
-
-                                net.minecraft.util.hit.BlockHitResult hit = new net.minecraft.util.hit.BlockHitResult(Vec3d.ofCenter(doorPos.down()), net.minecraft.util.math.Direction.UP, doorPos.down(), false);
-                                client.interactionManager.interactBlock((ClientPlayerEntity) player, client.world, net.minecraft.util.Hand.MAIN_HAND, hit);
-                                System.out.println("FredoBot [水下作战]: 智能防碰撞放门 -> 偏置 dx=" + String.format("%.2f", dx) + " dz=" + String.format("%.2f", dz));
-                                uwWaitTicks = 5;
+                                uwWaitTicks = 5; // 放置成功，给服务器一点发包反应时间
                             }
                             uwPhase = UwDoorPhase.MINE_TARGETS;
                             return;
@@ -349,11 +318,6 @@ public class MiscController implements IBotModule {
                                 return;
                             }
 
-                            // ==========================================
-                            // 【核心保护机制】：站在门里，先挖四周！
-                            // 如果当前要挖的方块是门的地基，或者是门本身，直接跳过！
-                            // 坚决不提前毁掉氧气舱，留到最后 RETURN_AND_BREAK 再杀！
-                            // ==========================================
                             if (targetPos.equals(doorPos) || targetPos.equals(doorPos.down()) || targetPos.equals(doorPos.up())) {
                                 if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
                                     targetPos = MiningHelper.blockToMine.remove(0); // 暂不挖地基，拿队列里的下一个去挖
@@ -388,15 +352,15 @@ public class MiscController implements IBotModule {
                             return;
 
                         case COLLECT_DROPS:
-                            if (pickupCoolDownTick <= 5) { pickupCoolDownTick++; return; }
+                            pickupCoolDownTick++;
 
-                            // 捡刚刚掏空的周边矿物
                             net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(doorPos).expand(15.0, 10.0, 15.0);
                             java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
                                     net.minecraft.entity.ItemEntity.class,
                                     searchBox,
                                     e -> validDrops.isEmpty() || validDrops.contains(e.getStack().getItem())
                             );
+
                             if (!drops.isEmpty()) {
                                 net.minecraft.entity.ItemEntity nearestDrop = drops.get(0);
                                 double minDist = player.squaredDistanceTo(nearestDrop);
@@ -404,11 +368,16 @@ public class MiscController implements IBotModule {
                                     double d = player.squaredDistanceTo(drop);
                                     if (d < minDist) { minDist = d; nearestDrop = drop; }
                                 }
-                                // 【核心修复 2】：等待物品落地或触水
                                 if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return;
                                 walkTowardsEntity(player, nearestDrop);
+                                pickupCoolDownTick = 0; // 【核心修复】：只要发现有东西，重置计时器，确保持续捡多个物品
                             } else {
-                                uwPhase = UwDoorPhase.RETURN_AND_BREAK; // 捡完了，回去拆地基！
+                                if (pickupCoolDownTick < 40) {
+                                    if (pickupCoolDownTick % 10 == 0) System.out.println("FredoBot [调试]: 等待周边掉落物刷新中... (" + pickupCoolDownTick + "/40)");
+                                    return; // 没东西，继续死等 40 Tick
+                                } else {
+                                    uwPhase = UwDoorPhase.RETURN_AND_BREAK; // 彻底没东西了，回去拆地基！
+                                }
                             }
                             return;
 
@@ -419,6 +388,17 @@ public class MiscController implements IBotModule {
                                 return;
                             }
                             if (pathExecutor.isBusy()) pathExecutor.stop();
+
+                            // ==========================================
+                            // 【核心新增】：深呼吸！等待氧气完全回满再拆门
+                            // ==========================================
+                            if (player.getAir() < player.getMaxAir()) {
+                                // 每 10 个 tick（0.5秒）打印一次，防止控制台刷屏
+                                if (player.age % 10 == 0) {
+                                    System.out.println("FredoBot [水下作战]: 正在氧气舱内大口呼吸 (" + player.getAir() + "/" + player.getMaxAir() + ")...");
+                                }
+                                return; // 挂起当前 Tick，什么都不做，就在门里站着回氧气
+                            }
 
                             BlockPos foundation = doorPos.down();
                             boolean foundationMined = client.world.getBlockState(foundation).isAir() || client.world.getBlockState(foundation).getMaterial().isLiquid();
@@ -450,11 +430,9 @@ public class MiscController implements IBotModule {
                             return;
 
                         case COLLECT_FINAL_DROPS:
-                            // 给服务器爆掉落物留点缓冲时间
-                            if (pickupCoolDownTick <= 5) { pickupCoolDownTick++; return; }
+                            pickupCoolDownTick++;
 
-                            // 锁定门的位置搜索最后爆出来的地基和门
-                            net.minecraft.util.math.Box finalSearchBox = new net.minecraft.util.math.Box(doorPos).expand(6.0, 6.0, 6.0);
+                            net.minecraft.util.math.Box finalSearchBox = new net.minecraft.util.math.Box(doorPos).expand(8.0, 8.0, 8.0);
                             java.util.List<net.minecraft.entity.ItemEntity> finalDrops = client.world.getEntities(
                                     net.minecraft.entity.ItemEntity.class,
                                     finalSearchBox,
@@ -468,18 +446,23 @@ public class MiscController implements IBotModule {
                                     double d = player.squaredDistanceTo(drop);
                                     if (d < minDist) { minDist = d; nearestDrop = drop; }
                                 }
-                                // 【核心修复 3】：等待门和地基方块落地或漂浮
                                 if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return;
                                 walkTowardsEntity(player, nearestDrop);
+                                pickupCoolDownTick = 0; // 【核心修复】：重置计时器，确保地基和门这俩东西都能捡起来
                             } else {
-                                System.out.println("FredoBot: 水下地基挖掘完毕，门已回收，完美恢复正常状态！");
-                                uwPhase = UwDoorPhase.NONE;
-                                doorPos = null;
-                                pickupCoolDownTick = 0;
-                                pathingFailTicks = 0;
-                                targetEntity = null;
-                                pathExecutor.resumeSuspendedGoal();
-                                stopTask();
+                                if (pickupCoolDownTick < 40) {
+                                    if (pickupCoolDownTick % 10 == 0) System.out.println("FredoBot [调试]: 门/地基已破坏，等待最终掉落物... (" + pickupCoolDownTick + "/40)");
+                                    return;
+                                } else {
+                                    System.out.println("FredoBot: 水下地基和门已完全回收(或超时)，完美恢复正常状态！");
+                                    uwPhase = UwDoorPhase.NONE;
+                                    doorPos = null;
+                                    pickupCoolDownTick = 0;
+                                    pathingFailTicks = 0;
+                                    targetEntity = null;
+                                    pathExecutor.resumeSuspendedGoal();
+                                    stopTask();
+                                }
                             }
                             return;
 
@@ -583,13 +566,14 @@ public class MiscController implements IBotModule {
                     if (pathExecutor.isBusy()) {
                         return;
                     }
-
+                    pickupCoolDownTick++;
                     Box searchBox = new Box(player.getBlockPos()).expand(15.0, 10.0, 15.0);
                     List<ItemEntity> drops = client.world.getEntities(
                             ItemEntity.class,
                             searchBox,
                             e -> validDrops.isEmpty() || validDrops.contains(e.getStack().getItem())
                     );
+
                     if (!drops.isEmpty()) {
                         ItemEntity nearestDrop = null;
                         double minDist = Double.MAX_VALUE;
@@ -601,18 +585,22 @@ public class MiscController implements IBotModule {
                             }
                         }
                         if (nearestDrop != null) {
-                            // 【核心修复 4】：等待陆地的矿物/木头结结实实地掉在地上！
                             if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return;
                             walkTowardsEntity(player, nearestDrop);
+                            pickupCoolDownTick = 0; // 【核心修复】：只要发现有东西，重置计时器
                             return;
                         }
                     } else {
-                        System.out.println("FredoBot: 区域内方块已全部挖掘，掉落物收集完毕！");
-                        pickupCoolDownTick = 0;
-                        pathingFailTicks = 0;
-                        targetEntity = null;
-                        pathExecutor.resumeSuspendedGoal();
-                        stopTask();
+                        if (pickupCoolDownTick < 40) {
+                            return; // 没东西，原地发呆等满 40 Tick
+                        } else {
+                            System.out.println("FredoBot: 区域内方块已全部挖掘，掉落物收集完毕！");
+                            pickupCoolDownTick = 0;
+                            pathingFailTicks = 0;
+                            targetEntity = null;
+                            pathExecutor.resumeSuspendedGoal();
+                            stopTask();
+                        }
                     }
                 }
                 break;

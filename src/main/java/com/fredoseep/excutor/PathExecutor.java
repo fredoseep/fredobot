@@ -116,15 +116,15 @@ public class PathExecutor implements IBotModule {
         return this.currentPath.get(currentPathIndex);
     }
 
-    public void setGoal(BlockPos destination,String targetType) {
-        setGoal(destination, Collections.emptySet(),targetType); // 兼容旧接口
+    public void setGoal(BlockPos destination, String targetType) {
+        setGoal(destination, Collections.emptySet(), targetType); // 兼容旧接口
     }
 
     // 支持黑名单的 setGoal
-    public void setGoal(BlockPos destination, Set<BlockPos> blacklist,String targetType) {
+    public void setGoal(BlockPos destination, Set<BlockPos> blacklist, String targetType) {
         this.suspendedDestinations.clear();
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
-        startNewPath(destination,targetType);
+        startNewPath(destination, targetType);
     }
 
     // 兼容 MiscController 的无参数临时任务
@@ -144,7 +144,7 @@ public class PathExecutor implements IBotModule {
             System.out.println("FredoBot: 挂起原目标 -> " + this.finalDestination.toShortString() + "，前往临时目标 -> " + tempDestination.toShortString());
         }
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
-        startNewPath(tempDestination,"temp target");
+        startNewPath(tempDestination, "temp target");
     }
 
     public void resumeSuspendedGoal() {
@@ -152,13 +152,13 @@ public class PathExecutor implements IBotModule {
         if (!this.suspendedDestinations.isEmpty()) {
             BlockPos target = this.suspendedDestinations.pop();
             System.out.println("FredoBot: 临时任务结束，恢复原目标 -> " + target.toShortString());
-            startNewPath(target,"resume original target");
+            startNewPath(target, "resume original target");
         } else {
             System.out.println("FredoBot: 没有被挂起的任务。");
         }
     }
 
-    private void startNewPath(BlockPos dest,String targetType) {
+    private void startNewPath(BlockPos dest, String targetType) {
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -170,7 +170,7 @@ public class PathExecutor implements IBotModule {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             client.player.sendMessage(new LiteralText("§e[Bot] 发起寻路计算... -> " + dest.toShortString()), false);
-            System.out.println("Fredodebug: setGoalType: "+ targetType);
+            System.out.println("Fredodebug: setGoalType: " + targetType);
             BlockPos startPos = new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ());
             recalculatePath(startPos);
         }
@@ -249,10 +249,20 @@ public class PathExecutor implements IBotModule {
     public void onTick(MinecraftClient client, PlayerEntity player) {
         if (isPaused) return;
         if (currentState != State.EXECUTING || currentPath == null) return;
-
+        boolean isMining = false;
         if (lastStuckCheckPos == null) {
             lastStuckCheckPos = player.getPos();
             stuckCheckTicks = 0;
+        } else {
+            if (currentPathIndex < currentPath.size()) {
+                if (currentPath.get(currentPathIndex).state == SimplePathfinder.MovementState.MINING) {
+                    isMining = true;
+                }
+            }
+        }
+        if (isMining) {
+            stuckCheckTicks = 0;
+            lastStuckCheckPos = player.getPos();
         } else {
             stuckCheckTicks++;
             if (stuckCheckTicks >= 60) { // 3秒 = 60 Tick
@@ -319,7 +329,7 @@ public class PathExecutor implements IBotModule {
             }
             return;
         }
-        if(tempMissionType == TempMissionType.GO_TO_ENTITY&& BotEngine.getInstance().getModule(MiscController.class).targetEntity==null){
+        if (tempMissionType == TempMissionType.GO_TO_ENTITY && BotEngine.getInstance().getModule(MiscController.class).targetEntity == null) {
             player.sendMessage(new LiteralText("§b[Bot] Entity has gone"), false);
             stop();
         }
@@ -489,14 +499,26 @@ public class PathExecutor implements IBotModule {
                 isPhysicallyReached = (dx * dx + dz * dz <= allowedDistSq) && (dy <= 0.5);
             }
 
+            boolean isPathBlocked = false;
+
             if (node.state == SimplePathfinder.MovementState.BUILDING_BRIDGE || node.state == SimplePathfinder.MovementState.BUILDING_PILLAR) {
                 if (world.getBlockState(node.pos.down()).getMaterial().isReplaceable()) {
                     isPhysicallyReached = false;
+                    isPathBlocked = true;
+                }
+            }
+            if (node.state == SimplePathfinder.MovementState.MINING) {
+                if (world.getBlockState(node.pos).getMaterial().isSolid()) {
+                    isPhysicallyReached = false;
+                    isPathBlocked = true; // 坚决阻断后续判定
                 }
             }
 
             if (isPhysicallyReached) {
                 furthestReachedIndex = i;
+            }
+            if (isPathBlocked) {
+                break;
             }
         }
 
@@ -523,6 +545,7 @@ public class PathExecutor implements IBotModule {
             }
         }
     }
+
     /**
      * 强制接管寻路：直接输入自定义的节点列表供机器人执行。
      * 非常适合用于硬编码的微操、短距离精确移动或规避特殊地形。
@@ -553,8 +576,9 @@ public class PathExecutor implements IBotModule {
             client.player.sendMessage(new LiteralText("§d[Bot] 收到微操指令，已接管自定义路线！"), false);
         }
     }
-    public enum TempMissionType{
-        IDLE,GO_TO_ENTITY;
+
+    public enum TempMissionType {
+        IDLE, GO_TO_ENTITY;
     }
 
 }
