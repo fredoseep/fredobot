@@ -7,7 +7,7 @@ import net.minecraft.item.Item;
 
 public class CraftingController implements IBotModule {
 
-    // 【核心修复 1】：引入动态等待状态 WAITING_FOR_RESULT testing
+    // 【核心修复 1】：引入动态等待状态 WAITING_FOR_RESULT
     public enum CraftState { IDLE, SEND_PACKET, WAITING_FOR_RESULT, COLLECTING, DONE, FAILED }
 
     private CraftState state = CraftState.IDLE;
