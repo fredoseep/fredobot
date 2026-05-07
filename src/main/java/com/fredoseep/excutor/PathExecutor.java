@@ -510,7 +510,36 @@ public class PathExecutor implements IBotModule {
             if (node.state == SimplePathfinder.MovementState.MINING) {
                 if (world.getBlockState(node.pos).getMaterial().isSolid()) {
                     isPhysicallyReached = false;
-                    isPathBlocked = true; // 坚决阻断后续判定
+                    isPathBlocked = true;
+                }
+            }
+
+            if (node.state == SimplePathfinder.MovementState.JUMPING_UP) {
+                if (player.getY() < node.pos.getY() - 0.2) {
+                    isPhysicallyReached = false;
+                    isPathBlocked = true;
+                }
+
+                if (player.isSwimming() || player.isTouchingWater()) {
+                    boolean isShoreJump = false;
+                    if (i > 0) {
+                        SimplePathfinder.MovementState prevState = currentPath.get(i - 1).state;
+                        if (prevState == SimplePathfinder.MovementState.SWIMMING || prevState == SimplePathfinder.MovementState.DIVING) {
+                            isShoreJump = true;
+                        }
+                    } else {
+                        isShoreJump = true;
+                    }
+
+                    if (isShoreJump) {
+                        double dx = player.getX() - (node.pos.getX() + 0.5);
+                        double dz = player.getZ() - (node.pos.getZ() + 0.5);
+                        double horizDistSq = dx * dx + dz * dz;
+                        if (horizDistSq > 1.0) {
+                            isPhysicallyReached = false;
+                            isPathBlocked = true;
+                        }
+                    }
                 }
             }
 

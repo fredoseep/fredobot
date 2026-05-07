@@ -245,13 +245,6 @@ public class MovementController implements IBotModule {
                         }
                     }
                 }
-
-                if (player.horizontalCollision) {
-                    horizontalCollisionTicks++;
-                    if (horizontalCollisionTicks >= 3) pressJump = true;
-                } else {
-                    horizontalCollisionTicks = 0;
-                }
                 break;
 
             case JUMPING_UP:
@@ -680,15 +673,14 @@ public class MovementController implements IBotModule {
                     mutable.set(x, y, z);
 
                     if (y < targetPos.getY()) continue;
-
-                    // 工作台免死金牌
-                    if (com.fredoseep.utils.bt.BtStuff.craftingTablePos != null && mutable.equals(com.fredoseep.utils.bt.BtStuff.craftingTablePos)) {
+                    if (y < playerPos.getY() && (x != targetPos.getX() || z != targetPos.getZ())) {
+                        continue;
+                    }
+                    if (mutable.equals(BtStuff.craftingTablePos)) {
                         continue;
                     }
 
                     BlockState state = world.getBlockState(mutable);
-
-                    // 【免死金牌 2】：水平扫描时，也绝对不把门当成障碍物
                     if (state.getBlock() instanceof net.minecraft.block.DoorBlock) continue;
 
                     if (!state.isAir() && !state.getMaterial().isLiquid() && state.getMaterial().isSolid()) {

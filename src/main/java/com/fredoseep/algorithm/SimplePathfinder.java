@@ -1,6 +1,8 @@
 package com.fredoseep.algorithm;
 
 import com.fredoseep.utils.player.InventoryHelper;
+import com.fredoseep.utils.player.MiningHelper;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.player.PlayerEntity;
@@ -177,6 +179,16 @@ public class SimplePathfinder {
         Direction[] directions = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
         int remainingBridging = counts.bridgingBlocks - current.blocksUsed;
         int remainingPillaring = counts.pillaringBlocks - current.blocksUsed;
+
+        if (!MiningHelper.currentTargetBlocks.isEmpty()) {
+            for (Block block : MiningHelper.currentTargetBlocks) {
+                if (block.isIn(net.minecraft.tag.BlockTags.LEAVES)) {
+                    remainingBridging = 0;
+                    remainingPillaring = 0;
+                    break;
+                }
+            }
+        }
 
         boolean isCurrentWater = isWaterBlock(world, current.pos);
         boolean isStandingOnWater = isWaterBlock(world, current.pos.down());

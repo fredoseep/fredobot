@@ -266,6 +266,18 @@ public class InventoryHelper {
     public static BlockCounts countAvailableBuildingBlocks(PlayerEntity player) {
         BlockCounts counts = new BlockCounts();
         if (player == null) return counts;
+        boolean isLeafMiningTask = false;
+        if (!com.fredoseep.utils.player.MiningHelper.currentTargetBlocks.isEmpty()) {
+            for (Block block : com.fredoseep.utils.player.MiningHelper.currentTargetBlocks) {
+                if (block.isIn(net.minecraft.tag.BlockTags.LEAVES)) {
+                    isLeafMiningTask = true;
+                    break;
+                }
+            }
+        }
+        if (isLeafMiningTask) {
+            return counts;
+        }
 
         for (int i = 0; i < player.inventory.main.size(); i++) {
             ItemStack stack = player.inventory.main.get(i);
