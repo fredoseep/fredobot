@@ -288,6 +288,41 @@ public class InventoryHelper {
 
         return counts;
     }
+    public static boolean selectBuildingBlock(PlayerEntity player, boolean isGravityAllowed) {
+        int bestSlot = -1;
+        int lowestCost = Integer.MAX_VALUE;
+
+        for (int i = 0; i < 36; i++) {
+            if (!player.inventory.main.get(i).isEmpty()) {
+                InventoryHelper.PlaceableBlock block = InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem());
+                if (block != null && !isGravityAllowed && block.isGravity()) continue;
+                if (block != null) {
+                    if (block.getCost() < lowestCost) {
+                        lowestCost = block.getCost();
+                        bestSlot = i;
+                    } else if (block.getCost() == lowestCost) {
+                        if (i < 9 && bestSlot >= 9) {
+                            bestSlot = i;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (bestSlot == -1) {
+            return false;
+        }
+
+        if (bestSlot < 9) {
+            player.inventory.selectedSlot = bestSlot;
+            return true;
+        }
+
+        MinecraftClient.getInstance().interactionManager.clickSlot(0, bestSlot, 5, net.minecraft.screen.slot.SlotActionType.SWAP, player);
+        player.inventory.selectedSlot = 5;
+        return true;
+    }
+
 
     private static void addStackToCounts(ItemStack stack, BlockCounts counts) {
         if (!stack.isEmpty()) {

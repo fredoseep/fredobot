@@ -303,7 +303,7 @@ public class MovementController implements IBotModule {
                         BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.MINE_BLOCK_ABOVE_HEAD, targetNode.extraPos);
                     }
 
-                    if (selectBuildingBlock(player, true)) {
+                    if (InventoryHelper.selectBuildingBlock(player, true)) {
                         if (player.fallDistance > 0.0F && !player.isOnGround() && !player.isClimbing() && !player.isTouchingWater()) {
                             pressUse = true;
                         }
@@ -317,7 +317,7 @@ public class MovementController implements IBotModule {
                 targetPitch = 78.9f;
                 RelevantDirectionHelper.RelevantDirection relevantDirection = RelevantDirectionHelper.getRelevantDirection(player, targetNode.pos);
 
-                if (selectBuildingBlock(player, false)) {
+                if (InventoryHelper.selectBuildingBlock(player, false)) {
                     if (targetNode.parent != null && targetNode.parent.parent != null &&
                             (!targetNode.pos.equals(lastTurningBlockPos)) &&
                             RelevantDirectionHelper.getDirectionBetween(targetNode.parent.parent.pos, targetNode.parent.pos) != RelevantDirectionHelper.getDirectionBetween(targetNode.parent.pos, targetNode.pos)) {
@@ -363,7 +363,7 @@ public class MovementController implements IBotModule {
                         if (blockToMine.getY() < playerPos.getY() && is1x1) {
                             BlockPos roofPos = playerPos.up(2);
                             if (client.world.getBlockState(roofPos).getMaterial().isLiquid()) {
-                                if (selectBuildingBlock(player, false)) {
+                                if (InventoryHelper.selectBuildingBlock(player, false)) {
                                     targetPitch = -90f;
                                     BlockPos wallPos = roofPos.north();
                                     Direction direction = Direction.SOUTH;
@@ -767,40 +767,6 @@ public class MovementController implements IBotModule {
         return current + delta;
     }
 
-    private static boolean selectBuildingBlock(PlayerEntity player, boolean isGravityAllowed) {
-        int bestSlot = -1;
-        int lowestCost = Integer.MAX_VALUE;
-
-        for (int i = 0; i < 36; i++) {
-            if (!player.inventory.main.get(i).isEmpty()) {
-                InventoryHelper.PlaceableBlock block = InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem());
-                if (block != null && !isGravityAllowed && block.isGravity()) continue;
-                if (block != null) {
-                    if (block.getCost() < lowestCost) {
-                        lowestCost = block.getCost();
-                        bestSlot = i;
-                    } else if (block.getCost() == lowestCost) {
-                        if (i < 9 && bestSlot >= 9) {
-                            bestSlot = i;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (bestSlot == -1) {
-            return false;
-        }
-
-        if (bestSlot < 9) {
-            player.inventory.selectedSlot = bestSlot;
-            return true;
-        }
-
-        MinecraftClient.getInstance().interactionManager.clickSlot(0, bestSlot, 5, net.minecraft.screen.slot.SlotActionType.SWAP, player);
-        player.inventory.selectedSlot = 5;
-        return true;
-    }
 
     public static boolean canPlace(MinecraftClient client, PlayerEntity player, BlockPos targetPos) {
         World world = client.world;

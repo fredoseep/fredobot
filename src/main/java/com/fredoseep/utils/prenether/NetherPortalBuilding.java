@@ -1,5 +1,6 @@
 package com.fredoseep.utils.prenether;
 
+import com.fredoseep.behave.MovementController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.utils.player.InventoryHelper;
@@ -32,6 +33,15 @@ public class NetherPortalBuilding {
     private static BlockHitResult topHitPosHitResult = null;
     private static BlockPos magmaSideMiddleFragmentPos = null;
     private static BlockPos alignedSideMiddleFragmentPos = null;
+    public static int lavaPlaceStep = 0;
+    private static Vec3d storedRealPos = null;
+    private static float storedRealYaw = 0f;
+    private static float storedRealPitch = 0f;
+
+    public static int lavaGrabStep = 0;
+    private static Vec3d grabStoredRealPos = null;
+    private static float grabStoredRealYaw = 0f;
+    private static float grabStoredRealPitch = 0f;
 
     public static void resetState() {
         currentTBOState = TwoByOneBuildState.IDLE;
@@ -40,6 +50,8 @@ public class NetherPortalBuilding {
         alignedSideMiddleFragmentPos = null;
         twoByOneAreaClearPos.clear();
         missingObiPosList.clear();
+        lavaPlaceStep = 0;
+        lavaGrabStep = 0;
     }
 
     private enum TwoByOneBuildState {
@@ -86,6 +98,7 @@ public class NetherPortalBuilding {
                 client.player.inventory.selectedSlot = 6;
                 BlockHitResult downBlockHitResult = new BlockHitResult(Vec3d.ofCenter(topHitPos.down()), Direction.UP, topHitPos.down(), false);
                 boolean downHitPosHittable = RelevantDirectionHelper.isValidHitResult(client.player, client.world, downBlockHitResult);
+                InventoryHelper.selectBuildingBlock(client.player, true);
                 if (downHitPosHittable) {
                     System.out.println("Fredodebug: top Block gap but Placeable trying to place the block: " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, downBlockHitResult));
                 } else {
@@ -226,94 +239,69 @@ public class NetherPortalBuilding {
 
         player.inventory.selectedSlot = 3;
 
-        Vec3d realPos = player.getPos();
-        float realYaw = player.yaw;
-        float realPitch = player.pitch;
+        if (lavaPlaceStep == 0) {
+            // 【Tick 1】：暂存真实坐标，并把客户端角色真正地瞬移过去
+            storedRealPos = player.getPos();
+            storedRealYaw = player.yaw;
+            storedRealPitch = player.pitch;
 
-        // 这里的 0.55 意味着眼睛距离方块表面只有 0.05 格
-        double eyeX = foundationPos.getX() + 0.5 + placeDirection.getOffsetX() * 0.55;
-        double eyeY = foundationPos.getY() + 0.5 + placeDirection.getOffsetY() * 0.55;
-        double eyeZ = foundationPos.getZ() + 0.5 + placeDirection.getOffsetZ() * 0.55;
+            double eyeX = foundationPos.getX() + 0.5 + placeDirection.getOffsetX() * 0.55;
+            double eyeY = foundationPos.getY() + 0.5 + placeDirection.getOffsetY() * 0.55;
+            double eyeZ = foundationPos.getZ() + 0.5 + placeDirection.getOffsetZ() * 0.55;
 
-        double ghostX = eyeX;
-        double ghostY = eyeY - player.getEyeHeight(player.getPose());
-        double ghostZ = eyeZ;
+            double ghostX = eyeX;
+            double ghostY = eyeY - player.getEyeHeight(player.getPose());
+            double ghostZ = eyeZ;
 
-        float ghostYaw = realYaw;
-        float ghostPitch = realPitch;
+            float ghostYaw = storedRealYaw;
+            float ghostPitch = storedRealPitch;
 
-        if (placeDirection == Direction.UP) {
-            ghostPitch = 90.0f;
-        } else if (placeDirection == Direction.DOWN) {
-            ghostPitch = -90.0f;
-        } else {
-            ghostPitch = 0.0f;
-            if (placeDirection == Direction.NORTH) ghostYaw = 0.0f;   // 面朝南看北面
-            if (placeDirection == Direction.SOUTH) ghostYaw = 180.0f; // 面朝北看南面
-            if (placeDirection == Direction.WEST) ghostYaw = -90.0f;  // 面朝东看西面
-            if (placeDirection == Direction.EAST) ghostYaw = 90.0f;   // 面朝西看东面
-        }
-
-        // ==========================================
-        // 【调试核心】：在发包前，模拟服务端的射线检测！
-        // ==========================================
-        Vec3d rayStart = new Vec3d(ghostX, ghostY + player.getEyeHeight(player.getPose()), ghostZ);
-
-        // 将 Yaw 和 Pitch 转换为视线向量 (Minecraft 原版算法)
-        float f = net.minecraft.util.math.MathHelper.cos(-ghostYaw * 0.017453292F - (float)Math.PI);
-        float g = net.minecraft.util.math.MathHelper.sin(-ghostYaw * 0.017453292F - (float)Math.PI);
-        float h = -net.minecraft.util.math.MathHelper.cos(-ghostPitch * 0.017453292F);
-        float i = net.minecraft.util.math.MathHelper.sin(-ghostPitch * 0.017453292F);
-        Vec3d rayDir = new Vec3d((double)(g * h), (double)i, (double)(f * h));
-        Vec3d rayEnd = rayStart.add(rayDir.x * 5.0, rayDir.y * 5.0, rayDir.z * 5.0);
-
-        net.minecraft.world.RayTraceContext context = new net.minecraft.world.RayTraceContext(
-                rayStart, rayEnd,
-                net.minecraft.world.RayTraceContext.ShapeType.OUTLINE,
-                net.minecraft.world.RayTraceContext.FluidHandling.NONE,
-                player
-        );
-        net.minecraft.util.hit.BlockHitResult hitResult = client.world.rayTrace(context);
-
-        System.out.println("====== [Lava Debug] ======");
-        System.out.println("欲放岩浆支撑面: " + foundationPos.toShortString() + " 侧: " + placeDirection);
-        System.out.println("幽灵坐标: " + String.format("%.2f, %.2f, %.2f", ghostX, ghostY, ghostZ));
-        System.out.println("幽灵视角: Yaw=" + ghostYaw + ", Pitch=" + ghostPitch);
-
-        // ==========================================
-        // 【新增】：生成游戏内可用的 TP 调试指令 (强制使用 US Locale 避免小数点变成逗号)
-        // ==========================================
-        String tpCommand = String.format(java.util.Locale.US, "/tp @s %.3f %.3f %.3f %.2f %.2f", ghostX, ghostY, ghostZ, ghostYaw, ghostPitch);
-        System.out.println("【硬核物理排错】复制此指令到游戏内执行: " + tpCommand);
-
-        if (hitResult.getType() == net.minecraft.util.hit.HitResult.Type.BLOCK) {
-            System.out.println("=> 射线预测命中: " + hitResult.getBlockPos().toShortString() + " 面: " + hitResult.getSide());
-            if (!hitResult.getBlockPos().equals(foundationPos)) {
-                System.out.println("🚨 致命警告：射线命中的根本不是我们要点的方块！");
+            if (placeDirection == Direction.UP) {
+                ghostPitch = 90.0f;
+            } else if (placeDirection == Direction.DOWN) {
+                ghostPitch = -90.0f;
+            } else {
+                ghostPitch = 0.0f;
+                if (placeDirection == Direction.NORTH) ghostYaw = 0.0f;
+                if (placeDirection == Direction.SOUTH) ghostYaw = 180.0f;
+                if (placeDirection == Direction.WEST) ghostYaw = -90.0f;
+                if (placeDirection == Direction.EAST) ghostYaw = 90.0f;
             }
-        } else {
-            System.out.println("🚨 致命警告：射线打空了 (MISS)！");
+
+            // 【核心精髓】：真实改变物理位置！这样客户端原生机制也会发送完美的坐标包
+            player.updatePosition(ghostX, ghostY, ghostZ);
+            player.yaw = ghostYaw;
+            player.pitch = ghostPitch;
+            client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+                    ghostX, ghostY, ghostZ, ghostYaw, ghostPitch, player.isOnGround()
+            ));
+
+            lavaPlaceStep = 1;
+            return false; // 返回 false 挂起当前任务，等下一 Tick
+
+        } else if (lavaPlaceStep == 1) {
+            // 【Tick 2】：经过了 1 个 Tick 的沉淀，服务器已完全认可幽灵位置，执行右键！
+            client.interactionManager.interactItem(player, client.world, net.minecraft.util.Hand.MAIN_HAND);
+            lavaPlaceStep = 2;
+            return false; // 再等 1 个 Tick 让岩浆流出来
+
+        } else if (lavaPlaceStep == 2) {
+            // 【Tick 3】：打扫战场，瞬间拉回真实位置！
+            if (storedRealPos != null) {
+                player.updatePosition(storedRealPos.x, storedRealPos.y, storedRealPos.z);
+                player.yaw = storedRealYaw;
+                player.pitch = storedRealPitch;
+
+                client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+                        storedRealPos.x, storedRealPos.y, storedRealPos.z,
+                        storedRealYaw, storedRealPitch, player.isOnGround()
+                ));
+            }
+            lavaPlaceStep = 0; // 重置状态机
+            System.out.println("FredoBot [时序修正版]: 倒岩浆成功执行 -> " + foundationPos.toShortString());
+            return true; // 终于返回 true，外层逻辑可以继续进行了！
         }
-        System.out.println("==========================");
-
-        // 1. 发送瞬移包
-        client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
-                ghostX, ghostY, ghostZ,
-                ghostYaw, ghostPitch,
-                player.isOnGround()
-        ));
-
-        // 2. 发送使用物品包
-        client.interactionManager.interactItem(player, client.world, net.minecraft.util.Hand.MAIN_HAND);
-
-        // 3. 瞬间拉回
-        client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
-                realPos.x, realPos.y, realPos.z,
-                realYaw, realPitch,
-                player.isOnGround()
-        ));
-
-        return true;
+        return false;
     }
 
     private static List<BlockPos> findLeakingPos() {
@@ -438,30 +426,49 @@ public class NetherPortalBuilding {
     }
 
     public static boolean grabLava(MinecraftClient client, PlayerEntity player, BlockPos lavaPos) {
-        if (client == null || player == null || lavaPos == null) return false;
-        if (client.getNetworkHandler() == null) return false;
+        if (client == null || player == null || lavaPos == null || client.getNetworkHandler() == null) return false;
+
         player.inventory.selectedSlot = 3;
-        Vec3d realPos = player.getPos();
-        float realYaw = player.yaw;
-        float realPitch = player.pitch;
-        double ghostX = lavaPos.getX() + 0.5;
-        double ghostY = lavaPos.getY() + 0.5 - player.getEyeHeight(player.getPose());
-        double ghostZ = lavaPos.getZ() + 0.5;
 
-        client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.Both(
-                ghostX, ghostY, ghostZ,
-                realYaw, 90.0f,
-                player.isOnGround()
-        ));
-        client.interactionManager.interactItem(player, client.world, Hand.MAIN_HAND);
-        client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.Both(
-                realPos.x, realPos.y, realPos.z,
-                realYaw, realPitch,
-                player.isOnGround()
-        ));
+        if (lavaGrabStep == 0) {
+            grabStoredRealPos = player.getPos();
+            grabStoredRealYaw = player.yaw;
+            grabStoredRealPitch = player.pitch;
 
-        System.out.println("FredoBot 取水/岩浆执行完毕！目标坐标 -> " + lavaPos.toShortString());
-        return true;
+            double ghostX = lavaPos.getX() + 0.5;
+            double ghostY = lavaPos.getY() + 0.5 - player.getEyeHeight(player.getPose());
+            double ghostZ = lavaPos.getZ() + 0.5;
+
+            player.updatePosition(ghostX, ghostY, ghostZ);
+            player.yaw = grabStoredRealYaw;
+            player.pitch = 90.0f;
+            client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+                    ghostX, ghostY, ghostZ, grabStoredRealYaw, 90.0f, player.isOnGround()
+            ));
+
+            lavaGrabStep = 1;
+            return false;
+
+        } else if (lavaGrabStep == 1) {
+            client.interactionManager.interactItem(player, client.world, net.minecraft.util.Hand.MAIN_HAND);
+            lavaGrabStep = 2;
+            return false;
+
+        } else if (lavaGrabStep == 2) {
+            if (grabStoredRealPos != null) {
+                player.updatePosition(grabStoredRealPos.x, grabStoredRealPos.y, grabStoredRealPos.z);
+                player.yaw = grabStoredRealYaw;
+                player.pitch = grabStoredRealPitch;
+                client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+                        grabStoredRealPos.x, grabStoredRealPos.y, grabStoredRealPos.z,
+                        grabStoredRealYaw, grabStoredRealPitch, player.isOnGround()
+                ));
+            }
+            lavaGrabStep = 0;
+            System.out.println("FredoBot [时序修正版]: 盛起液体成功执行 -> " + lavaPos.toShortString());
+            return true;
+        }
+        return false;
     }
 
 }

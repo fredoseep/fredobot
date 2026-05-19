@@ -33,6 +33,7 @@ import net.minecraft.world.World;
 import net.minecraft.world.biome.Biome;
 import net.minecraft.world.biome.Biomes;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -775,6 +776,7 @@ public class BtStuff {
                         break;
 
                     case PLACE_TABLE:
+                        if(pathExecutor.isBusy())return;
                         if (itemsToCraft.isEmpty()&&InventoryHelper.findItemSlot(player,Items.CRAFTING_TABLE)==-1) {
                             btCraftPhase = BtCraftPhase.BREAK_TABLE;
                             break;
@@ -807,6 +809,9 @@ public class BtStuff {
                         // 放置工作台
                         BlockHitResult placeHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos.down(), false);
                         if(minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit) != ActionResult.SUCCESS){
+                            System.out.println("Fredodebug: fail to place the crafting table, trying to move");
+                            List<SimplePathfinder.Node> customeNodeList = calcCraftingTableUnblockMove(player);
+                            pathExecutor.executeCustomPath(customeNodeList);
                             return;
                         }
 
@@ -1123,5 +1128,12 @@ public class BtStuff {
                 }
                 break;
         }
+    }
+
+    private static List<SimplePathfinder.Node> calcCraftingTableUnblockMove(ClientPlayerEntity player) {
+        List<SimplePathfinder.Node> result = new ArrayList<>();
+        BlockPos pos = new BlockPos(Math.floor(player.getX()),player.getY(),Math.floor(player.getZ()));
+        result.add(new SimplePathfinder.Node(pos, null, null, 0, 0, SimplePathfinder.MovementState.WALKING, 0));
+        return result;
     }
 }
