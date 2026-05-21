@@ -9,6 +9,7 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RayTraceContext;
@@ -95,6 +96,210 @@ public class MiningHelper {
             double distanceXZ = Math.sqrt(dx * dx + dz * dz);
             bestYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
             bestPitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
+            System.out.println("Fredodebug: Cannot find a valid angle for " + targetPos.toShortString());
+        }
+
+        return new float[]{bestYaw, bestPitch};
+    }
+
+    /**
+     * 计算可行的交互视角（严格限定只能看目标方块的指定面）
+     *
+     * @param player     玩家实体
+     * @param targetPos  目标方块坐标
+     * @param targetFace 必须击中的方块面 (如 Direction.UP, Direction.NORTH)
+     * @return float[] {yaw, pitch}
+     */
+    public static float[] getValidMiningAngleForFace(PlayerEntity player, BlockPos targetPos, Direction targetFace) {
+        World world = player.getEntityWorld();
+        Vec3d eyePos = player.getCameraPosVec(1.0F);
+
+        List<Vec3d> testPoints = new ArrayList<>();
+
+        // =================================================================
+        // 【精度升级】：从 3x3 升级为 5x5，边缘推进到 0.02 和 0.98 (极限擦边)
+        // 涵盖：极靠边(0.02)、次靠边(0.25)、正中心(0.50)、次靠边(0.75)、极靠边(0.98)
+        // 这样即使只有方块边缘漏出一条极其微小的缝隙，雷达也能瞬间捕捉到！
+        // =================================================================
+        double[] offsets = {0.02D, 0.25D, 0.5D, 0.75D, 0.98D};
+
+        // 1. 精准铺设高精度网格：在指定的 targetFace 面上生成 25 个测试点
+        for (double a : offsets) {
+            for (double b : offsets) {
+                double x = targetPos.getX();
+                double y = targetPos.getY();
+                double z = targetPos.getZ();
+
+                switch (targetFace) {
+                    case UP:
+                        x += a;
+                        y += 1.0D;
+                        z += b;
+                        break; // 顶面 (y=1)
+                    case DOWN:
+                        x += a;
+                        y += 0.0D;
+                        z += b;
+                        break; // 底面 (y=0)
+                    case NORTH:
+                        x += a;
+                        y += b;
+                        z += 0.0D;
+                        break; // 北面 (z=0)
+                    case SOUTH:
+                        x += a;
+                        y += b;
+                        z += 1.0D;
+                        break; // 南面 (z=1)
+                    case WEST:
+                        x += 0.0D;
+                        y += a;
+                        z += b;
+                        break; // 西面 (x=0)
+                    case EAST:
+                        x += 1.0D;
+                        y += a;
+                        z += b;
+                        break; // 东面 (x=1)
+                }
+                testPoints.add(new Vec3d(x, y, z));
+            }
+        }
+
+        float bestYaw = player.yaw;
+        float bestPitch = player.pitch;
+        double minScore = Double.MAX_VALUE;
+        boolean foundVisiblePoint = false;
+
+        // 2. 发射射线进行严格考核 (一轮发射 25 根射线，Minecraft 的引擎完全可以无压力瞬间处理)
+        for (Vec3d point : testPoints) {
+            RayTraceContext context = new RayTraceContext(
+                    eyePos, point,
+                    RayTraceContext.ShapeType.COLLIDER,
+                    RayTraceContext.FluidHandling.NONE,
+                    player
+            );
+            BlockHitResult hitResult = world.rayTrace(context);
+
+            // =================================================================
+            // 遵照你的要求，原封不动保留你的坐标判定逻辑
+            // =================================================================
+            if (hitResult.getBlockPos().equals(targetPos.offset(targetFace))) {
+
+                double dx = point.x - eyePos.x;
+                double dy = point.y - eyePos.y;
+                double dz = point.z - eyePos.z;
+                double distanceXZ = Math.sqrt(dx * dx + dz * dz);
+
+                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                float pitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
+
+                float deltaYaw = MathHelper.wrapDegrees(yaw - player.yaw);
+                float deltaPitch = pitch - player.pitch;
+                double score = (deltaYaw * deltaYaw) + (deltaPitch * deltaPitch);
+
+                // 同样采用最平滑视角拟合算法
+                if (score < minScore) {
+                    minScore = score;
+                    bestYaw = yaw;
+                    bestPitch = pitch;
+                    foundVisiblePoint = true;
+                }
+            }
+        }
+
+        // 3. 兜底逻辑进化：如果不幸被挡住，回退视线不是方块中心，而是【该面的中心】！
+        if (!foundVisiblePoint) {
+            // 通过偏移量，精确定位到目标面的绝对中心点
+            double fallbackX = targetPos.getX() + 0.5D + targetFace.getOffsetX() * 0.5D;
+            double fallbackY = targetPos.getY() + 0.5D + targetFace.getOffsetY() * 0.5D;
+            double fallbackZ = targetPos.getZ() + 0.5D + targetFace.getOffsetZ() * 0.5D;
+
+            double dx = fallbackX - eyePos.x;
+            double dy = fallbackY - eyePos.y;
+            double dz = fallbackZ - eyePos.z;
+            double distanceXZ = Math.sqrt(dx * dx + dz * dz);
+
+            bestYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            bestPitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
+            System.out.println("Fredodebug: cannot find a valid angle to " + targetPos.toShortString() + " on face " + targetFace.toString());
+        } else
+            System.out.println("Fredodebug: successfully find a valid angle to " + targetPos.toShortString() + " on face " + targetFace.toString());
+
+        return new float[]{bestYaw, bestPitch};
+    }
+
+    public static float[] getValidFluidAngle(PlayerEntity player, BlockPos targetPos) {
+        World world = player.getEntityWorld();
+        Vec3d eyePos = player.getCameraPosVec(1.0F);
+
+        List<Vec3d> testPoints = new ArrayList<>();
+        double[] offsets = {0.1D, 0.5D, 0.9D};
+
+        for (double x : offsets) {
+            for (double z : offsets) {
+                testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + 1.0D, targetPos.getZ() + z));
+                testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + 0.0D, targetPos.getZ() + z));
+            }
+        }
+        for (double x : offsets) {
+            for (double y : offsets) {
+                testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + y, targetPos.getZ() + 0.0D));
+                testPoints.add(new Vec3d(targetPos.getX() + x, targetPos.getY() + y, targetPos.getZ() + 1.0D));
+            }
+        }
+        for (double y : offsets) {
+            for (double z : offsets) {
+                testPoints.add(new Vec3d(targetPos.getX() + 0.0D, targetPos.getY() + y, targetPos.getZ() + z));
+                testPoints.add(new Vec3d(targetPos.getX() + 1.0D, targetPos.getY() + y, targetPos.getZ() + z));
+            }
+        }
+
+        float bestYaw = player.yaw;
+        float bestPitch = player.pitch;
+        double minScore = Double.MAX_VALUE;
+        boolean foundVisiblePoint = false;
+
+        for (Vec3d point : testPoints) {
+            RayTraceContext context = new RayTraceContext(
+                    eyePos, point,
+                    RayTraceContext.ShapeType.COLLIDER,
+                    // 【核心改动】：允许射线击中流体源方块 (如岩浆源头/水源头)
+                    RayTraceContext.FluidHandling.SOURCE_ONLY,
+                    player
+            );
+            BlockHitResult hitResult = world.rayTrace(context);
+
+            if (hitResult != null && hitResult.getType() == HitResult.Type.BLOCK && hitResult.getBlockPos().equals(targetPos)) {
+                double dx = point.x - eyePos.x;
+                double dy = point.y - eyePos.y;
+                double dz = point.z - eyePos.z;
+                double distanceXZ = Math.sqrt(dx * dx + dz * dz);
+
+                float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                float pitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
+
+                float deltaYaw = MathHelper.wrapDegrees(yaw - player.yaw);
+                float deltaPitch = pitch - player.pitch;
+                double score = (deltaYaw * deltaYaw) + (deltaPitch * deltaPitch);
+
+                if (score < minScore) {
+                    minScore = score;
+                    bestYaw = yaw;
+                    bestPitch = pitch;
+                    foundVisiblePoint = true;
+                }
+            }
+        }
+
+        if (!foundVisiblePoint) {
+            double dx = (targetPos.getX() + 0.5D) - eyePos.x;
+            double dy = (targetPos.getY() + 0.5D) - eyePos.y;
+            double dz = (targetPos.getZ() + 0.5D) - eyePos.z;
+            double distanceXZ = Math.sqrt(dx * dx + dz * dz);
+            bestYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            bestPitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
+            System.out.println("Fredodebug: Cannot find a valid angle for " + targetPos.toShortString());
         }
 
         return new float[]{bestYaw, bestPitch};

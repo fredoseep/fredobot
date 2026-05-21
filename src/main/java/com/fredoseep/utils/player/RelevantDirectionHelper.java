@@ -32,6 +32,15 @@ public class RelevantDirectionHelper {
             return adjustPostureForSpeedbridgingYaw;
         }
     }
+    public static float getYawFromDirection(Direction direction) {
+        return switch (direction) {
+            case SOUTH -> 0.0f;
+            case WEST -> 90.0f;
+            case NORTH -> 180.0f;
+            case EAST -> -90.0f;
+            default -> 0.0f;
+        };
+    }
 
     public static RelevantDirection getRelevantDirection(PlayerEntity player, BlockPos pos) {
         if (Math.abs(player.getX() - pos.getX() - 0.5) >= Math.abs(player.getZ() - pos.getZ() - 0.5)) {
@@ -58,12 +67,15 @@ public class RelevantDirectionHelper {
         return Direction.getFacing(dx, dy, dz);
     }
 
-    public static Direction[] getIrrelevantDirections(BlockPos from, BlockPos to){
-        Direction relevantDirection = getDirectionBetween(from,to);
-        if(relevantDirection == Direction.EAST || relevantDirection == Direction.WEST){
-            return new Direction[]{Direction.SOUTH,Direction.NORTH};
-        }
-        else return new Direction[]{Direction.EAST,Direction.WEST};
+    public static Direction getRightDirection(Direction direction) {
+        return Direction.fromHorizontal((direction.getHorizontal() + 1) == 4 ? 0 : direction.getHorizontal() + 1);
+    }
+
+    public static Direction[] getIrrelevantDirections(BlockPos from, BlockPos to) {
+        Direction relevantDirection = getDirectionBetween(from, to);
+        if (relevantDirection == Direction.EAST || relevantDirection == Direction.WEST) {
+            return new Direction[]{Direction.SOUTH, Direction.NORTH};
+        } else return new Direction[]{Direction.EAST, Direction.WEST};
     }
 
     public static float get3DPlayerBlockDistance(PlayerEntity player, BlockPos pos) {
@@ -74,8 +86,10 @@ public class RelevantDirectionHelper {
         float zDis = (float) (player.getZ() - pos.getZ() - 0.5);
         return (float) Math.sqrt(xDis * xDis + yDis * yDis + zDis * zDis);
     }
+
     /**
      * 智能防碰撞放门逻辑封装
+     *
      * @return boolean true表示放置成功，false表示视角尚未转正，需要等待下一个Tick
      */
     public static boolean placeDoorSmartly(MinecraftClient client, PlayerEntity player, BlockPos doorPlacePos, int doorInventorySlot) {

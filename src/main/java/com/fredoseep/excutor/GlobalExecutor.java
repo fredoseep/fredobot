@@ -1,5 +1,6 @@
 package com.fredoseep.excutor;
 
+import com.fredoseep.Test;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
@@ -80,6 +81,7 @@ public class GlobalExecutor implements IBotModule {
 
     @Override
     public void onTick(MinecraftClient client, PlayerEntity player) {
+        if(Test.currentMission!= Test.CurrentTestingMission.IDLE)return;
         if (minecraftClient.world == null || minecraftClient.player == null) {
             BtStuff.waitTicks = 0;
             return;

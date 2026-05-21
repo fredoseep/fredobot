@@ -64,8 +64,24 @@ public class Fredobot implements ModInitializer {
 			}));
 		});
 		CommandRegistrationCallback.EVENT.register((commandDispatcher, b) -> {
-			commandDispatcher.register((CommandManager.literal("test")).executes(commandContext -> {
-				Test.testBlockPlace();
+			commandDispatcher.register((CommandManager.literal("blockplacing")).executes(commandContext -> {
+				Test.reset();
+				Test.currentMission = Test.CurrentTestingMission.BLOCK_PLACING;
+				return 1;
+			}));
+		});
+		CommandRegistrationCallback.EVENT.register((commandDispatcher,b)->{
+			commandDispatcher.register((CommandManager.literal("twobyone")).executes(commandContext ->{
+				Test.reset();
+				Test.currentMission = Test.CurrentTestingMission.PORTAL_BUILDING;
+				BotEngine.getInstance().start();
+				return 1;
+			}));
+		});
+		CommandRegistrationCallback.EVENT.register((commandDispatcher,b)->{
+			commandDispatcher.register((CommandManager.literal("test")).executes(commandContext ->{
+				BotEngine.getInstance().stop();
+				Test.reset();
 				return 1;
 			}));
 		});

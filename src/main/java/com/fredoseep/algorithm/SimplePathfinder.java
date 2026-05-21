@@ -350,7 +350,11 @@ public class SimplePathfinder {
             }
 
             if (isSolid(world, adjacent) && isPassable(world, adjacentUp) && isPassable(world, adjacent.up(2)) && isPassable(world, current.pos.up(2))) {
-                neighbors.add(new Node(adjacentUp, null, current, current.costFromStart + 1.5, calculateHeuristic(adjacentUp, end), MovementState.JUMPING_UP, current.blocksUsed));
+                if (isStandingOnWater && !isCurrentWater) {
+                    // 拦截高岸跳跃，强迫 A* 去计算挖掘 (MINING) 岸边的泥土
+                } else {
+                    neighbors.add(new Node(adjacentUp, null, current, current.costFromStart + 1.5, calculateHeuristic(adjacentUp, end), MovementState.JUMPING_UP, current.blocksUsed));
+                }
             }
 
             if (isSolid(world, adjacentDown) || isCurrentWater) {

@@ -10,10 +10,13 @@ import com.fredoseep.utils.player.ToolsHelper;
 import net.minecraft.block.AbstractBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.options.KeyBinding;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.BucketItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.util.Hand;
@@ -23,6 +26,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import org.lwjgl.system.CallbackI;
 
+import java.time.chrono.MinguoEra;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -37,11 +41,16 @@ public class NetherPortalBuilding {
     private static Vec3d storedRealPos = null;
     private static float storedRealYaw = 0f;
     private static float storedRealPitch = 0f;
+    private static BlockPos activePlacePos = null;          // 【新增】
+    private static Direction activePlaceDirection = null;
+    private static boolean initGestureAdjusted = false;
+    private static boolean againstTheDoor = false;
 
     public static int lavaGrabStep = 0;
     private static Vec3d grabStoredRealPos = null;
     private static float grabStoredRealYaw = 0f;
     private static float grabStoredRealPitch = 0f;
+    private static BlockPos activeGrabPos = null;           // 【新增】
 
     public static void resetState() {
         currentTBOState = TwoByOneBuildState.IDLE;
@@ -52,24 +61,57 @@ public class NetherPortalBuilding {
         missingObiPosList.clear();
         lavaPlaceStep = 0;
         lavaGrabStep = 0;
+        activePlacePos = null;
+        activePlaceDirection = null;
+        activeGrabPos = null;
+        initGestureAdjusted = false;
+        againstTheDoor = false;
+        KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyLeft.getDefaultKey(), false);
+        KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyForward.getDefaultKey(), false);
+
     }
 
-    private enum TwoByOneBuildState {
-        IDLE, CLEARING_AREA, SETTING_UP_HIT_POINT, BUILDING, SEALING_SPACE,WATER_MOVING,CLEARING_SPACE,FORCING_LIGHTER;
+    public enum TwoByOneBuildState {
+        IDLE, CLEARING_AREA, SETTING_UP_HIT_POINT, SETTING_UP_DOOR, ADJUSTING_STANDING_POINT, BREAKING_FIRST_MAGMA_BLOCK, QUADRUPLE_GRAB, SEALING_SPACE, FIRST_WATER_MOVE, SECOND_WATER_MOVE,PENDING, THIRD_WATER_MOVE, FOURTH_WATER_MOVE, CLEARING_SPACE, FORCING_LIGHTER, NEXT;
     }
 
-    private static TwoByOneBuildState currentTBOState = TwoByOneBuildState.IDLE;
+    public static TwoByOneBuildState currentTBOState = TwoByOneBuildState.IDLE;
 
     public static void twoByOneBuild() {
         MinecraftClient client = MinecraftClient.getInstance();
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
-        KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), true);
+        boolean sneak = client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK;
+        if (client.player.isSwimming()) {
+            MovementController.setLookDirection(client.player, client.player.yaw, -90);
+            initGestureAdjusted = false;
+            sneak = false;
+        }
+        if (!initGestureAdjusted) {
+            KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), sneak);
+            initGestureAdjusted = true;
+            return;
+        }
+        if (client.player.pitch == -90) client.player.pitch = 2;
+        KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), sneak);
+
+
+        if (lavaGrabStep > 0) {
+            grabLava(client, client.player, null);
+            return;
+        }
+        if (lavaPlaceStep > 0) {
+            placeLava(client, client.player, null, null);
+            return;
+        }
+
         switch (currentTBOState) {
             case IDLE:
                 if (PreNether.alignedMagmaPos == null) {
                     globalExecutor.resetWorld();
                     System.out.println("Fredodebug: reset because alignedMagmaPos is null somehow");
                 } else System.out.println("Fredodebug: alignedMagmaPos : " + PreNether.alignedMagmaPos.toShortString());
+                magmaSideMiddleFragmentPos = PreNether.magmaPos.offset(PreNether.fromMagmaToAligned.getOpposite());
+                alignedSideMiddleFragmentPos = PreNether.alignedMagmaPos.offset(PreNether.fromMagmaToAligned);
                 currentTBOState = TwoByOneBuildState.CLEARING_AREA;
                 break;
             case CLEARING_AREA:
@@ -78,21 +120,21 @@ public class NetherPortalBuilding {
                         System.out.println("Fredodebug: twoByOneAreaClearPos is empty ");
                         return;
                     }
-                    System.out.println("Fredodebug: twoByOneAreaClearPos: "+ twoByOneAreaClearPos.toString());
+                    System.out.println("Fredodebug: twoByOneAreaClearPos: " + twoByOneAreaClearPos.toString());
                     BlockPos currentPos = twoByOneAreaClearPos.getFirst();
                     ToolsHelper.equipBestTool(client.player, currentPos, false);
-                    System.out.println("Fredodubug: clearing area Pos: "+ currentPos.toShortString()+" state: "+ client.interactionManager.updateBlockBreakingProgress(currentPos, Direction.UP));
+                    System.out.println("Fredodubug: clearing area Pos: " + currentPos.toShortString() + " state: " + client.interactionManager.updateBlockBreakingProgress(currentPos, Direction.UP));
                     return;
                 }
                 currentTBOState = TwoByOneBuildState.SETTING_UP_HIT_POINT;
                 break;
             case SETTING_UP_HIT_POINT:
-                Direction topHitPosRelevantDirection = RelevantDirectionHelper.getIrrelevantDirections(PreNether.magmaPos, PreNether.alignedMagmaPos)[0];
-                BlockPos topHitPos = PreNether.alignedMagmaPos.up().up().offset(topHitPosRelevantDirection);
+                Direction topHitPosRelevantDirection = RelevantDirectionHelper.getRightDirection(RelevantDirectionHelper.getDirectionBetween(PreNether.magmaPos, PreNether.alignedMagmaPos));
+                BlockPos topHitPos = PreNether.magmaPos.up().up().offset(topHitPosRelevantDirection);
                 topHitPosHitResult = new BlockHitResult(Vec3d.ofCenter(topHitPos), topHitPosRelevantDirection.getOpposite(), topHitPos, false);
                 boolean topHitPosHittable = RelevantDirectionHelper.isValidHitResult(client.player, client.world, topHitPosHitResult);
                 if (topHitPosHittable) {
-                    currentTBOState = TwoByOneBuildState.BUILDING;
+                    currentTBOState = TwoByOneBuildState.SETTING_UP_DOOR;
                     return;
                 }
                 client.player.inventory.selectedSlot = 6;
@@ -101,153 +143,292 @@ public class NetherPortalBuilding {
                 InventoryHelper.selectBuildingBlock(client.player, true);
                 if (downHitPosHittable) {
                     System.out.println("Fredodebug: top Block gap but Placeable trying to place the block: " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, downBlockHitResult));
+                    currentTBOState = TwoByOneBuildState.SETTING_UP_DOOR;
+                    return;
                 } else {
-                    System.out.println("Fredodebug: downHitPosInvalid, trying to place the block pos: "+topHitPos.down(1).toShortString()+" state: " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(topHitPos.down(2)), Direction.UP, topHitPos.down(2), false)));
+                    System.out.println("Fredodebug: downHitPosInvalid, trying to place the block pos: " + topHitPos.down(1).toShortString() + " state: " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(topHitPos.down(2)), Direction.UP, topHitPos.down(2), false)));
                 }
-                return;
+                break;
+            case SETTING_UP_DOOR:
 
-            case BUILDING:
-                InventoryHelper.moveItemToHotbar(client, client.player, BucketItem.class, 3);
-                BlockPos missingObiPos = getMissingObiPos();
-                if (missingObiPos == null) {
-                    System.out.println("Fredodebug: no obi place is missing . Clearing Space");
-                    currentTBOState = TwoByOneBuildState.CLEARING_SPACE;
-                    return;
-                }
-                BlockPos lavaSourcePos = findLavaSource();
-                if (lavaSourcePos == null) {
-                    globalExecutor.resetWorld();
-                    System.out.println("Fredodebug: reset because lava is not enough");
-                    return;
-                }
-                if (client.player.inventory.getStack(3).getItem() == Items.BUCKET) {
-                    System.out.println("Fredobotdebug: lava grab isSuccess: " + grabLava(client, client.player, lavaSourcePos));
-                    return;
-                }
-                System.out.println("Fredodebug: currentMissingPos: "+ missingObiPos.toShortString());
-                System.out.println("FREdodebug: magmaSideMiddleFragmentPos: "+magmaSideMiddleFragmentPos.toShortString()+" magmaPos: "+ PreNether.magmaPos.toShortString()+" alignedPos: "+ PreNether.alignedMagmaPos.toShortString()+" alignedMiddleMagmaPos: "+ alignedSideMiddleFragmentPos.toShortString());
-                if (missingObiPos.equals(magmaSideMiddleFragmentPos.up())) {
-                    System.out.println("Fredobotdebug: 倒岩浆1 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, magmaSideMiddleFragmentPos, Direction.UP));
-                } else if (missingObiPos.equals(PreNether.alignedMagmaPos.up(2))) {
-                    // 这个是用到了之前的 topHitPosHitResult 的方向
-                    System.out.println("Fredobotdebug: 倒岩浆2 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, topHitPosHitResult.getBlockPos(), topHitPosHitResult.getSide()));
-                }
-                else if (missingObiPos.equals(PreNether.magmaPos.up(2))) {
-                    Direction dir = RelevantDirectionHelper.getDirectionBetween(PreNether.alignedMagmaPos, PreNether.magmaPos);
-                    System.out.println("Fredobotdebug: 倒岩浆3 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, PreNether.alignedMagmaPos.up(2), dir));
-                }
-                else if (missingObiPos.equals(alignedSideMiddleFragmentPos.up())) {
-                    System.out.println("Fredobotdebug: 倒岩浆4 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, alignedSideMiddleFragmentPos, Direction.UP));
-                }
-                else if (missingObiPos.equals(magmaSideMiddleFragmentPos.down())) {
-                    System.out.println("Fredobotdebug: 倒岩浆5 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, magmaSideMiddleFragmentPos, Direction.DOWN));
-                }
-                else if (missingObiPos.equals(alignedSideMiddleFragmentPos.down())) {
-                    System.out.println("Fredobotdebug: 倒岩浆6 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, alignedSideMiddleFragmentPos, Direction.DOWN));
-                }
-                else if (missingObiPos.equals(PreNether.magmaPos.down(2))) {
-                    System.out.println("Fredobotdebug: 倒岩浆7 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, PreNether.magmaPos.down(3), Direction.UP));
-                }
-                else if (missingObiPos.equals(PreNether.alignedMagmaPos.down(2))) {
-                    System.out.println("Fredobotdebug: 倒岩浆8 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, PreNether.alignedMagmaPos.down(3), Direction.UP));
-                }
-                // 下面这两个包含挖掘动作的逻辑保留不变，倒岩浆的部分替换
-                else if (missingObiPos.equals(alignedSideMiddleFragmentPos)) {
-                    if (client.world.getBlockState(alignedSideMiddleFragmentPos).getBlock() == Blocks.MAGMA_BLOCK) {
-                        client.player.inventory.selectedSlot = 1;
-                        client.interactionManager.updateBlockBreakingProgress(alignedSideMiddleFragmentPos, Direction.UP);
-                    } else {
-                        System.out.println("Fredobotdebug: 倒岩浆 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, alignedSideMiddleFragmentPos.up(), Direction.DOWN));
+                if (!(client.world.getBlockState(PreNether.magmaPos.up()).getBlock() instanceof DoorBlock)) {
+                    if (!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock && client.player.inventory.getStack(8).getCount() >= 2)) {
+                        System.out.println("Fredodebug: slot 8 is : " + client.player.inventory.getStack(8).getItem().toString());
+                        System.out.println("Fredodebug: reset because the doors are not enough");
+                        globalExecutor.resetWorld();
+                        return;
                     }
+                    tryPlaceDoor(client.player, PreNether.magmaPos, PreNether.fromMagmaToAligned.getOpposite(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned.getOpposite()));
+                    return;
                 }
-                else if (missingObiPos.equals(magmaSideMiddleFragmentPos)) {
-                    if (client.world.getBlockState(magmaSideMiddleFragmentPos).getBlock() == Blocks.MAGMA_BLOCK) {
-                        client.player.inventory.selectedSlot = 1;
-                        client.interactionManager.updateBlockBreakingProgress(magmaSideMiddleFragmentPos, Direction.UP);
-                    } else {
-                        System.out.println("Fredobotdebug: 倒岩浆 -> " + missingObiPos.toShortString() + " 结果: " + placeLava(client, client.player, magmaSideMiddleFragmentPos.up(), Direction.DOWN));
+                BlockPos secondDoorBasePos = PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite());
+                if (!(client.world.getBlockState(secondDoorBasePos.up()).getBlock() instanceof DoorBlock)) {
+                    if (!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock && client.player.inventory.getStack(8).getCount() >= 1)) {
+                        System.out.println("Fredodebug: slot 8 is : " + client.player.inventory.getStack(8).getItem().toString());
+                        System.out.println("Fredodebug: reset because the doors are not enough");
+                        globalExecutor.resetWorld();
+                        return;
                     }
+                    tryPlaceDoor(client.player, secondDoorBasePos, PreNether.fromMagmaToAligned.getOpposite(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned.getOpposite()));
+                    return;
+                }
+                System.out.println("Fredodebug: two doors are all set");
+                currentTBOState = TwoByOneBuildState.ADJUSTING_STANDING_POINT;
+                break;
+            case ADJUSTING_STANDING_POINT:
+                KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(), !againstTheDoor);
+                System.out.println("Fredodebug: player speed: " + client.player.getVelocity().getComponentAlongAxis(PreNether.fromMagmaToAligned.getAxis()));
+                if (Math.abs(client.player.getVelocity().getComponentAlongAxis(PreNether.fromMagmaToAligned.getAxis())) < 0.001f && !againstTheDoor) {
+                    againstTheDoor = true;
+                    return;
+                }
+                if (client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK)
+                    KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(), true);
+                else {
+                    KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(), false);
+                    currentTBOState = TwoByOneBuildState.BREAKING_FIRST_MAGMA_BLOCK;
                 }
                 break;
-            case SEALING_SPACE:
-                List<BlockPos> leakingPos = findLeakingPos();
-                if(leakingPos.isEmpty()){
-                    currentTBOState = TwoByOneBuildState.WATER_MOVING;
+            case BREAKING_FIRST_MAGMA_BLOCK:
+                client.player.inventory.selectedSlot = 1;
+                if (client.world.getBlockState(PreNether.magmaPos).getBlock() == Blocks.MAGMA_BLOCK) {
+                    client.interactionManager.updateBlockBreakingProgress(PreNether.magmaPos, Direction.UP);
                     return;
                 }
-                client.player.inventory.selectedSlot = 6;
-                for(BlockPos targetPos: leakingPos){
-                    BlockHitResult hitResult = new BlockHitResult(Vec3d.ofCenter(targetPos.down()),Direction.UP,targetPos.down(),false);
-                    System.out.println("Fredobotdebug: leaking pos: " + targetPos.toShortString() + " state: " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, hitResult));
-                }
+                currentTBOState = TwoByOneBuildState.QUADRUPLE_GRAB;
                 break;
-            case WATER_MOVING:
-                if(client.world.getBlockState(PreNether.alignedMagmaPos).getBlock()==Blocks.MAGMA_BLOCK){
-                    client.player.inventory.selectedSlot = 1;
-                    client.interactionManager.updateBlockBreakingProgress(alignedSideMiddleFragmentPos,Direction.UP);
+            case QUADRUPLE_GRAB:
+                if (client.world.getBlockState(PreNether.magmaPos.down()).getBlock() == Blocks.COBBLESTONE)
+                    System.out.println("Fredodebug: turned into cobble stone");
+                client.player.inventory.selectedSlot = 3;
+                if (client.world.getBlockState(PreNether.magmaPos.down()).getBlock() == Blocks.LAVA && client.world.getFluidState(PreNether.magmaPos.down()).isStill()) {
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.magmaPos.down());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: first lava grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                if (client.player.inventory.getStack(3).getItem() == Items.LAVA_BUCKET && client.world.getBlockState(magmaSideMiddleFragmentPos.up()).getBlock() != Blocks.OBSIDIAN && client.world.getBlockState(magmaSideMiddleFragmentPos.up()).getBlock() != Blocks.LAVA) {
+                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, magmaSideMiddleFragmentPos, Direction.UP);
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: first lava place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                if (client.world.getBlockState(PreNether.magmaPos.down().offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned))).getBlock() == Blocks.LAVA && client.world.getFluidState(PreNether.magmaPos.down().offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned))).isStill()) {
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.magmaPos.down().offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)));
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: second lava grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                if (client.player.inventory.getStack(3).getItem() == Items.LAVA_BUCKET && client.world.getBlockState(PreNether.magmaPos.up(2)).getBlock() != Blocks.OBSIDIAN && client.world.getBlockState(PreNether.magmaPos.up(2)).getBlock() != Blocks.LAVA) {
+                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, topHitPosHitResult.getBlockPos(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: second lava place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+
+                //==================================================================
+
+                client.player.inventory.selectedSlot = 3;
+                if (client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock() == Blocks.LAVA && client.world.getFluidState(PreNether.alignedMagmaPos.down()).isStill()) {
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.alignedMagmaPos.down());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: third lava grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                if (client.player.inventory.getStack(3).getItem() == Items.LAVA_BUCKET && client.world.getBlockState(alignedSideMiddleFragmentPos.up()).getBlock() != Blocks.OBSIDIAN && client.world.getBlockState(alignedSideMiddleFragmentPos.up()).getBlock() != Blocks.LAVA) {
+                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, alignedSideMiddleFragmentPos, Direction.UP);
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: third lava place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                if (client.world.getBlockState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down()).getBlock() == Blocks.LAVA && client.world.getFluidState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down()).isStill()) {
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: fourth lava grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+
+                if (!client.world.getBlockState(alignedSideMiddleFragmentPos.up(2)).getMaterial().isSolid()) {
+                    InventoryHelper.selectBuildingBlock(client.player, true);
+                    BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(alignedSideMiddleFragmentPos.up()), Direction.UP, alignedSideMiddleFragmentPos.up(), false);
+                    client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult);
                     return;
                 }
                 client.player.inventory.selectedSlot = 3;
-                if(client.player.inventory.getStack(3).getItem()==Items.WATER_BUCKET){
-                    BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(alignedSideMiddleFragmentPos),RelevantDirectionHelper.getDirectionBetween(PreNether.alignedMagmaPos,PreNether.magmaPos),alignedSideMiddleFragmentPos,false);
-                    System.out.println("Fredobotdebug: emptyBucket pos: " + PreNether.alignedMagmaPos.toShortString() + " state: " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult));
+                if (client.player.inventory.getStack(3).getItem() == Items.LAVA_BUCKET && client.world.getBlockState(PreNether.alignedMagmaPos.up(2)).getBlock() != Blocks.OBSIDIAN && client.world.getBlockState(PreNether.alignedMagmaPos.up(2)).getBlock() != Blocks.LAVA) {
+                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, alignedSideMiddleFragmentPos.up(2), PreNether.fromMagmaToAligned.getOpposite());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: fourth lava place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
                     return;
                 }
-                if(client.world.getBlockState(PreNether.magmaPos.up()).getBlock()==Blocks.WATER){
-                    System.out.println("Fredobotdebug: grab isSuccess: " + grabLava(client, client.player, PreNether.magmaPos.up()));
+
+
+                currentTBOState = TwoByOneBuildState.SEALING_SPACE;
+                break;
+
+
+            case SEALING_SPACE:
+                InventoryHelper.selectBuildingBlock(client.player, true);
+                if (!client.world.getBlockState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).up()).getMaterial().isSolid()) {
+                    BlockHitResult blockHitResultOne = new BlockHitResult(Vec3d.ofCenter(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned))), Direction.UP, PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)), false);
+                    System.out.println("Fredodebug: second seal block place : " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResultOne));
                     return;
                 }
-                else if(client.world.getBlockState(PreNether.alignedMagmaPos.up()).getBlock()==Blocks.WATER){
-                    System.out.println("Fredobotdebug: grab isSuccess: " + grabLava(client, client.player, PreNether.alignedMagmaPos.up()));
+                if (!client.world.getBlockState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite()).up()).getMaterial().isSolid()) {
+                    BlockHitResult blockHitResultOne = new BlockHitResult(Vec3d.ofCenter(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite())), Direction.UP, PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite()), false);
+                    System.out.println("Fredodebug: third seal block place : " + client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResultOne));
                     return;
                 }
-                else{
-                    currentTBOState = TwoByOneBuildState.CLEARING_SPACE;
+                currentTBOState = TwoByOneBuildState.FIRST_WATER_MOVE;
+                break;
+            case FIRST_WATER_MOVE:
+                client.player.inventory.selectedSlot = 3;
+                if (client.player.inventory.getStack(3).getItem() == Items.BUCKET && client.world.getBlockState(PreNether.alignedMagmaPos.up()).getBlock() == Blocks.BUBBLE_COLUMN) {
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.alignedMagmaPos.up());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: first water grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
                 }
+                currentTBOState = TwoByOneBuildState.SECOND_WATER_MOVE;
+                break;
+            case SECOND_WATER_MOVE:
+                if (client.player.inventory.getStack(3).getItem() == Items.WATER_BUCKET) {
+                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, PreNether.alignedMagmaPos, PreNether.fromMagmaToAligned.getOpposite());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: first water place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                currentTBOState = TwoByOneBuildState.PENDING;
+                break;
+            case PENDING:
+                if(client.player.inventory.getStack(3).getItem()!=Items.BUCKET||!client.world.getFluidState(PreNether.magmaPos).isStill())break;
+                currentTBOState = TwoByOneBuildState.THIRD_WATER_MOVE;
+                break;
+            case THIRD_WATER_MOVE:
+                if (client.player.inventory.getStack(3).getItem() == Items.BUCKET) {
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.magmaPos);
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: second water grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                currentTBOState = TwoByOneBuildState.FOURTH_WATER_MOVE;
+                break;
+            case FOURTH_WATER_MOVE:
+                if (client.player.inventory.getStack(3).getItem() == Items.WATER_BUCKET) {
+                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, magmaSideMiddleFragmentPos.down(), PreNether.fromMagmaToAligned);
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: last water place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
+                    return;
+                }
+                currentTBOState = TwoByOneBuildState.CLEARING_SPACE;
                 break;
             case CLEARING_SPACE:
-                if(client.world.getBlockState(PreNether.alignedMagmaPos.down()).getMaterial().isSolid()){
-                    client.player.inventory.selectedSlot = 1;
-                    client.interactionManager.updateBlockBreakingProgress(PreNether.alignedMagmaPos.down(),Direction.UP);
+                if (client.player.inventory.getStack(3).getItem() == Items.BUCKET) {
+                    if (client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock() != Blocks.WATER) {
+                        System.out.println("Fredodebug: waiting for water flowing");
+                        return;
+                    }
+                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.magmaPos.down());
+                    client.player.yaw = angles[0];
+                    client.player.pitch = angles[1];
+                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
+                    System.out.println("Fredodebug: last water grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
                     return;
                 }
-                else if(client.world.getBlockState(PreNether.magmaPos.down()).getMaterial().isSolid()){
-                    client.player.inventory.selectedSlot = 1;
-                    client.interactionManager.updateBlockBreakingProgress(PreNether.magmaPos.down(),Direction.UP);
+                if (!client.world.getBlockState(PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down()).getMaterial().isSolid()) {
+                    InventoryHelper.selectBuildingBlock(client.player, true);
+                    BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down(2)), Direction.UP, PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down(2), false);
+                    client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult);
                     return;
                 }
-                else if(client.world.getBlockState(PreNether.magmaPos).getBlock()==Blocks.MAGMA_BLOCK){
-                    client.player.inventory.selectedSlot = 1;
-                    client.interactionManager.updateBlockBreakingProgress(PreNether.magmaPos,Direction.UP);
+                if (!client.world.getBlockState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down()).getMaterial().isSolid()) {
+                    InventoryHelper.selectBuildingBlock(client.player, true);
+                    BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down(2)), Direction.UP, PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down(2), false);
+                    client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult);
                     return;
                 }
-                else if(client.world.getBlockState(PreNether.alignedMagmaPos).getBlock()==Blocks.WATER){
-                    client.player.inventory.selectedSlot = 3;
-                    System.out.println("Fredobotdebug: grab isSuccess: " + grabLava(client, client.player, PreNether.alignedMagmaPos));
+                if (client.world.getBlockState(PreNether.alignedMagmaPos).getBlock() == Blocks.MAGMA_BLOCK) {
+                    client.player.inventory.selectedSlot = 1;
+                    client.interactionManager.updateBlockBreakingProgress(PreNether.alignedMagmaPos, Direction.UP);
                     return;
                 }
                 currentTBOState = TwoByOneBuildState.FORCING_LIGHTER;
                 break;
             case FORCING_LIGHTER:
-                System.out.println("Fredodebug: forcingLighter...");
+                KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),true);
+                InventoryHelper.moveItemToHotbar(client, client.player, Items.FLINT_AND_STEEL, 8);
+                client.player.inventory.selectedSlot = 8;
+                BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(magmaSideMiddleFragmentPos), PreNether.fromMagmaToAligned, magmaSideMiddleFragmentPos, false);
+                client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult);
+                if (client.world.getBlockState(PreNether.magmaPos).getBlock() == Blocks.NETHER_PORTAL) {
+                    currentTBOState = TwoByOneBuildState.NEXT;
+                }
+                break;
+            case NEXT:
+                KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),false);
+                break;
         }
-
-
     }
-    public static boolean placeLava(MinecraftClient client, PlayerEntity player, BlockPos foundationPos, Direction placeDirection) {
-        if (client == null || player == null || foundationPos == null || client.getNetworkHandler() == null) return false;
 
+    private static void tryPlaceDoor(PlayerEntity player, BlockPos basePos, Direction doorOutFacingDirection, Direction hingeOffsetDirection) {
+        System.out.println("Fredodebug: hOffset: X: " + hingeOffsetDirection.getOffsetX() + " Z: " + hingeOffsetDirection.getOffsetZ() + " dOffset: X: " + doorOutFacingDirection.getOffsetX() + " Z: " + doorOutFacingDirection.getOffsetZ());
+        double hitX = basePos.getX() + 0.5 + hingeOffsetDirection.getOffsetX() * 0.25;
+        double hitY = basePos.getY() + 1.0;
+        double hitZ = basePos.getZ() + 0.5 + hingeOffsetDirection.getOffsetZ() * 0.25;
+        Vec3d hitVec = new Vec3d(hitX, hitY, hitZ);
+
+        BlockHitResult hitResult = new BlockHitResult(
+                hitVec,
+                Direction.UP,
+                basePos,
+                false
+        );
+        player.inventory.selectedSlot = 8;
+        player.yaw = RelevantDirectionHelper.getYawFromDirection(doorOutFacingDirection.getOpposite());
+        MinecraftClient client = MinecraftClient.getInstance();
+        System.out.println("Fredodebug: trying to placing the door, Door pos: " + basePos.up().toShortString() + " result: " + client.interactionManager.interactBlock((ClientPlayerEntity) player, client.world, Hand.MAIN_HAND, hitResult));
+    }
+
+    public static boolean placeLava(MinecraftClient client, PlayerEntity player, BlockPos foundationPos, Direction placeDirection) {
+        if (client == null || player == null || client.getNetworkHandler() == null) return false;
         player.inventory.selectedSlot = 3;
 
         if (lavaPlaceStep == 0) {
-            // 【Tick 1】：暂存真实坐标，并把客户端角色真正地瞬移过去
+            if (foundationPos == null || placeDirection == null) return false;
+            activePlacePos = foundationPos;
+            activePlaceDirection = placeDirection;
+
             storedRealPos = player.getPos();
             storedRealYaw = player.yaw;
             storedRealPitch = player.pitch;
 
-            double eyeX = foundationPos.getX() + 0.5 + placeDirection.getOffsetX() * 0.55;
-            double eyeY = foundationPos.getY() + 0.5 + placeDirection.getOffsetY() * 0.55;
-            double eyeZ = foundationPos.getZ() + 0.5 + placeDirection.getOffsetZ() * 0.55;
+            double eyeX = activePlacePos.getX() + 0.5 + activePlaceDirection.getOffsetX() * 0.55;
+            double eyeY = activePlacePos.getY() + 0.5 + activePlaceDirection.getOffsetY() * 0.55;
+            double eyeZ = activePlacePos.getZ() + 0.5 + activePlaceDirection.getOffsetZ() * 0.55;
 
             double ghostX = eyeX;
             double ghostY = eyeY - player.getEyeHeight(player.getPose());
@@ -256,50 +437,47 @@ public class NetherPortalBuilding {
             float ghostYaw = storedRealYaw;
             float ghostPitch = storedRealPitch;
 
-            if (placeDirection == Direction.UP) {
-                ghostPitch = 90.0f;
-            } else if (placeDirection == Direction.DOWN) {
-                ghostPitch = -90.0f;
-            } else {
+            if (activePlaceDirection == Direction.UP) ghostPitch = 90.0f;
+            else if (activePlaceDirection == Direction.DOWN) ghostPitch = -90.0f;
+            else {
                 ghostPitch = 0.0f;
-                if (placeDirection == Direction.NORTH) ghostYaw = 0.0f;
-                if (placeDirection == Direction.SOUTH) ghostYaw = 180.0f;
-                if (placeDirection == Direction.WEST) ghostYaw = -90.0f;
-                if (placeDirection == Direction.EAST) ghostYaw = 90.0f;
+                if (activePlaceDirection == Direction.NORTH) ghostYaw = 0.0f;
+                if (activePlaceDirection == Direction.SOUTH) ghostYaw = 180.0f;
+                if (activePlaceDirection == Direction.WEST) ghostYaw = -90.0f;
+                if (activePlaceDirection == Direction.EAST) ghostYaw = 90.0f;
             }
 
-            // 【核心精髓】：真实改变物理位置！这样客户端原生机制也会发送完美的坐标包
             player.updatePosition(ghostX, ghostY, ghostZ);
             player.yaw = ghostYaw;
             player.pitch = ghostPitch;
-            client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+            client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.Both(
                     ghostX, ghostY, ghostZ, ghostYaw, ghostPitch, player.isOnGround()
             ));
 
             lavaPlaceStep = 1;
-            return false; // 返回 false 挂起当前任务，等下一 Tick
+            return false;
 
         } else if (lavaPlaceStep == 1) {
-            // 【Tick 2】：经过了 1 个 Tick 的沉淀，服务器已完全认可幽灵位置，执行右键！
-            client.interactionManager.interactItem(player, client.world, net.minecraft.util.Hand.MAIN_HAND);
+            client.interactionManager.interactItem(player, client.world, Hand.MAIN_HAND);
             lavaPlaceStep = 2;
-            return false; // 再等 1 个 Tick 让岩浆流出来
+            return false;
 
         } else if (lavaPlaceStep == 2) {
-            // 【Tick 3】：打扫战场，瞬间拉回真实位置！
             if (storedRealPos != null) {
                 player.updatePosition(storedRealPos.x, storedRealPos.y, storedRealPos.z);
                 player.yaw = storedRealYaw;
                 player.pitch = storedRealPitch;
 
-                client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+                client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.Both(
                         storedRealPos.x, storedRealPos.y, storedRealPos.z,
                         storedRealYaw, storedRealPitch, player.isOnGround()
                 ));
             }
-            lavaPlaceStep = 0; // 重置状态机
-            System.out.println("FredoBot [时序修正版]: 倒岩浆成功执行 -> " + foundationPos.toShortString());
-            return true; // 终于返回 true，外层逻辑可以继续进行了！
+            lavaPlaceStep = 0;
+            System.out.println("FredoBot [时序修正版]: 倒岩浆成功执行 -> " + (activePlacePos != null ? activePlacePos.toShortString() : "未知"));
+            activePlacePos = null;
+            activePlaceDirection = null;
+            return true;
         }
         return false;
     }
@@ -308,10 +486,12 @@ public class NetherPortalBuilding {
         BlockPos magmaPos = PreNether.magmaPos;
         BlockPos alignedMagmaPos = PreNether.alignedMagmaPos;
         List<BlockPos> result = new ArrayList<>();
-        Direction[] directions = RelevantDirectionHelper.getIrrelevantDirections(magmaPos,alignedMagmaPos);
-        for(Direction offset: directions){
-            if(!MinecraftClient.getInstance().world.getBlockState(magmaPos.offset(offset)).getMaterial().isSolid())result.add(magmaPos.offset(offset));
-            if(!MinecraftClient.getInstance().world.getBlockState(alignedMagmaPos.offset(offset)).getMaterial().isSolid())result.add(alignedMagmaPos.offset(offset));
+        Direction[] directions = RelevantDirectionHelper.getIrrelevantDirections(magmaPos, alignedMagmaPos);
+        for (Direction offset : directions) {
+            if (!MinecraftClient.getInstance().world.getBlockState(magmaPos.offset(offset)).getMaterial().isSolid())
+                result.add(magmaPos.offset(offset));
+            if (!MinecraftClient.getInstance().world.getBlockState(alignedMagmaPos.offset(offset)).getMaterial().isSolid())
+                result.add(alignedMagmaPos.offset(offset));
         }
         return result;
     }
@@ -319,9 +499,6 @@ public class NetherPortalBuilding {
     private static BlockPos getMissingObiPos() {
         BlockPos magmaPos = PreNether.magmaPos;
         BlockPos alignedMagmaPos = PreNether.alignedMagmaPos;
-        Direction relevantDirectionFromMagmaToAligned = RelevantDirectionHelper.getDirectionBetween(magmaPos, alignedMagmaPos);
-        magmaSideMiddleFragmentPos = magmaPos.offset(relevantDirectionFromMagmaToAligned.getOpposite());
-        alignedSideMiddleFragmentPos = alignedMagmaPos.offset(relevantDirectionFromMagmaToAligned);
         if (missingObiPosList.isEmpty()) {
             if (!isObiFragmentSettled(magmaSideMiddleFragmentPos.up())) {
                 missingObiPosList.add(magmaSideMiddleFragmentPos.up());
@@ -395,13 +572,13 @@ public class NetherPortalBuilding {
                 isNotClear = true;
                 twoByOneAreaClearPos.add(alignedMagmaPos);
             }
-            if (isNotClear(magmaPos.offset(RelevantDirectionHelper.getDirectionBetween(alignedMagmaPos, magmaPos)))) {
+            if (isNotClear(magmaPos.offset(PreNether.fromMagmaToAligned))) {
                 isNotClear = true;
-                twoByOneAreaClearPos.add(magmaPos.offset(RelevantDirectionHelper.getDirectionBetween(alignedMagmaPos, magmaPos)));
+                twoByOneAreaClearPos.add(magmaPos.offset(PreNether.fromMagmaToAligned.getOpposite()));
             }
-            if (isNotClear(alignedMagmaPos.offset((RelevantDirectionHelper.getDirectionBetween(magmaPos, alignedMagmaPos))))) {
+            if (isNotClear(alignedMagmaPos.offset((PreNether.fromMagmaToAligned)))) {
                 isNotClear = true;
-                twoByOneAreaClearPos.add(alignedMagmaPos.offset((RelevantDirectionHelper.getDirectionBetween(magmaPos, alignedMagmaPos))));
+                twoByOneAreaClearPos.add(alignedMagmaPos.offset((PreNether.fromMagmaToAligned)));
             }
             if (isNotClear(PreNether.magmaPos.down(2))) {
                 isNotClear = true;
@@ -415,8 +592,8 @@ public class NetherPortalBuilding {
             twoByOneAreaClearPos.removeIf(currentPos -> !isNotClear(currentPos));
             isNotClear = !twoByOneAreaClearPos.isEmpty();
         }
-        System.out.println("Fredodebug: twoByOneisNotClear: "+ isNotClear);
-        System.out.println("Fredodebug: twoByOneAreaClearPosList: "+ twoByOneAreaClearPos.toString());
+        System.out.println("Fredodebug: twoByOneisNotClear: " + isNotClear);
+        System.out.println("Fredodebug: twoByOneAreaClearPosList: " + twoByOneAreaClearPos.toString());
         return isNotClear;
     }
 
@@ -426,23 +603,25 @@ public class NetherPortalBuilding {
     }
 
     public static boolean grabLava(MinecraftClient client, PlayerEntity player, BlockPos lavaPos) {
-        if (client == null || player == null || lavaPos == null || client.getNetworkHandler() == null) return false;
-
+        if (client == null || player == null || client.getNetworkHandler() == null) return false;
         player.inventory.selectedSlot = 3;
 
         if (lavaGrabStep == 0) {
+            if (lavaPos == null) return false;
+            activeGrabPos = lavaPos;
+
             grabStoredRealPos = player.getPos();
             grabStoredRealYaw = player.yaw;
             grabStoredRealPitch = player.pitch;
 
-            double ghostX = lavaPos.getX() + 0.5;
-            double ghostY = lavaPos.getY() + 0.5 - player.getEyeHeight(player.getPose());
-            double ghostZ = lavaPos.getZ() + 0.5;
+            double ghostX = activeGrabPos.getX() + 0.5;
+            double ghostY = activeGrabPos.getY() + 0.5 - player.getEyeHeight(player.getPose());
+            double ghostZ = activeGrabPos.getZ() + 0.5;
 
             player.updatePosition(ghostX, ghostY, ghostZ);
             player.yaw = grabStoredRealYaw;
             player.pitch = 90.0f;
-            client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+            client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.Both(
                     ghostX, ghostY, ghostZ, grabStoredRealYaw, 90.0f, player.isOnGround()
             ));
 
@@ -450,7 +629,7 @@ public class NetherPortalBuilding {
             return false;
 
         } else if (lavaGrabStep == 1) {
-            client.interactionManager.interactItem(player, client.world, net.minecraft.util.Hand.MAIN_HAND);
+            client.interactionManager.interactItem(player, client.world, Hand.MAIN_HAND);
             lavaGrabStep = 2;
             return false;
 
@@ -459,13 +638,14 @@ public class NetherPortalBuilding {
                 player.updatePosition(grabStoredRealPos.x, grabStoredRealPos.y, grabStoredRealPos.z);
                 player.yaw = grabStoredRealYaw;
                 player.pitch = grabStoredRealPitch;
-                client.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Both(
+                client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.Both(
                         grabStoredRealPos.x, grabStoredRealPos.y, grabStoredRealPos.z,
                         grabStoredRealYaw, grabStoredRealPitch, player.isOnGround()
                 ));
             }
             lavaGrabStep = 0;
-            System.out.println("FredoBot [时序修正版]: 盛起液体成功执行 -> " + lavaPos.toShortString());
+            System.out.println("FredoBot [时序修正版]: 盛起液体成功执行 -> " + (activeGrabPos != null ? activeGrabPos.toShortString() : "未知"));
+            activeGrabPos = null;
             return true;
         }
         return false;

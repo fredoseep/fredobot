@@ -8,31 +8,30 @@ import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
 import com.fredoseep.utils.player.PlayerHelper;
+import com.fredoseep.utils.player.RelevantDirectionHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.fluid.Fluids;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.Heightmap;
 import net.minecraft.world.World;
-import net.minecraft.world.biome.Biome;
 import net.minecraft.world.biome.Biomes;
 
-import java.util.HashMap;
 import java.util.Map;
 
 public class PreNether {
     public static BlockPos magmaPos = null;
     public static BlockPos alignedMagmaPos = null;
+    public static Direction fromMagmaToAligned = null;
     private static BlockPos gravelPos = null;
 
     public static void reset() {
         magmaPos = null;
         alignedMagmaPos = null;
         gravelPos = null;
+        fromMagmaToAligned = null;
     }
 
     public static void preNetherStuff(PlayerEntity player) {
@@ -145,6 +144,7 @@ public class PreNether {
                 }
             }
         }
+        fromMagmaToAligned = RelevantDirectionHelper.getDirectionBetween(magmaPos,alignedMagmaPos);
 
         return closestRavine;
     }

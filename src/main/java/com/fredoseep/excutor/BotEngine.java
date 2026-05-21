@@ -1,5 +1,6 @@
 package com.fredoseep.excutor;
 
+import com.fredoseep.Test;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
@@ -78,6 +79,7 @@ public class BotEngine {
 
     // 每 0.05 秒被 Fabric 自动调用
     private void onClientTick(MinecraftClient client) {
+        Test.tick();
         if (!isRunning || client.player == null || client.world == null) return;
 
         // 严格按照优先级，让每个模块执行自己的逻辑

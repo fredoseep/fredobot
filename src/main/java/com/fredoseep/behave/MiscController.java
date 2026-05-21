@@ -348,8 +348,10 @@ public class MiscController implements IBotModule {
                             java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
                                     net.minecraft.entity.ItemEntity.class,
                                     searchBox,
-                                    // 【核心修复】：过滤掉在黑名单里的掉落物
-                                    e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem())) && !unreachableEntities.contains(e)
+                                    e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                                            && !unreachableEntities.contains(e)
+                                            // 【核心修复】：直接在这里过滤，只找落地/落水/完全静止的掉落物，坚决不追半空中的东西！
+                                            && (e.isOnGround() || e.isTouchingWater() || Math.abs(e.getVelocity().y) < 0.001)
                             );
 
                             if (!drops.isEmpty()) {
@@ -359,12 +361,8 @@ public class MiscController implements IBotModule {
                                     double d = player.squaredDistanceTo(drop);
                                     if (d < minDist) { minDist = d; nearestDrop = drop; }
                                 }
-                                if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return;
+                                // 【核心删除】：将原有的 if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return; 这句话彻底删掉！
 
-                                // ==========================================
-                                // 【黑名单判定】：如果刚刚去捡的就是它，但寻路停止了
-                                // 距离远说明没路走，超时说明卡住了或背包满了，统统拉黑！
-                                // ==========================================
                                 if (targetEntity == nearestDrop) {
                                     if (player.squaredDistanceTo(nearestDrop) > 4.0 || pickupCoolDownTick > 60) {
                                         System.out.println("FredoBot [水下]: 掉落物不可达或超时，加入黑名单放弃！");
@@ -440,20 +438,23 @@ public class MiscController implements IBotModule {
                             pickupCoolDownTick++;
 
                             net.minecraft.util.math.Box finalSearchBox = new net.minecraft.util.math.Box(doorPos).expand(8.0, 8.0, 8.0);
-                            java.util.List<net.minecraft.entity.ItemEntity> finalDrops = client.world.getEntities(
+                             drops = client.world.getEntities(
                                     net.minecraft.entity.ItemEntity.class,
                                     finalSearchBox,
-                                    e -> validDrops.contains(e.getStack().getItem()) && !unreachableEntities.contains(e)
+                                    e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                                            && !unreachableEntities.contains(e)
+                                            // 【核心修复】：直接在这里过滤，只找落地/落水/完全静止的掉落物，坚决不追半空中的东西！
+                                            && (e.isOnGround() || e.isTouchingWater() || Math.abs(e.getVelocity().y) < 0.001)
                             );
 
-                            if (!finalDrops.isEmpty()) {
-                                net.minecraft.entity.ItemEntity nearestDrop = finalDrops.get(0);
+                            if (!drops.isEmpty()) {
+                                net.minecraft.entity.ItemEntity nearestDrop = drops.get(0);
                                 double minDist = player.squaredDistanceTo(nearestDrop);
-                                for (net.minecraft.entity.ItemEntity drop : finalDrops) {
+                                for (net.minecraft.entity.ItemEntity drop : drops) {
                                     double d = player.squaredDistanceTo(drop);
                                     if (d < minDist) { minDist = d; nearestDrop = drop; }
                                 }
-                                if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return;
+                                // 【核心删除】：将原有的 if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return; 这句话彻底删掉！
 
                                 if (targetEntity == nearestDrop) {
                                     if (player.squaredDistanceTo(nearestDrop) > 4.0 || pickupCoolDownTick > 60) {
@@ -487,20 +488,23 @@ public class MiscController implements IBotModule {
                 }
 
                 // =================================================================
-                // 3. 陆地普通挖掘逻辑 (即如果没满足水下条件，走原有的硬挖逻辑)
+                // 3. 陆地普通挖掘逻辑 (严格的 挖掘->清扫->拾取->下一地点 强状态机)
                 // =================================================================
                 boolean isBlockMined = client.world.getBlockState(targetPos).isAir() ||
                         client.world.getBlockState(targetPos).getMaterial().isLiquid();
 
-                if (!isBlockMined) {
+                // 核心状态控制：只要正在收集掉落物（pickupCoolDownTick > 0），就绝对不准被新进入范围的方块打断！
+                boolean isCollectingDrops = targetEntity != null || pickupCoolDownTick > 0;
+
+                if (!isBlockMined && !isCollectingDrops) {
+                    // --- 阶段 1 & 2：走向目标并站桩连挖 ---
                     registerValidDrop(client.world.getBlockState(targetPos).getBlock());
                     Vec3d eyePos = new Vec3d(player.getX(), player.getEyeY(), player.getZ());
                     double distSq = eyePos.squaredDistanceTo(Vec3d.ofCenter(targetPos));
 
-                    // 阶段 A：目标在物理范围之外 (> 20.0 也就是 > 4.47格)
                     if (distSq > 20.0) {
+                        // 阶段 1：距离太远，寻路靠近
                         if (!pathExecutor.isBusy() && player.isOnGround()) {
-
                             BlockPos topPos = new BlockPos(targetPos.getX(), BtStuff.groundYNoLeavesOrTrees(targetPos), targetPos.getZ());
                             double horizDistSq = Math.pow(player.getX() - (targetPos.getX() + 0.5), 2) + Math.pow(player.getZ() - (targetPos.getZ() + 0.5), 2);
 
@@ -508,34 +512,29 @@ public class MiscController implements IBotModule {
                             System.out.println("Fredodebug: distSq > 20, 开始寻路至目标");
 
                             if (targetPos.getY() < topPos.getY() - 3 && horizDistSq > 16.0) {
-                                System.out.println("FredoBot [智能挖掘]: 目标深埋地下，启动降维打击！先前往正上方地表...");
-                                System.out.println("Fredodebug: tempGoal is surface : " + topPos.toShortString());
+                                System.out.println("FredoBot [智能挖掘]: 目标深埋地下，先前往正上方地表...");
                                 pathExecutor.setTemporaryGoal(topPos, PathExecutor.TempMissionType.IDLE);
                             }
-
-                            // 【机制大修】：每次发起新的寻路（意味着上一次失败并停止了），受挫值直接加 50 点
                             pathingFailTicks += 50;
                         }
-                        // 删除之前那句坑爹的 else if (pathExecutor.isBusy()) { pathingFailTicks = 0; }
-                        // 因为成功在路上走不代表永远不会失败，绝对不能清零！
 
                         if (pathingFailTicks > 300) {
-                            System.out.println("FredoBot: 远距离寻路多次受阻(受挫值拉满)，果断跳过该节点！");
+                            System.out.println("FredoBot: 远距离寻路多次受阻，果断跳过该节点！");
                             if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
                                 targetPos = MiningHelper.blockToMine.remove(0);
                                 pathingFailTicks = 0;
                                 if (pathExecutor.isBusy()) pathExecutor.stop();
                             } else {
-                                targetPos = player.getBlockPos();
-                                pickupCoolDownTick = 0;
+                                targetPos = player.getBlockPos(); // 强制进入打扫战场阶段
+                                pickupCoolDownTick = 1;
                             }
                         }
                         return;
                     }
 
-                    // 阶段 B：目标在物理范围之内 (distSq <= 20.0)
+                    // 阶段 2：在挖掘范围内，站桩抡镐子，坚决不捡东西
                     if (pathExecutor.isBusy() && player.isOnGround()) {
-                        pathExecutor.stop();
+                        pathExecutor.stop(); // 停下脚步，立定开挖
                     }
 
                     float[] angles = MiningHelper.getValidMiningAngle(player, targetPos);
@@ -549,82 +548,79 @@ public class MiscController implements IBotModule {
                         player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                     }
 
-                    // 【机制大修】：如果在挥镐子，每一 Tick 受挫值 +1。
-                    // 正常挖石头大约需要 30~50 Ticks，黑曜石需要 180 Ticks。
-                    // 如果超过 300 Ticks（15秒）还没挖掉，说明它隔着墙瞎挥，或者方块不可破坏，强制跳过！
                     pathingFailTicks++;
                     if (pathingFailTicks > 300) {
-                        System.out.println("FredoBot: 近战挖掘耗时过长(疑似隔着墙或处于死角)，受挫值拉满，放弃挖掘！");
+                        System.out.println("FredoBot: 近战挖掘耗时过长，放弃当前挖掘！");
                         if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
                             targetPos = MiningHelper.blockToMine.remove(0);
                             pathingFailTicks = 0;
                         } else {
                             targetPos = player.getBlockPos();
-                            pickupCoolDownTick = 0;
+                            pickupCoolDownTick = 1; // 强制进入打扫战场
                         }
                     }
 
                 } else {
-                    // ==========================================
-                    // 【全新战术：定点清扫与集中拾取】
-                    // 目标已经挖掉，先不要急着乱跑捡东西！
-                    // 看看站在原地不用动（触及范围内）还能不能挖到其他目标。
-                    // ==========================================
-                    BlockPos nextReachable = null;
-                    if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
-                        Vec3d eyePos = new Vec3d(player.getX(), player.getEyeY(), player.getZ());
+                    // --- 阶段 3 & 4：收集掉落物与切换大区域 ---
 
-                        // 遍历剩余的目标队列
-                        for (int i = 0; i < MiningHelper.blockToMine.size(); i++) {
-                            BlockPos candidate = MiningHelper.blockToMine.get(i);
-                            boolean candidateMined = client.world.getBlockState(candidate).isAir() ||
-                                    client.world.getBlockState(candidate).getMaterial().isLiquid();
+                    if (!isCollectingDrops) {
+                        // 刚刚挖掉了一个方块！第一优先级：扫描原地还能不能挖到其他的
+                        BlockPos nextReachable = null;
+                        if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
+                            Vec3d eyePos = new Vec3d(player.getX(), player.getEyeY(), player.getZ());
+                            for (int i = 0; i < MiningHelper.blockToMine.size(); i++) {
+                                BlockPos candidate = MiningHelper.blockToMine.get(i);
+                                boolean candidateMined = client.world.getBlockState(candidate).isAir() ||
+                                        client.world.getBlockState(candidate).getMaterial().isLiquid();
 
-                            // 如果这块方块已经被意外破坏（比如树叶自己枯萎了），移出队列
-                            if (candidateMined) {
-                                MiningHelper.blockToMine.remove(i);
-                                i--; // 删掉后索引回退
-                                continue;
+                                if (candidateMined) {
+                                    MiningHelper.blockToMine.remove(i);
+                                    i--;
+                                    continue;
+                                }
+
+                                // 站桩清扫：发现能够得着的目标
+                                if (eyePos.squaredDistanceTo(Vec3d.ofCenter(candidate)) <= 20.0) {
+                                    nextReachable = candidate;
+                                    MiningHelper.blockToMine.remove(i);
+                                    break;
+                                }
                             }
+                        }
 
-                            // 如果物理距离 <= 20.0 (约4.47格)，说明站在原地就能挥手挖到！
-                            if (eyePos.squaredDistanceTo(Vec3d.ofCenter(candidate)) <= 20.0) {
-                                nextReachable = candidate;
-                                MiningHelper.blockToMine.remove(i);
-                                break;
+                        if (nextReachable != null) {
+                            // 原地有目标，无缝衔接挖掘，绝不进入掉落物收集状态！
+                            targetPos = nextReachable;
+                            pathingFailTicks = 0;
+                            return;
+                        } else {
+                            // 够得着的全挖完了，或配额已满，正式锁定为掉落物收集阶段
+                            pickupCoolDownTick = 1;
+                            pressAttack = false;
+                            pressForward = false;
+                            pressJump = false;
+                            if (pathExecutor.isBusy()) {
+                                pathExecutor.stop();
                             }
                         }
                     }
 
-                    // 1. 如果周围还有够得着的目标，设为新目标原地继续抡镐子，绝对不走！
-                    if (nextReachable != null) {
-                        targetPos = nextReachable;
-                        pickupCoolDownTick = 0;
-                        pathingFailTicks = 0;
-                        return;
-                    }
-
-                    // 2. 原地够得着的全挖完了（或配额已满），现在才开始集中捡掉落物！
-                    if (pickupCoolDownTick <= 5) {
-                        pickupCoolDownTick++;
-                        return;
-                    }
-
-                    pressAttack = false;
-                    pressForward = false;
-                    pressJump = false;
-
+                    // 阶段 3：真正的集中收集掉落物 (已锁定拾取模式)
                     if (pathExecutor.isBusy()) {
-                        return;
+                        return; // 如果在走向掉落物的路上，耐心等待，绝不被挖矿逻辑打断
                     }
 
                     pickupCoolDownTick++;
+                    if (pickupCoolDownTick <= 5) return; // 刚结束挖掘，给天上飞的掉落物一点落地的时间
+
                     Box searchBox = new Box(player.getBlockPos()).expand(15.0, 10.0, 15.0);
                     List<ItemEntity> drops = client.world.getEntities(
                             ItemEntity.class,
                             searchBox,
-                            // 加上黑名单过滤，避免树叶卡死
-                            e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem())) && !unreachableEntities.contains(e)
+                            e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                                    && !unreachableEntities.contains(e)
+                                    // 【核心防空中截停】：只找落地/落水/完全静止的掉落物
+                                    && (e.isOnGround() || e.isTouchingWater() || Math.abs(e.getVelocity().y) < 0.001)
                     );
 
                     if (!drops.isEmpty()) {
@@ -637,38 +633,39 @@ public class MiscController implements IBotModule {
                                 nearestDrop = drop;
                             }
                         }
-                        if (nearestDrop != null) {
-                            if (!nearestDrop.isTouchingWater() && !nearestDrop.isOnGround()) return;
 
+                        if (nearestDrop != null) {
                             if (targetEntity == nearestDrop) {
+                                // 尝试去捡过，但失败了
                                 if (player.squaredDistanceTo(nearestDrop) > 4.0 || pickupCoolDownTick > 60) {
                                     System.out.println("FredoBot [陆地]: 掉落物不可达或超时，加入黑名单果断放弃！");
                                     unreachableEntities.add(nearestDrop);
                                     targetEntity = null;
-                                    pickupCoolDownTick = 0;
+                                    pickupCoolDownTick = 5; // 回退tick，立刻扫下一个掉落物
                                 }
                                 return;
                             }
 
+                            // 锁定地上的掉落物，下发寻路指令
                             walkTowardsEntity(player, nearestDrop);
-                            pickupCoolDownTick = 0;
+                            pickupCoolDownTick = 5; // 重置超时判定
                             return;
                         }
                     } else {
+                        // 区域内地上的掉落物彻底捡完了
                         if (pickupCoolDownTick < 20) {
-                            return; // 等待掉落物刷新
+                            return; // 再等会儿，说不定天上的刚好掉下来
                         } else {
-                            // 3. 当前区域打扫完毕！看看还有没有远处的下一批目标。
+                            // 阶段 4：打扫完毕，彻底退出拾取模式，前往下一片区域
                             if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
-                                // 提取下一个需要跑路才能挖的远方目标
                                 targetPos = MiningHelper.blockToMine.remove(0);
                                 System.out.println("FredoBot [陆地]: 当前驻点已清空并打扫完毕，前往下一片目标区域！ -> " + targetPos.toShortString());
-                                pickupCoolDownTick = 0;
+                                pickupCoolDownTick = 0; // 【重置标志位】：解除拾取状态锁，回到挖掘模式
                                 pathingFailTicks = 0;
                                 targetEntity = null;
-                                return; // return 后，下一帧 distSq > 20.0，自然会开始寻路走过去
+                                return;
                             } else {
-                                // 4. 队列彻底空了，意味着挖掘数量已达要求，完美收工！
+                                // 队列彻底空了
                                 System.out.println("FredoBot: 挖掘数量已达标，区域内方块及掉落物全部收集完毕！任务圆满结束！");
                                 pickupCoolDownTick = 0;
                                 pathingFailTicks = 0;
