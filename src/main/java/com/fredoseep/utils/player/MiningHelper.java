@@ -115,15 +115,8 @@ public class MiningHelper {
         Vec3d eyePos = player.getCameraPosVec(1.0F);
 
         List<Vec3d> testPoints = new ArrayList<>();
-
-        // =================================================================
-        // 【精度升级】：从 3x3 升级为 5x5，边缘推进到 0.02 和 0.98 (极限擦边)
-        // 涵盖：极靠边(0.02)、次靠边(0.25)、正中心(0.50)、次靠边(0.75)、极靠边(0.98)
-        // 这样即使只有方块边缘漏出一条极其微小的缝隙，雷达也能瞬间捕捉到！
-        // =================================================================
         double[] offsets = {0.02D, 0.25D, 0.5D, 0.75D, 0.98D};
 
-        // 1. 精准铺设高精度网格：在指定的 targetFace 面上生成 25 个测试点
         for (double a : offsets) {
             for (double b : offsets) {
                 double x = targetPos.getX();
@@ -131,37 +124,23 @@ public class MiningHelper {
                 double z = targetPos.getZ();
 
                 switch (targetFace) {
-                    case UP:
-                        x += a;
-                        y += 1.0D;
-                        z += b;
-                        break; // 顶面 (y=1)
-                    case DOWN:
-                        x += a;
-                        y += 0.0D;
-                        z += b;
-                        break; // 底面 (y=0)
-                    case NORTH:
-                        x += a;
-                        y += b;
-                        z += 0.0D;
-                        break; // 北面 (z=0)
-                    case SOUTH:
-                        x += a;
-                        y += b;
-                        z += 1.0D;
-                        break; // 南面 (z=1)
-                    case WEST:
-                        x += 0.0D;
-                        y += a;
-                        z += b;
-                        break; // 西面 (x=0)
-                    case EAST:
-                        x += 1.0D;
-                        y += a;
-                        z += b;
-                        break; // 东面 (x=1)
+                    case UP:    x += a; y += 1.0D; z += b; break;
+                    case DOWN:  x += a; y += 0.0D; z += b; break;
+                    case NORTH: x += a; y += b; z += 0.0D; break;
+                    case SOUTH: x += a; y += b; z += 1.0D; break;
+                    case WEST:  x += 0.0D; y += a; z += b; break;
+                    case EAST:  x += 1.0D; y += a; z += b; break;
                 }
+
+                // =================================================================
+                // 【物理穿透修复】：把网格点向方块内部强行推进 0.01 格！
+                // 确保射线一定会和目标方块的碰撞箱产生物理交叠，绝不让引擎返回 MISS！
+                // =================================================================
+                double pushIn = 0.01D;
+                x -= targetFace.getOffsetX() * pushIn;
+                y -= targetFace.getOffsetY() * pushIn;
+                z -= targetFace.getOffsetZ() * pushIn;
+
                 testPoints.add(new Vec3d(x, y, z));
             }
         }
@@ -171,7 +150,6 @@ public class MiningHelper {
         double minScore = Double.MAX_VALUE;
         boolean foundVisiblePoint = false;
 
-        // 2. 发射射线进行严格考核 (一轮发射 25 根射线，Minecraft 的引擎完全可以无压力瞬间处理)
         for (Vec3d point : testPoints) {
             RayTraceContext context = new RayTraceContext(
                     eyePos, point,
@@ -182,9 +160,12 @@ public class MiningHelper {
             BlockHitResult hitResult = world.rayTrace(context);
 
             // =================================================================
-            // 遵照你的要求，原封不动保留你的坐标判定逻辑
+            // 【究极拦截锁】：必须是真实的方块碰撞 (Type.BLOCK)！
+            // 彻底杜绝射空 (MISS) 导致的幽灵坐标飘移！
             // =================================================================
-            if (hitResult.getBlockPos().equals(targetPos.offset(targetFace))) {
+            if (hitResult != null && hitResult.getType() == HitResult.Type.BLOCK
+                    && hitResult.getBlockPos().equals(targetPos)
+                    && hitResult.getSide() == targetFace) {
 
                 double dx = point.x - eyePos.x;
                 double dy = point.y - eyePos.y;
@@ -198,7 +179,6 @@ public class MiningHelper {
                 float deltaPitch = pitch - player.pitch;
                 double score = (deltaYaw * deltaYaw) + (deltaPitch * deltaPitch);
 
-                // 同样采用最平滑视角拟合算法
                 if (score < minScore) {
                     minScore = score;
                     bestYaw = yaw;
@@ -208,9 +188,7 @@ public class MiningHelper {
             }
         }
 
-        // 3. 兜底逻辑进化：如果不幸被挡住，回退视线不是方块中心，而是【该面的中心】！
         if (!foundVisiblePoint) {
-            // 通过偏移量，精确定位到目标面的绝对中心点
             double fallbackX = targetPos.getX() + 0.5D + targetFace.getOffsetX() * 0.5D;
             double fallbackY = targetPos.getY() + 0.5D + targetFace.getOffsetY() * 0.5D;
             double fallbackZ = targetPos.getZ() + 0.5D + targetFace.getOffsetZ() * 0.5D;
@@ -223,8 +201,9 @@ public class MiningHelper {
             bestYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
             bestPitch = (float) Math.toDegrees(Math.atan2(-dy, distanceXZ));
             System.out.println("Fredodebug: cannot find a valid angle to " + targetPos.toShortString() + " on face " + targetFace.toString());
-        } else
+        } else {
             System.out.println("Fredodebug: successfully find a valid angle to " + targetPos.toShortString() + " on face " + targetFace.toString());
+        }
 
         return new float[]{bestYaw, bestPitch};
     }
