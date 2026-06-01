@@ -45,44 +45,42 @@ public class PreNether {
                 System.out.println("Fredodebug: reset because no enterable ravine found");
                 return;
             } else {
-                System.out.println("Fredodebug: magmaPos:"+ magmaPos.toShortString());
+                System.out.println("Fredodebug: magmaPos:" + magmaPos.toShortString());
 
                 if (InventoryHelper.countItem(player, Items.GRAVEL) >= 4 || InventoryHelper.countItem(player, Items.FLINT) >= 1 || InventoryHelper.countItem(player, Items.FLINT_AND_STEEL) == 1) {
                     System.out.println("Fredodebug: already have lighter");
                     return;
                 }
-                if (MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.WARM_OCEAN||MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_WARM_OCEAN||MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.LUKEWARM_OCEAN||MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_LUKEWARM_OCEAN) {
+                if (MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.WARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_WARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.LUKEWARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_LUKEWARM_OCEAN) {
                     System.out.println("Fredodebug: magmaPos is in warm ocean . get lighter now");
                     MiningHelper.mineAndCollect(player, Map.of(Blocks.GRAVEL, 4), 50);
                     return;
                 }
             }
-            if(magmaPos==null)return;
+            if (magmaPos == null) return;
             gravelPos = MiningHelper.findNearestBlocks(BtStuff.oceanFloorNoKelp(magmaPos), Map.of(Blocks.GRAVEL, 4), 40).getFirst();
-            System.out.println("Fredodebug: ocean floor gravel: "+ gravelPos.toShortString());
+            System.out.println("Fredodebug: ocean floor gravel: " + gravelPos.toShortString());
 
         }
         if (pathExecutor.isBusy() || BotEngine.getInstance().getModule(MiscController.class).isBusy()) return;
-        if(!PlayerHelper.isNear(player,magmaPos.up(),1)) {
+        if (!PlayerHelper.isNear(player, magmaPos.up(), 1)) {
             if (InventoryHelper.countItem(player, Items.GRAVEL) >= 4 || InventoryHelper.countItem(player, Items.FLINT) >= 1 || InventoryHelper.countItem(player, Items.FLINT_AND_STEEL) == 1) {
                 System.out.println("Fredodebug: already have lighter goto magma spot");
-                pathExecutor.setGoal(magmaPos.up(),"the magmaPos");
+                pathExecutor.setGoal(magmaPos.up(), "the magmaPos");
                 return;
             } else {
                 if (gravelPos != null) {
                     if (!PlayerHelper.isNear(player, gravelPos, 1)) {
                         System.out.println("Fredodebug : set goal to the gravel Pos");
-                        pathExecutor.setGoal(gravelPos.up(),"the gravel pos");
-                    }
-                    else {
+                        pathExecutor.setGoal(gravelPos.up(), "the gravel pos");
+                    } else {
                         MiningHelper.mineAndCollect(player, Map.of(Blocks.GRAVEL, 4), 10);
                         System.out.println("Fredobug: already at gravel spot");
 
                     }
                 }
             }
-        }
-        else {
+        } else {
             globalExecutor.currentState = GlobalExecutor.GlobalState.BUILDING_TWO_BY_ONE_NETHER_PORTAL;
             System.out.println("Fredodebug: building two by one");
         }
@@ -105,6 +103,7 @@ public class PreNether {
         double minDistanceSq = Double.MAX_VALUE;
         BlockPos.Mutable mutable = new BlockPos.Mutable();
         BlockPos.Mutable probeMutable = new BlockPos.Mutable();
+        Direction currentRelevantDirection;
 
         for (int x = -radius; x <= radius; x++) {
             for (int z = -radius; z <= radius; z++) {
@@ -113,24 +112,23 @@ public class PreNether {
 
                 if (world.getBlockState(mutable).getBlock() == Blocks.MAGMA_BLOCK) {
                     boolean isTwoByOne = false;
-                    probeMutable.set(px + x, 9, pz + z);
-                    BlockState stateBelow = world.getBlockState(probeMutable);
-                    probeMutable.set(px + x, 11, pz + z);
-                    BlockState stateAbove1 = world.getBlockState(probeMutable);
 
-                    probeMutable.set(px + x, 12, pz + z);
-                    BlockState stateAbove2 = world.getBlockState(probeMutable);
+                    // 传入当前中心岩浆块的绝对坐标
+                    if (strictCheck(world, probeMutable, px + x, pz + z)) continue;
 
-                    probeMutable.set(px + x, 13, pz + z);
-                    BlockState stateAbove3 = world.getBlockState(probeMutable);
-
-                    if (!(stateBelow.getBlock() == Blocks.LAVA && stateAbove1.getBlock() == Blocks.BUBBLE_COLUMN && stateAbove2.getBlock() == Blocks.BUBBLE_COLUMN && stateAbove3.getBlock() == Blocks.BUBBLE_COLUMN)) continue;
                     BlockPos offsetPos = null;
                     for (Direction offset : new Direction[]{Direction.EAST, Direction.SOUTH, Direction.WEST, Direction.NORTH}) {
-                         offsetPos = mutable.offset(offset);
+                        offsetPos = mutable.offset(offset);
+
+                        // 传入偏移后岩浆块的绝对坐标，彻底告别强转崩溃和错位
+                        if (strictCheck(world, probeMutable, offsetPos.getX(), offsetPos.getZ())) continue;
+
                         if (world.getBlockState(offsetPos).getBlock() == Blocks.MAGMA_BLOCK && world.getBlockState(offsetPos.down()).getBlock() == Blocks.LAVA) {
-                            isTwoByOne = true;
-                            break;
+                            currentRelevantDirection = RelevantDirectionHelper.getDirectionBetween(mutable, offsetPos);
+                            if (world.getBlockState(offsetPos.offset(currentRelevantDirection)).getBlock() == Blocks.OBSIDIAN && world.getBlockState(mutable.offset(currentRelevantDirection.getOpposite())).getBlock() == Blocks.OBSIDIAN) {
+                                isTwoByOne = true;
+                                break;
+                            }
                         }
                     }
                     if (isTwoByOne) {
@@ -144,8 +142,32 @@ public class PreNether {
                 }
             }
         }
-        fromMagmaToAligned = RelevantDirectionHelper.getDirectionBetween(magmaPos,alignedMagmaPos);
+
+        // 确保找到了峡谷再计算方向，并且必须使用 closestRavine 而不是已经跑偏的 mutable
+        if (closestRavine != null && alignedMagmaPos != null) {
+            fromMagmaToAligned = RelevantDirectionHelper.getDirectionBetween(closestRavine, alignedMagmaPos);
+        }
 
         return closestRavine;
+    }
+
+    // 重构的 strictCheck：只关心要检查的具体 X 和 Z 的绝对坐标
+    private static boolean strictCheck(World world, BlockPos.Mutable probeMutable, int absX, int absZ) {
+        probeMutable.set(absX, 9, absZ);
+        BlockState stateBelow1 = world.getBlockState(probeMutable);
+        probeMutable.set(absX, 8, absZ);
+        BlockState stateBelow2 = world.getBlockState(probeMutable);
+        probeMutable.set(absX, 11, absZ);
+        BlockState stateAbove1 = world.getBlockState(probeMutable);
+        probeMutable.set(absX, 12, absZ);
+        BlockState stateAbove2 = world.getBlockState(probeMutable);
+        probeMutable.set(absX, 13, absZ);
+        BlockState stateAbove3 = world.getBlockState(probeMutable);
+
+        return !(stateBelow1.getBlock() == Blocks.LAVA &&
+                stateAbove1.getBlock() == Blocks.BUBBLE_COLUMN &&
+                stateAbove2.getBlock() == Blocks.BUBBLE_COLUMN &&
+                stateAbove3.getBlock() == Blocks.BUBBLE_COLUMN &&
+                stateBelow2.getBlock() == Blocks.LAVA);
     }
 }

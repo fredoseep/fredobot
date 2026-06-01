@@ -13,6 +13,18 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
 public class RelevantDirectionHelper {
+    public static BlockHitResult getHitResult(BlockPos targetPos) {
+        BlockHitResult result;
+        MinecraftClient client = MinecraftClient.getInstance();
+        for(Direction direction : new Direction[]{Direction.EAST,Direction.WEST,Direction.SOUTH,Direction.NORTH}){
+            if(client.world.getBlockState(targetPos.offset(direction)).getMaterial().isSolid()){
+                result = new BlockHitResult(Vec3d.ofCenter(targetPos.offset(direction)),direction.getOpposite(),targetPos.offset(direction),false);
+                return result;
+            }
+        }
+        return null;
+    }
+
     public enum RelevantDirection {
         EAST(135, 90), WEST(-45, -90), SOUTH(-135, 180), NORTH(45, 0);
 

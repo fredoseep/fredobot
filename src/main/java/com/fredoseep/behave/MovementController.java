@@ -9,11 +9,13 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.Material;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.options.KeyBinding;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.tag.FluidTags;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 
@@ -40,9 +42,7 @@ public class MovementController implements IBotModule {
     private float targetYaw;
     private float targetPitch;
 
-    private boolean isAdjustingPosture = false;
     private SimplePathfinder.MovementState lastState = SimplePathfinder.MovementState.WALKING;
-    private BlockPos lastTurningBlockPos = null;
 
     private int aimStabilizationTicks = 0;
     private int swimStateStabilizationTicks = 0;
@@ -72,8 +72,6 @@ public class MovementController implements IBotModule {
         this.boatHorizontalCollisionTicks = 0;
 
         lastState = SimplePathfinder.MovementState.WALKING;
-        isAdjustingPosture = false;
-        lastTurningBlockPos = null;
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client != null && client.options != null) {
@@ -155,19 +153,13 @@ public class MovementController implements IBotModule {
         double targetZ = targetNode.pos.getZ() + 0.5D;
         double distSq = (player.getX() - targetX) * (player.getX() - targetX) + (player.getZ() - targetZ) * (player.getZ() - targetZ);
 
-        if (targetNode.state == SimplePathfinder.MovementState.BUILDING_BRIDGE) {
-            targetYaw = player.yaw;
-        } else if (targetNode.state == SimplePathfinder.MovementState.BUILDING_PILLAR && distSq <= 0.05) {
+       if (targetNode.state == SimplePathfinder.MovementState.BUILDING_PILLAR && distSq <= 0.05) {
             targetYaw = player.yaw;
         } else {
             targetYaw = (float) Math.toDegrees(Math.atan2(-(targetX - player.getX()), targetZ - player.getZ()));
         }
 
-        if (targetNode.state == SimplePathfinder.MovementState.BUILDING_BRIDGE && lastState != SimplePathfinder.MovementState.BUILDING_BRIDGE) {
-            isAdjustingPosture = true;
-        } else if (targetNode.state != SimplePathfinder.MovementState.BUILDING_BRIDGE) {
-            isAdjustingPosture = false;
-        }
+
 
         if (targetNode.state == SimplePathfinder.MovementState.SWIMMING && lastState != SimplePathfinder.MovementState.SWIMMING && !player.isTouchingWater() && !PlayerHelper.isDrivingBoat(player)) {
             targetNode.state = SimplePathfinder.MovementState.WALKING;
@@ -314,29 +306,18 @@ public class MovementController implements IBotModule {
                 break;
 
             case BUILDING_BRIDGE:
-                targetPitch = 78.9f;
-                RelevantDirectionHelper.RelevantDirection relevantDirection = RelevantDirectionHelper.getRelevantDirection(player, targetNode.pos);
-
                 if (InventoryHelper.selectBuildingBlock(player, false)) {
-                    if (targetNode.parent != null && targetNode.parent.parent != null &&
-                            (!targetNode.pos.equals(lastTurningBlockPos)) &&
-                            RelevantDirectionHelper.getDirectionBetween(targetNode.parent.parent.pos, targetNode.parent.pos) != RelevantDirectionHelper.getDirectionBetween(targetNode.parent.pos, targetNode.pos)) {
-
-                        isAdjustingPosture = true;
-                        lastTurningBlockPos = targetNode.pos;
-                    }
-
-                    if (isAdjustingPosture) {
-                        targetYaw = adjustPostureForSpeedbridging(player, targetNode.pos, relevantDirection);
-                    } else {
-                        targetYaw = (float) relevantDirection.getSpeedbridgeYaw();
-                        pressBack = true;
-                        pressRight = true;
-                        pressUse = true;
-                        if (isApproachingEdge(MinecraftClient.getInstance().world, player, relevantDirection, 0.4)) {
-                            pressSneak = true;
+                    if (!client.world.getBlockState(targetNode.pos.down()).getMaterial().isSolid()) {
+                        BlockHitResult hitResult = RelevantDirectionHelper.getHitResult(targetNode.pos.down());
+                        if (hitResult == null) {
+                            System.out.println("Fredodebug: unable to find a block hit pos");
+                            pressForward = false;
+                            return;
                         }
+                        System.out.println("Fredodebug: bridging block placing : " + client.interactionManager.interactBlock((ClientPlayerEntity) player, client.world, Hand.MAIN_HAND, hitResult));
                     }
+                    pressForward = true;
+                    pressSprint = true;
                 }
                 break;
 
@@ -703,31 +684,7 @@ public class MovementController implements IBotModule {
         return obstacles;
     }
 
-    private float adjustPostureForSpeedbridging(PlayerEntity player, BlockPos pos, RelevantDirectionHelper.RelevantDirection relevantDirection) {
-        float adjustedYaw = (float) relevantDirection.getAdjustPostureForSpeedbridgingYaw();
-        pressSneak = true;
 
-        if (Math.abs(MathHelper.wrapDegrees(player.yaw - adjustedYaw)) > 2.0f) {
-            return adjustedYaw;
-        }
-
-        if (((relevantDirection == RelevantDirectionHelper.RelevantDirection.SOUTH || relevantDirection == RelevantDirectionHelper.RelevantDirection.NORTH) && Math.abs(player.getX() - (pos.getX() + 0.5)) <= 0.02) ||
-                ((relevantDirection == RelevantDirectionHelper.RelevantDirection.EAST || relevantDirection == RelevantDirectionHelper.RelevantDirection.WEST) && Math.abs(player.getZ() - (pos.getZ() + 0.5)) <= 0.02)) {
-            isAdjustingPosture = false;
-            return adjustedYaw;
-        }
-
-        if ((relevantDirection == RelevantDirectionHelper.RelevantDirection.SOUTH && player.getX() < pos.getX() + 0.5) ||
-                (relevantDirection == RelevantDirectionHelper.RelevantDirection.NORTH && player.getX() > pos.getX() + 0.5) ||
-                (relevantDirection == RelevantDirectionHelper.RelevantDirection.EAST && player.getZ() > pos.getZ() + 0.5) ||
-                (relevantDirection == RelevantDirectionHelper.RelevantDirection.WEST && player.getZ() < pos.getZ() + 0.5)) {
-            pressRight = true;
-        } else {
-            pressLeft = true;
-        }
-
-        return adjustedYaw;
-    }
 
     private boolean isWaterDeepEnough() {
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);

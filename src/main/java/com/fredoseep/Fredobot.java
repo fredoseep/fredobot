@@ -9,10 +9,13 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v1.CommandRegistrationCallback;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.text.LiteralText;
 import net.minecraft.util.math.BlockPos;
 
 public class Fredobot implements ModInitializer {
+
+	public static boolean isTesting = false;
 
 	@Override
 	public void onInitialize() {
@@ -23,6 +26,7 @@ public class Fredobot implements ModInitializer {
 							.then(CommandManager.argument("y", IntegerArgumentType.integer())
 									.then(CommandManager.argument("z", IntegerArgumentType.integer())
 											.executes(context -> {
+												isTesting = true;
 												int x = IntegerArgumentType.getInteger(context, "x");
 												int y = IntegerArgumentType.getInteger(context, "y");
 												int z = IntegerArgumentType.getInteger(context, "z");
@@ -57,14 +61,24 @@ public class Fredobot implements ModInitializer {
 		});
 		CommandRegistrationCallback.EVENT.register((commandDispatcher, b) -> {
 			commandDispatcher.register((CommandManager.literal("findravine")).executes(commandContext -> {
+				isTesting = true;
 				BlockPos result = PreNether.findOceanRavine(MinecraftClient.getInstance().player,MinecraftClient.getInstance().world, 100);
 				if(result == null) System.out.println("Fredodebug: No ravine found");
-				else System.out.println(result.toShortString());
+				else {
+					MinecraftClient client = MinecraftClient.getInstance();
+					IntegratedServer server = client.getServer();
+					if (server != null) {
+						server.getPlayerManager().addToOperators(client.player.getGameProfile());
+						client.player.sendChatMessage("/gamemode spectator");
+						client.player.sendChatMessage("/tp @s " + result.getX()+" "+result.getY()+" "+result.getZ());
+					}
+				}
 				return 1;
 			}));
 		});
 		CommandRegistrationCallback.EVENT.register((commandDispatcher, b) -> {
 			commandDispatcher.register((CommandManager.literal("blockplacing")).executes(commandContext -> {
+				isTesting = true;
 				Test.reset();
 				Test.currentMission = Test.CurrentTestingMission.BLOCK_PLACING;
 				return 1;
@@ -72,6 +86,7 @@ public class Fredobot implements ModInitializer {
 		});
 		CommandRegistrationCallback.EVENT.register((commandDispatcher,b)->{
 			commandDispatcher.register((CommandManager.literal("twobyone")).executes(commandContext ->{
+				isTesting = true;
 				Test.reset();
 				Test.currentMission = Test.CurrentTestingMission.PORTAL_BUILDING;
 				BotEngine.getInstance().start();
@@ -80,6 +95,7 @@ public class Fredobot implements ModInitializer {
 		});
 		CommandRegistrationCallback.EVENT.register((commandDispatcher,b)->{
 			commandDispatcher.register((CommandManager.literal("test")).executes(commandContext ->{
+				isTesting = true;
 				BotEngine.getInstance().stop();
 				Test.reset();
 				return 1;

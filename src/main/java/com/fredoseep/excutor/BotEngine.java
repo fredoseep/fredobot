@@ -1,5 +1,6 @@
 package com.fredoseep.excutor;
 
+import com.fredoseep.Fredobot;
 import com.fredoseep.Test;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
@@ -84,6 +85,7 @@ public class BotEngine {
 
         // 严格按照优先级，让每个模块执行自己的逻辑
         for (IBotModule module : modules) {
+            if(Fredobot.isTesting&&module.getName().equals("GlobalController"))continue;
             module.onTick(client, client.player);
         }
     }
