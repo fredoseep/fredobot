@@ -289,13 +289,19 @@ public class InventoryHelper {
         return counts;
     }
     public static boolean selectBuildingBlock(PlayerEntity player, boolean isGravityAllowed) {
+        return selectBuildingBlock(player, isGravityAllowed, null);
+    }
+
+    /** A planned placement must consume exactly the material charged by the search. */
+    public static boolean selectBuildingBlock(PlayerEntity player, boolean isGravityAllowed, Item required) {
         int bestSlot = -1;
         int lowestCost = Integer.MAX_VALUE;
 
         for (int i = 0; i < 36; i++) {
             if (!player.inventory.main.get(i).isEmpty()) {
+                if (required != null && player.inventory.main.get(i).getItem() != required) continue;
                 InventoryHelper.PlaceableBlock block = InventoryHelper.PlaceableBlock.getPlaceable(player.inventory.main.get(i).getItem());
-                if (block != null && !isGravityAllowed && block.isGravity()) continue;
+                if (block != null && (!isGravityAllowed && block.isGravity() || block.getCost() == Integer.MAX_VALUE)) continue;
                 if (block != null) {
                     if (block.getCost() < lowestCost) {
                         lowestCost = block.getCost();

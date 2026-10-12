@@ -193,6 +193,9 @@ public class MiningHelper {
     }
 
     public static List<BlockPos> findNearestBlocks(BlockPos blockPos, Map<Block, Integer> targetCounts, int maxRadius) {
+        return findNearestBlocks(blockPos,targetCounts,maxRadius,p -> true);
+    }
+    public static List<BlockPos> findNearestBlocks(BlockPos blockPos,Map<Block,Integer> targetCounts,int maxRadius,Predicate<BlockPos> eligible) {
         List<BlockPos> result = new ArrayList<>();
         if (targetCounts == null || targetCounts.isEmpty()) return result;
 
@@ -202,6 +205,7 @@ public class MiningHelper {
 
         // 1. 粗筛：找出范围内所有目标方块
         List<BlockPos> rawBlocks = scanBlocksInRadius(blockPos, maxRadius, remainingCounts::containsKey);
+        rawBlocks.removeIf(p -> !eligible.test(p));
 
         // 2. 路径优化 (Nearest Neighbor)
         BlockPos currentPos = blockPos;

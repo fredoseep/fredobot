@@ -6,6 +6,8 @@ import net.minecraft.enchantment.EnchantmentHelper;
 import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Item;
+import net.minecraft.item.SwordItem;
 import net.minecraft.item.Items;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
@@ -24,7 +26,7 @@ public class ToolsHelper {
         BlockState targetState = world.getBlockState(blockPos);
 
         int bestSlot = -1;
-        float bestSpeed = 1.0F;
+        int bestTicks = Integer.MAX_VALUE;
         int emptyHotbarSlot = -1;
 
         for (int i = 0; i < 36; i++) {
@@ -41,20 +43,15 @@ public class ToolsHelper {
                 continue;
             }
 
-            float speed = stack.getMiningSpeedMultiplier(targetState);
-
-            if (speed > 1.0F) {
-                int effLevel = net.minecraft.enchantment.EnchantmentHelper.getLevel(net.minecraft.enchantment.Enchantments.EFFICIENCY, stack);
-                if (effLevel > 0) {
-                    speed += (float) (effLevel * effLevel + 1);
-                }
-            }
-
-            if (speed > bestSpeed) {
-                bestSpeed = speed;
+            int ticks = estimateBreakTicks(player, targetState, stack, blockPos);
+            if (ticks < bestTicks) {
+                bestTicks = ticks;
                 bestSlot = i;
             }
         }
+
+        if (emptyHotbarSlot != -1 && estimateBreakTicks(player, targetState, ItemStack.EMPTY, blockPos) < bestTicks)
+            bestSlot = emptyHotbarSlot;
 
         if (bestSlot != -1) {
             if (bestSlot < 9) {
@@ -82,4 +79,44 @@ public class ToolsHelper {
             }
         }
     }
+    public static boolean equipPlannedTool(PlayerEntity player, BlockPos pos, Item required) {
+        BlockState state = player.getEntityWorld().getBlockState(pos);
+        int best = -1, bestTicks = Integer.MAX_VALUE;
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = player.inventory.main.get(i);
+            if (stack.getItem() != required) continue;
+            int wear = stack.getItem() instanceof SwordItem ? 2 : 1;
+            if (stack.isDamageable() && stack.getMaxDamage() - stack.getDamage() <= wear) continue;
+            int ticks = estimateBreakTicks(player, state, stack, pos);
+            if (ticks < bestTicks) { best = i; bestTicks = ticks; }
+        }
+        if (best < 0) return false;
+        if (best >= 9) {
+            int hotbar = player.inventory.selectedSlot;
+            MinecraftClient.getInstance().interactionManager.clickSlot(player.currentScreenHandler.syncId,
+                    best, hotbar, net.minecraft.screen.slot.SlotActionType.SWAP, player);
+        } else player.inventory.selectedSlot = best;
+        return true;
+    }
+
+    public static int estimateBreakTicks(PlayerEntity player, BlockState state, ItemStack stack, BlockPos pos) {
+        float speed = stack.getMiningSpeedMultiplier(state);
+        int efficiency = EnchantmentHelper.getLevel(Enchantments.EFFICIENCY, stack);
+        if (speed > 1 && efficiency > 0 && !stack.isEmpty()) speed += efficiency * efficiency + 1;
+        int haste = -1;
+        if (player.hasStatusEffect(net.minecraft.entity.effect.StatusEffects.HASTE))
+            haste = player.getStatusEffect(net.minecraft.entity.effect.StatusEffects.HASTE).getAmplifier();
+        if (player.hasStatusEffect(net.minecraft.entity.effect.StatusEffects.CONDUIT_POWER))
+            haste = Math.max(haste, player.getStatusEffect(net.minecraft.entity.effect.StatusEffects.CONDUIT_POWER).getAmplifier());
+        if (haste >= 0) speed *= 1 + .2f * (haste + 1);
+        if (player.hasStatusEffect(net.minecraft.entity.effect.StatusEffects.MINING_FATIGUE)) {
+            int level = player.getStatusEffect(net.minecraft.entity.effect.StatusEffects.MINING_FATIGUE).getAmplifier();
+            speed *= level == 0 ? .3f : level == 1 ? .09f : level == 2 ? .0027f : .00081f;
+        }
+        if (player.isSubmergedIn(net.minecraft.tag.FluidTags.WATER) && !EnchantmentHelper.hasAquaAffinity(player)) speed /= 5;
+        if (!player.isOnGround()) speed /= 5;
+        return com.fredoseep.algorithm.planning.MiningTime.ticks(state.getHardness(player.getEntityWorld(),pos), speed,
+                !state.isToolRequired() || stack.isEffectiveOn(state));
+    }
+
 }

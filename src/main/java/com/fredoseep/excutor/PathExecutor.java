@@ -1,6 +1,11 @@
 package com.fredoseep.excutor;
 
 import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.algorithm.planning.AsyncPlanner;
+import com.fredoseep.algorithm.planning.PlannerDebug;
+import com.fredoseep.algorithm.planning.PlannerSettings;
+import com.fredoseep.algorithm.planning.RetryBackoff;
+
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.behave.MovementController;
@@ -22,9 +27,54 @@ public class PathExecutor implements IBotModule {
 
     public enum State {IDLE, CALCULATING, EXECUTING}
 
+    public static boolean USE_ACTION_PLANNER = true;
+    private volatile long calculationGeneration = 0;
+    private AsyncPlanner plannerJob;
+    private PlannerDebug plannerDebug;
+    private record RequestKey(World world,BlockPos start,BlockPos goal,Set<BlockPos> blacklist) {}
+    private final RetryBackoff<RequestKey> retryBackoff=new RetryBackoff<>();
+    private RequestKey requestKey(MinecraftClient client,BlockPos goal,Set<BlockPos> blacklist) {
+        return new RequestKey(client.world,new BlockPos(client.player.getX(),client.player.getY()+.2,client.player.getZ()),
+                goal.toImmutable(),Set.copyOf(blacklist));
+    }
+    private boolean requestAllowed(BlockPos goal,Set<BlockPos> blacklist) {
+        MinecraftClient client=MinecraftClient.getInstance();
+        return client.player==null || goal==null || retryBackoff.allowed(requestKey(client,goal,blacklist),System.nanoTime()/1_000_000);
+    }
+    private boolean reportFailure(MinecraftClient client) {
+        return client.player==null || finalDestination==null || retryBackoff.fail(requestKey(client,finalDestination,currentBlacklist),System.nanoTime()/1_000_000)==1;
+    }
+    public PlannerDebug.View getSearchView() {
+        return currentState == State.CALCULATING && plannerDebug != null ? plannerDebug.view() : null;
+    }
+    /** Called once per rendered frame, including vanilla F3+Esc pause frames. */
+    public void pumpPlanner(MinecraftClient client) {
+        AsyncPlanner job=plannerJob;
+        if(job==null) return;
+        job.pump(client);
+        if(job.ready()) {
+            plannerJob=null;
+            List<SimplePathfinder.Node> path=job.result();
+            if(path.isEmpty()) {
+                boolean notify=reportFailure(client);
+                stop();
+                if(notify && client.player!=null) client.player.sendMessage(new LiteralText("§c[Bot] 寻路失败，相同起点和目标将退避重试，详情见 [ActionPlanner] 日志。"),false);
+            } else {
+                retryBackoff.clear();
+                currentPath=path;currentPathUsesActionPlanner=true; currentPathIndex=0; currentState=State.EXECUTING;
+            }
+        } else if(job.failed() || job.cancelled()) {
+            boolean notify=!job.failed() || reportFailure(client);
+            plannerJob=null;
+            stop();
+            if(notify && client.player!=null) client.player.sendMessage(new LiteralText(job.failed()
+                    ? "§c[Bot] 寻路出错，详情见 [ActionPlanner] 日志。" : "§e[Bot] 寻路已取消。"),false);
+        }
+    }
     private State currentState = State.IDLE;
     private TempMissionType tempMissionType = TempMissionType.IDLE;
     private List<SimplePathfinder.Node> currentPath = null;
+    private boolean currentPathUsesActionPlanner;
     private int currentPathIndex = 0;
     private BlockPos finalDestination = null;
     public Stack<BlockPos> suspendedDestinations = new Stack<>();
@@ -55,14 +105,16 @@ public class PathExecutor implements IBotModule {
 
     @Override
     public void onEnable() {
+        retryBackoff.clear();
         stop();
     }
 
     @Override
     public void onDisable() {
+        retryBackoff.clear();
         stop();
         this.suspendedDestinations.clear();
-        this.currentBlacklist.clear();
+        this.currentBlacklist = Collections.emptySet();
         this.finalDestination = null;
     }
 
@@ -122,6 +174,12 @@ public class PathExecutor implements IBotModule {
 
     // 支持黑名单的 setGoal
     public void setGoal(BlockPos destination, Set<BlockPos> blacklist, String targetType) {
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(!client.isOnThread()) {
+            BlockPos immutable=destination.toImmutable();
+            Set<BlockPos> copy=blacklist==null?Collections.emptySet():Set.copyOf(blacklist);
+            client.execute(() -> setGoal(immutable,copy,targetType)); return;
+        }
         this.suspendedDestinations.clear();
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
         startNewPath(destination, targetType);
@@ -138,6 +196,7 @@ public class PathExecutor implements IBotModule {
 
     // 支持黑名单的 setTemporaryGoal
     public void setTemporaryGoal(BlockPos tempDestination, TempMissionType type, Set<BlockPos> blacklist) {
+        if(!requestAllowed(tempDestination,blacklist==null?Collections.emptySet():blacklist))return;
         tempMissionType = type;
         if (this.finalDestination != null) {
             this.suspendedDestinations.push(this.finalDestination);
@@ -159,6 +218,9 @@ public class PathExecutor implements IBotModule {
     }
 
     private void startNewPath(BlockPos dest, String targetType) {
+        MinecraftClient dispatchClient=MinecraftClient.getInstance();
+        if(!dispatchClient.isOnThread()) { dispatchClient.execute(() -> startNewPath(dest,targetType)); return; }
+        if(!requestAllowed(dest,currentBlacklist))return;
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -169,7 +231,8 @@ public class PathExecutor implements IBotModule {
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
-            client.player.sendMessage(new LiteralText("§e[Bot] 发起寻路计算... -> " + dest.toShortString()), false);
+            if(retryBackoff.failures(requestKey(client,dest,currentBlacklist))==0)
+                client.player.sendMessage(new LiteralText("§e[Bot] 发起寻路计算... -> " + dest.toShortString()), false);
             System.out.println("Fredodebug: setGoalType: " + targetType);
             BlockPos startPos = new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ());
             recalculatePath(startPos);
@@ -181,6 +244,10 @@ public class PathExecutor implements IBotModule {
     }
 
     public void stop() {
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(!client.isOnThread()) { client.execute(this::stop); return; }
+        calculationGeneration++;
+        if(plannerJob!=null) { plannerJob.cancel(client,"executor stopped"); plannerJob=null; }
         this.currentState = State.IDLE;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -191,29 +258,49 @@ public class PathExecutor implements IBotModule {
         resetMovementKeys();
     }
 
-    private void recalculatePath(BlockPos startPos) {
-        if (finalDestination == null) return;
-        currentState = State.CALCULATING;
+    public void replanFromPlayer() {
         MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null && finalDestination != null)
+            recalculatePath(new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ()));
+    }
 
-        CompletableFuture.supplyAsync(() -> {
-            return SimplePathfinder.findPath(client.world, client.player, startPos, finalDestination, currentBlacklist, 0);
-        }).thenAccept(path -> {
-            client.execute(() -> {
-                if (path.isEmpty()) {
-                    stop();
-                    client.player.sendMessage(new LiteralText("§c[Bot] 寻路失败，前方无路可走！"), false);
-                } else {
-                    this.currentPath = path;
-                    this.currentPathIndex = 0;
-                    this.currentState = State.EXECUTING;
-                    checkAndStartNextCalculation();
-                }
-            });
-        });
+    private void recalculatePath(BlockPos startPos) {
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(!client.isOnThread()) { client.execute(() -> recalculatePath(startPos)); return; }
+        if(finalDestination==null || client.world==null || client.player==null) return;
+        if(!requestAllowed(finalDestination,currentBlacklist)){stop();return;}
+        if(plannerJob!=null) { plannerJob.cancel(client,"superseded by new goal/replan"); plannerJob=null; }
+        currentState=State.CALCULATING; currentPath=null; currentPathIndex=0; resetMovementKeys();
+        final long generation=++calculationGeneration;
+        final BlockPos destination=finalDestination.toImmutable();
+        final Set<BlockPos> blacklist=Set.copyOf(currentBlacklist);
+        if(USE_ACTION_PLANNER) {
+            try {
+                plannerJob=new AsyncPlanner(client,destination,blacklist,PlannerSettings.DEFAULT,generation);
+                plannerDebug=plannerJob.debug;
+            } catch(RuntimeException error) {
+                boolean notify=reportFailure(client);
+                error.printStackTrace(); stop();
+                if(notify)client.player.sendMessage(new LiteralText("§c[Bot] 无法启动寻路，详情见日志。"),false);
+            }
+            return;
+        }
+        final World capturedWorld=client.world;
+        final PlayerEntity capturedPlayer=client.player;
+        CompletableFuture.supplyAsync(() -> SimplePathfinder.findPath(capturedWorld,capturedPlayer,startPos,destination,blacklist,0))
+                .thenAccept(path -> client.execute(() -> {
+                    if(generation!=calculationGeneration || client.world!=capturedWorld || client.player!=capturedPlayer) return;
+                    if(path.isEmpty()) stop();
+                    else { currentPath=path;currentPathUsesActionPlanner=false; currentPathIndex=0; currentState=State.EXECUTING; checkAndStartNextCalculation(); }
+                })).exceptionally(error -> {
+                    client.execute(() -> { if(generation==calculationGeneration) { error.printStackTrace(); stop(); } }); return null;
+                });
     }
 
     private void checkAndStartNextCalculation() {
+        // A partial route is replanned after execution, with actual inventory and actual edits.
+        // Searching ahead against an unchanged world would double-spend blocks and forget excavations.
+        if (USE_ACTION_PLANNER) return;
         if (currentPath == null || currentPath.isEmpty() || isCalculatingNext) return;
 
         BlockPos currentEnd = currentPath.get(currentPath.size() - 1).pos;
@@ -255,7 +342,10 @@ public class PathExecutor implements IBotModule {
             stuckCheckTicks = 0;
         } else {
             if (currentPathIndex < currentPath.size()) {
-                if (currentPath.get(currentPathIndex).state == SimplePathfinder.MovementState.MINING) {
+                SimplePathfinder.Node stuckNode = currentPath.get(currentPathIndex);
+                if (stuckNode.state == SimplePathfinder.MovementState.MINING
+                        || (stuckNode.plannedAction != null && stuckNode.plannedAction.breaks.stream().anyMatch(
+                                p -> !client.world.getBlockState(p).getCollisionShape(client.world, p).isEmpty()))) {
                     isMining = true;
                 }
             }
@@ -439,6 +529,7 @@ public class PathExecutor implements IBotModule {
         }
 
         int lookAheadLimit = Math.min(currentPathIndex + 5, currentPath.size());
+        if (currentPathUsesActionPlanner) lookAheadLimit = Math.min(currentPathIndex + 1, currentPath.size());
         int furthestReachedIndex = -1;
 
         for (int i = currentPathIndex; i < lookAheadLimit; i++) {
@@ -483,6 +574,26 @@ public class PathExecutor implements IBotModule {
             );
 
             boolean isPhysicallyReached = lowerBody.intersects(nodeBox);
+            if (node.plannedAction != null) {
+                // A node cannot be skipped while any explicit prerequisite remains unfinished.
+                for (BlockPos obstacle : node.plannedAction.breaks) {
+                    if (!world.getBlockState(obstacle).getCollisionShape(world, obstacle).isEmpty()) isPhysicallyReached = false;
+                }
+                if (node.plannedAction.material != null && world.getBlockState(node.pos.down()).getMaterial().isReplaceable())
+                    isPhysicallyReached = false;
+                // Loose fall tolerances must not mark an unlanded jump/fall as complete.
+                if (node.state == SimplePathfinder.MovementState.FALLING || node.state == SimplePathfinder.MovementState.JUMPING_AIR
+                        || node.state == SimplePathfinder.MovementState.JUMPING_UP)
+                    isPhysicallyReached &= Math.abs(player.getY() - node.pos.getY()) < 0.3 && (player.isOnGround() || player.isTouchingWater());
+            }
+
+            if (node.plannedAction != null && node.plannedAction.isShoreExit()) {
+                isPhysicallyReached &= player.isOnGround() && Math.abs(player.getY() - node.pos.getY()) < 0.3;
+            }
+            if(node.plannedAction!=null && node.plannedAction.isSurfaceRise()) {
+                isPhysicallyReached &= player.getY()>=node.pos.getY()-.25
+                        && !player.isSubmergedIn(net.minecraft.tag.FluidTags.WATER);
+            }
 
             if (i == currentPath.size() - 1) {
                 double dx = player.getX() - (node.pos.getX() + 0.5);
@@ -496,7 +607,8 @@ public class PathExecutor implements IBotModule {
                     allowedDistSq = 0.03;
                 }
 
-                isPhysicallyReached = (dx * dx + dz * dz <= allowedDistSq) && (dy <= 0.5);
+                // Keep planned break/place/landing prerequisites even at the final mission node.
+                isPhysicallyReached &= (dx * dx + dz * dz <= allowedDistSq) && (dy <= 0.5);
             }
 
             boolean isPathBlocked = false;
@@ -585,6 +697,10 @@ public class PathExecutor implements IBotModule {
             stop();
             return;
         }
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(plannerJob!=null){plannerJob.cancel(client,"custom micro-command takes over");plannerJob=null;}
+        calculationGeneration++;
+        currentPathUsesActionPlanner=false;
 
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -593,14 +709,13 @@ public class PathExecutor implements IBotModule {
         this.consecutiveStuckCount = 0;
         resetMovementKeys();
 
-        this.currentPath = customPath;
+        this.currentPath = new java.util.ArrayList<>(customPath);
         this.currentPathIndex = 0;
 
         this.finalDestination = customPath.get(customPath.size() - 1).pos;
 
         this.currentState = State.EXECUTING;
 
-        MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             client.player.sendMessage(new LiteralText("§d[Bot] 收到微操指令，已接管自定义路线！"), false);
         }

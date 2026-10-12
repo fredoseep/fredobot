@@ -1,6 +1,7 @@
 package com.fredoseep.render;
 
 import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.algorithm.planning.PlannerDebug;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.PathExecutor;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -22,6 +23,9 @@ public class PathRenderer {
         PathExecutor executor = BotEngine.getInstance().getModule(PathExecutor.class);
         if (executor == null) return;
 
+        MinecraftClient renderClient = MinecraftClient.getInstance();
+        executor.pumpPlanner(renderClient);
+        renderSearch(matrices, camera, executor.getSearchView());
         List<SimplePathfinder.Node> path = executor.getCurrentPath();
         if (path == null || path.isEmpty()) return;
 
@@ -123,6 +127,34 @@ public class PathRenderer {
         RenderSystem.enableTexture();
         RenderSystem.disableBlend();
         RenderSystem.popMatrix();
+    }
+
+    private static void renderSearch(MatrixStack matrices,Camera camera,PlannerDebug.View view) {
+        if(view==null || (view.currentPath.isEmpty() && view.closestPath.isEmpty())) return;
+        RenderSystem.pushMatrix(); RenderSystem.enableBlend(); RenderSystem.disableTexture(); RenderSystem.disableDepthTest();
+        try {
+            Tessellator tessellator=Tessellator.getInstance(); BufferBuilder buffer=tessellator.getBuffer();
+            Matrix4f matrix=matrices.peek().getModel(); Vec3d eye=camera.getPos();
+            buffer.begin(1,VertexFormats.POSITION_COLOR);
+            searchLine(buffer,matrix,eye,view.currentPath,0.0f,.8f,1.0f,.7f); // cyan: path to currently expanded state
+            searchLine(buffer,matrix,eye,view.closestPath,.2f,1.0f,.2f,1.0f); // green: closest candidate
+            tessellator.draw();
+            if(!view.currentPath.isEmpty()) {
+                BlockPos p=view.currentPath.get(view.currentPath.size()-1);
+                buffer.begin(7,VertexFormats.POSITION_COLOR);
+                drawCube(buffer,matrix,p.getX()+.5-eye.x,p.getY()+.5-eye.y,p.getZ()+.5-eye.z,.16f,1,.8f,0,1);
+                tessellator.draw();
+            }
+        } finally {
+            RenderSystem.enableDepthTest(); RenderSystem.enableTexture(); RenderSystem.disableBlend(); RenderSystem.popMatrix();
+        }
+    }
+    private static void searchLine(BufferBuilder buffer,Matrix4f matrix,Vec3d eye,List<BlockPos> path,float r,float g,float b,float a) {
+        for(int i=1;i<path.size();i++) {
+            BlockPos p=path.get(i-1),q=path.get(i);
+            buffer.vertex(matrix,(float)(p.getX()+.5-eye.x),(float)(p.getY()+.5-eye.y),(float)(p.getZ()+.5-eye.z)).color(r,g,b,a).next();
+            buffer.vertex(matrix,(float)(q.getX()+.5-eye.x),(float)(q.getY()+.5-eye.y),(float)(q.getZ()+.5-eye.z)).color(r,g,b,a).next();
+        }
     }
 
     /**

@@ -494,6 +494,9 @@ public class SimplePathfinder {
         public double costFromStart, estimatedCostToEnd, totalCost;
         public MovementState state;
         public int blocksUsed;
+        // Explicit prerequisites from the new planner; null retains legacy behavior.
+        public com.fredoseep.algorithm.planning.ActionPathfinder.Action plannedAction;
+        public double actionTicks, materialPenalty;
 
         public Node(BlockPos pos, BlockPos extraPos, Node parent, double costFromStart, double estimatedCostToEnd, MovementState state, int blocksUsed) {
             this.pos = pos;

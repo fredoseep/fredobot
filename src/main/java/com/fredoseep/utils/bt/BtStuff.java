@@ -396,6 +396,10 @@ public class BtStuff {
     public static void lightUpTNT(PlayerEntity player) {
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+        if(player==null || !player.isAlive() || MinecraftClient.getInstance().world==null) {
+            if(pathExecutor!=null)pathExecutor.stop();
+            return;
+        }
 
         switch (tntState) {
             case INIT:
@@ -578,20 +582,10 @@ public class BtStuff {
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
-                        ItemEntity nearestDrop = drops.get(0);
-                        double minDist = player.squaredDistanceTo(nearestDrop);
-                        for (ItemEntity drop : drops) {
-                            Item item = drop.getStack().getItem();
-                            if(item == Items.STICK|| ItemCategory.isSapling(item)){
-                                drops.remove(drop);
-                                continue;
-                            }
-                            double d = player.squaredDistanceTo(drop);
-                            if (d < minDist) {
-                                minDist = d;
-                                nearestDrop = drop;
-                            }
-                        }
+                        ItemEntity nearestDrop=TntActions.nearest(drops,drop -> drop.isAlive() && !drop.getStack().isEmpty()
+                                && drop.getStack().getItem()!=Items.STICK && !ItemCategory.isSapling(drop.getStack().getItem()),
+                                drop -> player.squaredDistanceTo(drop));
+                        if(nearestDrop==null){tntState=TNTState.DONE;break;}
                         BlockPos safePos = new BlockPos(nearestDrop.getX(), nearestDrop.getY() + 0.5, nearestDrop.getZ());
                         pathExecutor.setGoal(safePos, "drop pos");
                     }
@@ -603,13 +597,7 @@ public class BtStuff {
     }
 
     private static List<SimplePathfinder.Node> calcTakeCoverBehave(BlockPos coverPos) {
-        List<SimplePathfinder.Node> result = new ArrayList<>();
-        result.add(new SimplePathfinder.Node(coverPos.up(2), null, null, 0, 0, SimplePathfinder.MovementState.WALKING, 0));
-        result.add(new SimplePathfinder.Node(coverPos.up(1), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
-        result.add(new SimplePathfinder.Node(coverPos, null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
-        result.add(new SimplePathfinder.Node(coverPos.down(1), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
-        result.add(new SimplePathfinder.Node(coverPos.down(2), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
-        return result;
+        return TntActions.coverPath(coverPos);
     }
 
     public static void btStaff(ClientPlayerEntity player) {

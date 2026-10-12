@@ -58,7 +58,14 @@ public class PreNether {
                 }
             }
             if (magmaPos == null) return;
-            gravelPos = MiningHelper.findNearestBlocks(BtStuff.oceanFloorNoKelp(magmaPos), Map.of(Blocks.GRAVEL, 4), 40).getFirst();
+            World world=MinecraftClient.getInstance().world;
+            var exposed=MiningHelper.findNearestBlocks(BtStuff.oceanFloorNoKelp(magmaPos),Map.of(Blocks.GRAVEL,4),40,
+                    p -> exposedGravelApproach(world,p));
+            if(exposed.isEmpty()) {
+                System.out.println("FredoBot: no exposed gravel with a clear approach near the ravine; reset instead of pathing into buried sand");
+                globalExecutor.resetWorld();return;
+            }
+            gravelPos=exposed.getFirst();
             System.out.println("Fredodebug: ocean floor gravel: " + gravelPos.toShortString());
 
         }
@@ -70,7 +77,8 @@ public class PreNether {
                 return;
             } else {
                 if (gravelPos != null) {
-                    if (!PlayerHelper.isNear(player, gravelPos, 1)) {
+                    if(!exposedGravelApproach(MinecraftClient.getInstance().world,gravelPos)) {magmaPos=null;gravelPos=null;return;}
+                    if (!PlayerHelper.isNear(player, gravelPos.up(), 1)) {
                         System.out.println("Fredodebug : set goal to the gravel Pos");
                         pathExecutor.setGoal(gravelPos.up(), "the gravel pos");
                     } else {
@@ -84,6 +92,15 @@ public class PreNether {
             globalExecutor.currentState = GlobalExecutor.GlobalState.BUILDING_TWO_BY_ONE_NETHER_PORTAL;
             System.out.println("Fredodebug: building two by one");
         }
+    }
+
+    private static boolean exposedGravelApproach(World world,BlockPos gravel) {
+        BlockPos feet=gravel.up(),head=gravel.up(2);
+        return world.getChunkManager().isChunkLoaded(gravel.getX()>>4,gravel.getZ()>>4)
+                && world.getBlockState(feet).getCollisionShape(world,feet).isEmpty()
+                && world.getBlockState(head).getCollisionShape(world,head).isEmpty()
+                && !world.getBlockState(feet).getFluidState().isIn(net.minecraft.tag.FluidTags.LAVA)
+                && !world.getBlockState(head).getFluidState().isIn(net.minecraft.tag.FluidTags.LAVA);
     }
 
     /**
