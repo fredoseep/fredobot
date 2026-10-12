@@ -7,6 +7,7 @@ import com.fredoseep.behave.MiscController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
+import com.fredoseep.utils.ItemCategory;
 import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
 import com.fredoseep.utils.player.PlayerHelper;
@@ -17,6 +18,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.*;
 import net.minecraft.screen.CraftingScreenHandler;
@@ -547,9 +549,6 @@ public class BtStuff {
                         }
                     }
                     if (coverPos == null) coverPos = TNTSetupPos.east();
-                    Set<BlockPos> blacklist = new HashSet<>();
-                    blacklist.add(TNTSetupPos);
-                    blacklist.add(TNTSetupPos.down());
                     List<SimplePathfinder.Node> takeCoverBehave = calcTakeCoverBehave(coverPos);
                     pathExecutor.executeCustomPath(takeCoverBehave);
                 }
@@ -575,13 +574,18 @@ public class BtStuff {
                 break;
 
             case COLLECT_LOOT:
-                List<net.minecraft.entity.ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(net.minecraft.entity.ItemEntity.class, new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0), e -> true);
+                List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0), e -> true);
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
-                        net.minecraft.entity.ItemEntity nearestDrop = drops.get(0);
+                        ItemEntity nearestDrop = drops.get(0);
                         double minDist = player.squaredDistanceTo(nearestDrop);
-                        for (net.minecraft.entity.ItemEntity drop : drops) {
+                        for (ItemEntity drop : drops) {
+                            Item item = drop.getStack().getItem();
+                            if(item == Items.STICK|| ItemCategory.isSapling(item)){
+                                drops.remove(drop);
+                                continue;
+                            }
                             double d = player.squaredDistanceTo(drop);
                             if (d < minDist) {
                                 minDist = d;

@@ -43,7 +43,7 @@ public class InventoryHelper {
 
     /**
      * @param player
-     * @return ui index of the boat
+     * @return ui index of the targetItem
      */
     public static int findItemSlot(PlayerEntity player, Item targetItem) {
         if (player == null || player.inventory == null || targetItem == null) return -1;

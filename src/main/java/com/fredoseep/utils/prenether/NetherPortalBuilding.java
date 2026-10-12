@@ -1,12 +1,17 @@
 package com.fredoseep.utils.prenether;
 
+import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.behave.CraftingController;
+import com.fredoseep.behave.MiscController;
 import com.fredoseep.behave.MovementController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
+import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
 import com.fredoseep.utils.player.RelevantDirectionHelper;
 import com.fredoseep.utils.player.ToolsHelper;
+import net.fabricmc.loader.impl.lib.sat4j.core.Vec;
 import net.minecraft.block.AbstractBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -52,6 +57,8 @@ public class NetherPortalBuilding {
     private static float grabStoredRealPitch = 0f;
     private static BlockPos activeGrabPos = null;           // 【新增】
 
+    private static final PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+
     public static void resetState() {
         currentTBOState = TwoByOneBuildState.IDLE;
         topHitPosHitResult = null;
@@ -72,7 +79,7 @@ public class NetherPortalBuilding {
     }
 
     public enum TwoByOneBuildState {
-        IDLE, CLEARING_AREA, SETTING_UP_HIT_POINT, SETTING_UP_DOOR, ADJUSTING_STANDING_POINT, BREAKING_FIRST_MAGMA_BLOCK, QUADRUPLE_GRAB, SEALING_SPACE, FIRST_WATER_MOVE, SECOND_WATER_MOVE,PENDING, THIRD_WATER_MOVE, FOURTH_WATER_MOVE, CLEARING_SPACE, FORCING_LIGHTER, NEXT;
+        IDLE, CLEARING_AREA, SETTING_UP_HIT_POINT, SETTING_UP_DOOR, ADJUSTING_STANDING_POINT, BREAKING_FIRST_MAGMA_BLOCK, QUADRUPLE_GRAB, SEALING_SPACE, FIRST_WATER_MOVE, SECOND_WATER_MOVE,PENDING, THIRD_WATER_MOVE, FOURTH_WATER_MOVE, CLEARING_SPACE,POSITIONING,FORCING_FLINT, CRAFTING_LIGHTER, NEXT, LIGHTING;
     }
 
     public static TwoByOneBuildState currentTBOState = TwoByOneBuildState.IDLE;
@@ -376,25 +383,94 @@ public class NetherPortalBuilding {
                     client.interactionManager.updateBlockBreakingProgress(PreNether.alignedMagmaPos, Direction.UP);
                     return;
                 }
-                currentTBOState = TwoByOneBuildState.FORCING_LIGHTER;
+                currentTBOState = TwoByOneBuildState.POSITIONING;
                 break;
-            case FORCING_LIGHTER:
-                KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),true);
+            case POSITIONING:
+                System.out.println("Fredodebug: player's y level: "+ client.player.getY());
+                if(InventoryHelper.findItemSlot(client.player,Items.FLINT)!=-1||hasLighter()){
+                    currentTBOState = TwoByOneBuildState.CRAFTING_LIGHTER;
+                    break;
+                }
+                if(pathExecutor.isBusy())return;
+                if(client.player.getY()<10&&client.player.isOnGround()){
+                    System.out.println("Frededbug: positioning is finished");
+                    currentTBOState = TwoByOneBuildState.FORCING_FLINT;
+                    break;
+                }
+                List<SimplePathfinder.Node> positioningBehave = calcEnteringPositioning(PreNether.magmaPos);
+                pathExecutor.executeCustomPath(positioningBehave);
+                break;
+            case FORCING_FLINT:
+                if(InventoryHelper.findItemSlot(client.player,Items.FLINT)!=-1||hasLighter()){
+                    currentTBOState = TwoByOneBuildState.CRAFTING_LIGHTER;
+                    break;
+                }
+                if(InventoryHelper.findItemSlot(client.player,Items.GRAVEL)==-1){
+                    System.out.println("Fredodebug: don't have gravel somehow");
+                    globalExecutor.resetWorld();
+                    return;
+                }
+                if(client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock()==Blocks.GRAVEL){
+                    ToolsHelper.equipBestTool(client.player,PreNether.alignedMagmaPos.down(),true);
+                    client.interactionManager.updateBlockBreakingProgress(PreNether.alignedMagmaPos.down(),Direction.UP);
+                    break;
+                }
+                InventoryHelper.moveItemToHotbar(client,client.player,Items.GRAVEL,6);
+                client.player.inventory.selectedSlot = 6;
+                BlockHitResult blockHitResult1 = new BlockHitResult(Vec3d.ofCenter(PreNether.alignedMagmaPos.down(2)),Direction.UP,PreNether.alignedMagmaPos,false);
+                client.interactionManager.interactBlock(client.player,client.world,Hand.MAIN_HAND,blockHitResult1);
+                break;
+            case CRAFTING_LIGHTER:
+                if(hasLighter()){
+                    currentTBOState = TwoByOneBuildState.LIGHTING;
+                    break;
+                }
+                CraftingController flintNSteelCrafter = BotEngine.getInstance().getModule(CraftingController.class);
+                if (flintNSteelCrafter.isBusy() || pathExecutor.isBusy() || BotEngine.getInstance().getModule(MiscController.class).isBusy())
+                    return;
+
+                if (flintNSteelCrafter.isFailed()) {
+                    System.out.println("Fredodebug: reset because fail to craft flint&steel");
+                    flintNSteelCrafter.resetStatus();
+                    globalExecutor.resetWorld();
+                    return;
+                }
+                if(flintNSteelCrafter.isDone()){
+                    currentTBOState = TwoByOneBuildState.LIGHTING;
+                    break;
+                }
+                else flintNSteelCrafter.startCrafting(Items.FLINT_AND_STEEL,1);
+                break;
+
+            case LIGHTING:
                 InventoryHelper.moveItemToHotbar(client, client.player, Items.FLINT_AND_STEEL, 8);
                 client.player.inventory.selectedSlot = 8;
-                BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(magmaSideMiddleFragmentPos), PreNether.fromMagmaToAligned, magmaSideMiddleFragmentPos, false);
-                client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult);
+                BlockHitResult blockHitResult2 = new BlockHitResult(Vec3d.ofCenter(magmaSideMiddleFragmentPos), PreNether.fromMagmaToAligned, magmaSideMiddleFragmentPos, false);
+                client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult2);
                 if (client.world.getBlockState(PreNether.magmaPos).getBlock() == Blocks.NETHER_PORTAL) {
                     currentTBOState = TwoByOneBuildState.NEXT;
                 }
                 break;
             case NEXT:
-                KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),false);
                 break;
         }
     }
+    
+    private static boolean hasLighter(){
+        MinecraftClient client = MinecraftClient.getInstance();
+        return InventoryHelper.findItemSlot(client.player, Items.FLINT_AND_STEEL) != -1 || InventoryHelper.findItemSlot(client.player, Items.FIRE_CHARGE) != -1;
+    }
+    
 
-    private static void tryPlaceDoor(PlayerEntity player, BlockPos basePos, Direction doorOutFacingDirection, Direction hingeOffsetDirection) {
+    private static List<SimplePathfinder.Node> calcEnteringPositioning(BlockPos magmaPos) {
+        List<SimplePathfinder.Node> result = new ArrayList<>();
+        result.add(new SimplePathfinder.Node(magmaPos.up(1), null, null, 0, 0, SimplePathfinder.MovementState.WALKING, 0));
+        result.add(new SimplePathfinder.Node(magmaPos, null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
+        result.add(new SimplePathfinder.Node(magmaPos.down(1), null, null, 0, 0, SimplePathfinder.MovementState.MINING, 0));
+        return result;
+    }
+
+        private static void tryPlaceDoor(PlayerEntity player, BlockPos basePos, Direction doorOutFacingDirection, Direction hingeOffsetDirection) {
         System.out.println("Fredodebug: hOffset: X: " + hingeOffsetDirection.getOffsetX() + " Z: " + hingeOffsetDirection.getOffsetZ() + " dOffset: X: " + doorOutFacingDirection.getOffsetX() + " Z: " + doorOutFacingDirection.getOffsetZ());
         double hitX = basePos.getX() + 0.5 + hingeOffsetDirection.getOffsetX() * 0.25;
         double hitY = basePos.getY() + 1.0;

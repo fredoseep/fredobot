@@ -3,6 +3,7 @@ package com.fredoseep.behave;
 import com.fredoseep.utils.player.InventoryHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.BoatItem;
 import net.minecraft.item.Item;
 
 public class CraftingController implements IBotModule {
@@ -65,16 +66,16 @@ public class CraftingController implements IBotModule {
         switch (state) {
             case SEND_PACKET:
 
-                if (currentTarget instanceof net.minecraft.item.BoatItem) {
+                if (currentTarget instanceof BoatItem) {
                     manualCraftBoat(client, player, currentTarget);
-                    waitTicks = 10; // 给服务端一点时间计算并吐出产物
+                    waitTicks = 1; // 给服务端一点时间计算并吐出产物
                     state = CraftState.WAITING_FOR_RESULT; // 完美衔接你之前的等待之眼状态
                     break;
                 }
 
                 // 常规物品依然走配方书极速发包 (门、镐子等)
                 if (InventoryHelper.requestSearchCrafting(player, currentTarget, currentTimes)) {
-                    waitTicks = 40;
+                    waitTicks = 1;
                     state = CraftState.WAITING_FOR_RESULT;
                 } else {
                     System.out.println("FredoBot [合成模块]: 失败！材料不足或未解锁配方 -> " + currentTarget.toString());
@@ -88,13 +89,13 @@ public class CraftingController implements IBotModule {
                         player.currentScreenHandler.getSlot(0).hasStack()) {
 
                     state = CraftState.COLLECTING;
-                    waitTicks = 2;
+                    waitTicks = 1;
                 } else {
                     waitTicks--;
                     if (waitTicks <= 0) {
                         System.out.println("FredoBot [合成模块]: 警告！等待产物出现超时 (服务器延迟过高)，强行尝试收割 -> " + currentTarget.toString());
                         state = CraftState.COLLECTING;
-                        waitTicks = 2;
+                        waitTicks = 1;
                     }
                 }
                 break;
