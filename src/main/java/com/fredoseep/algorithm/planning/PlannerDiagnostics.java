@@ -40,6 +40,7 @@ public final class PlannerDiagnostics {
     private volatile long expanded;
     private long previousExpanded;
     private volatile String ioFailure;
+    private volatile String stuckState;
     public PlannerDiagnostics(Path gameDirectory,long job,Thread clientThread,Consumer<Throwable> failureHandler) {
         this(gameDirectory,job,clientThread,failureHandler,true);
     }
@@ -115,6 +116,11 @@ public final class PlannerDiagnostics {
     private static long gcTime(){long n=0;for(var b:ManagementFactory.getGarbageCollectorMXBeans())n+=Math.max(0,b.getCollectionTime());return n;}
     private static long gcCount(){long n=0;for(var b:ManagementFactory.getGarbageCollectorMXBeans())n+=Math.max(0,b.getCollectionCount());return n;}
     public void error(Throwable error){sessionError=true;StringWriter stack=new StringWriter();error.printStackTrace(new PrintWriter(stack));event("error",Map.of("phase",phase,"operation",operation,"stack",stack.toString()));}
+    /** One immutable client-captured state; writer emits a readable separate file before archiving. */
+    public void stuckDump(Object state) {
+        stuckState=json(state);sessionError=true;
+        event("stuck_dump",Map.of("file","stuck.json","schema","fredobot-stuck-v1"));
+    }
     /** Worker-only export; publishing the final filename atomically prevents incomplete snapshots entering the zip. */
     public void exportTerrain(TerrainWriter action) throws Exception {
         synchronized(exportLock){exportTerrainLocked(action);}
@@ -148,6 +154,7 @@ public final class PlannerDiagnostics {
                 writer.write(json(record("session_end",Map.of("reason",closeReason,"dropped_events",dropped.get()))));writer.newLine();
             }
             synchronized(exportLock) {
+                if(stuckState!=null) Files.writeString(directory.resolve("stuck.json"),stuckState,StandardCharsets.UTF_8);
                 if(sessionError || keepNormal)DiagnosticRetention.archive(directory,archive);
                 DiagnosticRetention.removeSession(directory);
             }

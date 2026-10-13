@@ -158,6 +158,9 @@ public final class AsyncPlanner {
             }
             if(plan.status!=SearchEngine.Status.COMPLETE)
                 throw new IllegalStateException("Refusing incomplete search result: "+plan.status);
+            debug.phase("SMOOTHING","steps="+plan.steps.size());
+            plan=ActionPathfinder.smooth(snapshot,plan,this::isCancelled);
+            debug.phase("ROUTE_READY","steps="+plan.steps.size()+" ticks="+plan.ticks+" optimal="+plan.optimal+" reason="+plan.termination);
             for(var edge:plan.steps) debug.action(edge.action.kind+" -> "+edge.next.pos.toShortString()+
                     " break="+edge.action.breaks+" material="+edge.action.material+" ticks="+edge.ticks+" price="+edge.penalty);
             if(isCancelled()) return;

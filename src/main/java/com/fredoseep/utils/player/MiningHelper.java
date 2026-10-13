@@ -205,7 +205,11 @@ public class MiningHelper {
 
         // 1. 粗筛：找出范围内所有目标方块
         List<BlockPos> rawBlocks = scanBlocksInRadius(blockPos, maxRadius, remainingCounts::containsKey);
-        rawBlocks.removeIf(p -> !eligible.test(p));
+        var client=MinecraftClient.getInstance();
+        var misc=BotEngine.getInstance().getModule(MiscController.class);
+        Predicate<BlockPos> leafEligible=client.player==null || misc==null?p -> true:misc.leafTargetFilter(client,client.player);
+        int before=rawBlocks.size();rawBlocks.removeIf(p -> !eligible.test(p) || !leafEligible.test(p));
+        if(before>rawBlocks.size())System.out.println("FredoBot: TARGET_BATCH_FILTER excluded="+(before-rawBlocks.size()));
 
         // 2. 路径优化 (Nearest Neighbor)
         BlockPos currentPos = blockPos;
@@ -234,6 +238,13 @@ public class MiningHelper {
 
         // 1. 粗筛：找出范围内所有目标方块
         List<BlockPos> rawBlocks = scanBlocksInRadius(blockPos, maxRadius, targetBlocks::contains);
+        var client=MinecraftClient.getInstance();var misc=BotEngine.getInstance().getModule(MiscController.class);
+        if(client.player!=null && misc!=null) {
+            Predicate<BlockPos> eligible=misc.leafTargetFilter(client,client.player);
+            int before=rawBlocks.size();rawBlocks.removeIf(p -> !eligible.test(p));
+            if(before>rawBlocks.size())System.out.println("FredoBot: LEAF_BATCH_SKIP count="+(before-rawBlocks.size())+" reason=NO_GROUND_MINING_STANCE");
+        }
+
 
         // 2. 路径优化：始终寻找距离上一个方块最近的节点
         BlockPos currentPos = blockPos;
@@ -326,6 +337,10 @@ public class MiningHelper {
         MiningHelper.blockToMine.addAll(blockPath);
 
         if (MiningHelper.blockToMine.isEmpty()) {
+            if(!targetTypes.isEmpty() && targetTypes.stream().allMatch(b -> b.isIn(net.minecraft.tag.BlockTags.LEAVES))) {
+                System.out.println("FredoBot: LEAF_BATCH_EMPTY no reachable leaves in scan radius; continue without resetting world");
+                MiningHelper.currentTargetBlocks.clear();return;
+            }
             System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetTypes.toString());
             MiningHelper.currentTargetBlocks.clear();
             BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();

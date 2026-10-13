@@ -578,7 +578,8 @@ public class BtStuff {
                 break;
 
             case COLLECT_LOOT:
-                List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0), e -> true);
+                List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0),
+                        e -> e.isAlive() && !e.getStack().isEmpty() && !ItemCategory.isSapling(e.getStack().getItem()));
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {

@@ -69,7 +69,7 @@ public final class DiagnosticRetention {
         Path temporary=archive.resolveSibling(archive.getFileName()+".part");
         try {
         try(ZipOutputStream zip=new ZipOutputStream(Files.newOutputStream(temporary))) {
-            for(String name:List.of("events.jsonl","terrain.json.gz")) {
+            for(String name:List.of("events.jsonl","terrain.json.gz","stuck.json")) {
                 Path file=directory.resolve(name);if(!Files.isRegularFile(file,LinkOption.NOFOLLOW_LINKS))continue;
                 zip.putNextEntry(new ZipEntry(name));Files.copy(file,zip);zip.closeEntry();
             }
@@ -78,7 +78,7 @@ public final class DiagnosticRetention {
         }finally{Files.deleteIfExists(temporary);}
     }
     static void removeSession(Path directory)throws IOException {
-        for(String name:List.of("events.jsonl","terrain.json.gz","terrain.json.gz.part"))Files.deleteIfExists(directory.resolve(name));
+        for(String name:List.of("events.jsonl","terrain.json.gz","terrain.json.gz.part","stuck.json"))Files.deleteIfExists(directory.resolve(name));
         // Unknown user files are preserved, including their containing directory.
         try(var entries=Files.list(directory)){if(entries.findAny().isEmpty())Files.deleteIfExists(directory);}
     }

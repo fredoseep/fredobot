@@ -25,6 +25,7 @@ public final class ActionPathfinder {
         public final Item material;
         public boolean isShoreExit() { return "shore exit".equals(kind); }
         public boolean isSurfaceRise() { return "surface rise".equals(kind); }
+        public boolean isSmoothWalk() { return "smooth walk".equals(kind); }
         Action(String kind, SimplePathfinder.MovementState movement, List<BlockPos> breaks, List<Item> tools, Item material) {
             this.kind = kind; this.movement = movement;
             this.breaks = List.copyOf(breaks); this.tools = List.copyOf(tools); this.material = material;
@@ -61,6 +62,7 @@ public final class ActionPathfinder {
         final boolean clear, support, water, lava, replaceable, gravity;
         final int[] dryTicks, wetTicks, airDryTicks, airWetTicks;
         final boolean wearsTool;
+        List<net.minecraft.util.math.Box> doorPanels=null;
         String label="air/unknown";
         BlockPos example;
         Runnable prepareMining; // Runs only on the planner worker, before graph expansion.
@@ -85,6 +87,7 @@ public final class ActionPathfinder {
         final boolean startGroundContact;
         volatile boolean costsPrepared;
         PlannerDiagnostics diagnostics;
+        List<Object> buildingMaterialCandidates=List.of();
         Snapshot(Map<BlockPos, Cell> cells, List<Material> materials, List<Tool> tools, Set<BlockPos> blacklist,
                  State start, BlockPos goal, PlannerSettings settings) {
             this(cells,materials,tools,blacklist,start,goal,settings,false);
@@ -119,6 +122,7 @@ public final class ActionPathfinder {
         final List<Tool> tools = new ArrayList<>();
         final List<Integer> durability = new ArrayList<>(), counts = new ArrayList<>();
         final List<Material> materials = new ArrayList<>();
+        final List<Object> buildingMaterialCandidates = new ArrayList<>();
         final Map<BlockState,Cell> prototypes = new HashMap<>();
         final Map<BlockPos,Cell> cells = new HashMap<>();
         final float effect;
@@ -160,12 +164,17 @@ public final class ActionPathfinder {
             }
             effect=multiplier; aqua=EnchantmentHelper.hasAquaAffinity(player);
             for(InventoryHelper.PlaceableBlock pb:InventoryHelper.PlaceableBlock.values()) {
-                int price=pb.getCost(); if(price==Integer.MAX_VALUE) continue;
                 int count=0;
                 for(ItemStack stack:player.inventory.main) if(stack.getItem()==pb.getItem()) count+=stack.getCount();
                 if(count==0) continue;
+                int price=pb.getCost();
+                Map<String,Object> candidate=new LinkedHashMap<>();candidate.put("item",pb.getItem().toString());
+                candidate.put("inventory_count",count);candidate.put("unit_price",price);
+                buildingMaterialCandidates.add(candidate);
+                if(price==Integer.MAX_VALUE){candidate.put("decision","EXCLUDED_BY_PRICE_POLICY");continue;}
                 Cell c=captureCell(world,start,((BlockItem)pb.getItem()).getBlock().getDefaultState(),tools,effect,aqua);
-                if(!c.support) continue;
+                if(!c.support){candidate.put("decision","NOT_SAFE_FULL_SUPPORT");continue;}
+                candidate.put("decision","ACCEPTED");
                 materials.add(new Material(pb.getItem(),pb.isGravity(),price*this.settings.materialPriceTicks,c)); counts.add(count);
             }
         }
@@ -194,7 +203,8 @@ public final class ActionPathfinder {
         public long captured() { return captured; }
         public Snapshot finish() {
             if(!finished) throw new IllegalStateException("Capture is incomplete");
-            return new Snapshot(cells,materials,tools,blacklist,new State(start,Map.of(),counts,durability),goal,settings,startGroundContact);
+            Snapshot snapshot=new Snapshot(cells,materials,tools,blacklist,new State(start,Map.of(),counts,durability),goal,settings,startGroundContact);
+            snapshot.buildingMaterialCandidates=List.copyOf(buildingMaterialCandidates);return snapshot;
         }
     }
     public static CaptureSession beginCapture(World world,PlayerEntity player,BlockPos start,BlockPos goal,
@@ -233,12 +243,16 @@ public final class ActionPathfinder {
         boolean hazard = lava || block == Blocks.MAGMA_BLOCK || block == Blocks.CACTUS || block == Blocks.FIRE
                 || block == Blocks.SOUL_FIRE || block == Blocks.CAMPFIRE || block == Blocks.SOUL_CAMPFIRE
                 || block == Blocks.SWEET_BERRY_BUSH;
-        boolean clear = !hazard && b.getCollisionShape(world,p).isEmpty();
+        var shape=b.getCollisionShape(world,p);
+        List<net.minecraft.util.math.Box> doorPanels=block instanceof DoorBlock?shape.getBoundingBoxes():null;
+        boolean clear = !hazard && (shape.isEmpty() || (doorPanels!=null
+                && DoorClearance.clear(doorPanels,.5,0,.5,.5,0,.5)));
         boolean support = !hazard && Block.isShapeFullCube(b.getCollisionShape(world,p));
         float hardness = b.getHardness(world,p);
         int[] dry = new int[tools.size()], wet = new int[tools.size()], airDry = new int[tools.size()], airWet = new int[tools.size()];
         Cell cell=new Cell(clear,support,water,lava,b.getMaterial().isReplaceable(),block instanceof FallingBlock,
                 dry,wet,airDry,airWet,hardness>0);
+        cell.doorPanels=doorPanels==null?null:List.copyOf(doorPanels);
         cell.label=b.toString();cell.example=p.toImmutable();
         // Only immutable block/tool metadata is captured here. No World/Player reference enters the worker.
         cell.prepareMining=() -> {
@@ -295,6 +309,33 @@ public final class ActionPathfinder {
         searchPass(snapshot,"RESULT",result);
         return result;
     }
+    private static Iterable<SearchEngine.Edge<State,Action>> allowed(Snapshot w,State from,Iterable<SearchEngine.Edge<State,Action>> edges) {
+        List<SearchEngine.Edge<State,Action>> result=new ArrayList<>();
+        for(var edge:edges) {
+            BlockPos p=edge.next.pos;
+            if(p.getY()<w.settings.minimumRouteY || (!w.settings.allowWorldEdits && !edge.next.edits.equals(w.start.edits)))continue;
+            int span=Math.max(Math.abs(p.getX()-from.pos.getX()),Math.max(Math.abs(p.getY()-from.pos.getY()),Math.abs(p.getZ()-from.pos.getZ())));
+            boolean crossesDoor=false;
+            for(int i=1;i<span;i++) {
+                BlockPos middle=new BlockPos(from.pos.getX()+(p.getX()-from.pos.getX())*i/span,
+                        from.pos.getY()+(p.getY()-from.pos.getY())*i/span,from.pos.getZ()+(p.getZ()-from.pos.getZ())*i/span);
+                if(w.cell(edge.next,middle).doorPanels!=null || w.cell(edge.next,middle.up()).doorPanels!=null){crossesDoor=true;break;}
+            }
+            if(crossesDoor)continue; // Do not jump/fall through a door without a level entry sweep.
+            Cell old=w.cell(from,from.pos),next=w.cell(edge.next,p);
+            if(old.doorPanels!=null || next.doorPanels!=null) {
+                if(from.pos.getY()!=p.getY())continue; // Enter/exit the breathing pocket from its sides.
+                List<net.minecraft.util.math.Box> panels=new ArrayList<>();
+                for(BlockPos base:List.of(from.pos,p))for(int y=0;y<=1;y++) {
+                    BlockPos q=base.up(y);Cell c=w.cell(edge.next,q);
+                    if(c.doorPanels!=null)for(var b:c.doorPanels)panels.add(b.offset(q.getX(),q.getY(),q.getZ()));
+                }
+                if(!DoorClearance.clear(panels,from.pos.getX()+.5,from.pos.getY(),from.pos.getZ()+.5,p.getX()+.5,p.getY(),p.getZ()+.5))continue;
+            }
+            result.add(edge);
+        }
+        return result;
+    }
     private static List<SearchEngine.Edge<State,Action>> unchanged(Iterable<SearchEngine.Edge<State,Action>> edges,State start) {
         List<SearchEngine.Edge<State,Action>> result=new ArrayList<>();
         for(var edge:edges)if(edge.next.edits.equals(start.edits))result.add(edge);
@@ -318,6 +359,7 @@ public final class ActionPathfinder {
         info.put("distance_blocks",distance(snapshot.start.pos,snapshot.goal));info.put("captured_cells",snapshot.cells.size());
         info.put("tools",toolDiagnostic(snapshot));info.put("material_counts",snapshot.start.materials);info.put("tool_durability",snapshot.start.durability);
         info.put("settings",settingsDiagnostic(snapshot.settings));
+        info.put("building_material_candidates",snapshot.buildingMaterialCandidates);
         info.put("start_ground_contact",snapshot.startGroundContact);info.put("start_body_clear",snapshot.body(snapshot.start,snapshot.start.pos));
         info.put("start_foot",cellDiagnostic(snapshot.cell(snapshot.start,snapshot.start.pos)));
         info.put("start_head",cellDiagnostic(snapshot.cell(snapshot.start,snapshot.start.pos.up())));
@@ -339,12 +381,15 @@ public final class ActionPathfinder {
     private static Map<String,Object> cellDiagnostic(Cell c) {
         Map<String,Object> cell=new LinkedHashMap<>();cell.put("label",c.label);cell.put("example",c.example==null?null:coordinates(c.example));
         cell.put("clear",c.clear);cell.put("support",c.support);cell.put("water",c.water);cell.put("lava",c.lava);
-        cell.put("replaceable",c.replaceable);cell.put("gravity",c.gravity);cell.put("wears_tool",c.wearsTool);return cell;
+        cell.put("door",c.doorPanels!=null);cell.put("replaceable",c.replaceable);cell.put("gravity",c.gravity);cell.put("wears_tool",c.wearsTool);return cell;
     }
     private static Map<String,Object> settingsDiagnostic(PlannerSettings s) {
         Map<String,Object> m=new LinkedHashMap<>();m.put("margin",s.margin);m.put("max_expanded",s.maxExpanded);m.put("max_edits",s.maxEdits);
         m.put("optimization_millis",s.optimizationMillis);m.put("optimization_max_known",s.optimizationMaxKnown);m.put("search_weight",s.searchWeight);
         m.put("keep_successful_diagnostics",s.keepSuccessfulDiagnostics);m.put("diagnostic_error_retention",50);
+        m.put("minimum_route_y",s.minimumRouteY);m.put("allow_world_edits",s.allowWorldEdits);
+        m.put("stuck_window_ticks",s.stuckWindowTicks);m.put("stuck_min_movement",s.stuckMinMovement);
+        m.put("smooth_paths",s.smoothPaths);m.put("max_smooth_distance",s.maxSmoothDistance);
         m.put("walk_ticks",s.walkTicks);m.put("swim_ticks",s.swimTicks);m.put("jump_ticks",s.jumpTicks);m.put("bridge_ticks",s.bridgeTicks);
         m.put("pillar_ticks",s.pillarTicks);m.put("aim_ticks",s.aimTicks);m.put("break_delay_ticks",s.breakDelayTicks);
         m.put("material_price_ticks",s.materialPriceTicks);m.put("dijkstra",s.dijkstra);m.put("prefer_vertical_surfacing",s.preferVerticalSurfacing);return m;
@@ -451,7 +496,7 @@ public final class ActionPathfinder {
         boolean clear(BlockPos p) {
             State s = at(from.pos); Cell c = w.cell(s,p);
             if (c.clear) return true;
-            if (w.blacklist.contains(p) || c.lava || c.dryTicks.length == 0) return false;
+            if (c.doorPanels!=null || !w.settings.allowWorldEdits || w.blacklist.contains(p) || c.lava || c.dryTicks.length == 0) return false;
             // Falling sand/gravel or fluid entering the hole need a dynamic simulation, not a fake air edit.
             for (int[] d : DIRS) if (w.cell(s,p.add(d[0],0,d[1])).lava) return false;
             Cell above = w.cell(s,p.up());
@@ -493,9 +538,9 @@ public final class ActionPathfinder {
         public GroundActions(Snapshot w) { this.w=w; }
         public Iterable<SearchEngine.Edge<State,Action>> expand(State s) {
             List<SearchEngine.Edge<State,Action>> out=new ArrayList<>();
-            if (w.cell(s,s.pos).water) return out;
+            if (w.cell(s,s.pos).water) return allowed(w,s,out);
             if (!w.grounded(s)) {
-                fall(s,s.pos,out); return out;
+                fall(s,s.pos,out); return allowed(w,s,out);
             }
             for (int[] d:DIRS) {
                 BlockPos p=s.pos.add(d[0],0,d[1]);
@@ -540,7 +585,7 @@ public final class ActionPathfinder {
             Builder dig=new Builder(w,s);
             if (w.cell(s,s.pos.down(2)).support && dig.clear(s.pos.down()))
                 out.add(dig.edge(s.pos.down(),"dig down",SimplePathfinder.MovementState.FALLING,5));
-            return out;
+            return allowed(w,s,out);
         }
         void fall(State s,BlockPos column,List<SearchEngine.Edge<State,Action>> out) {
             for(int drop=1;drop<=32;drop++) {
@@ -561,7 +606,7 @@ public final class ActionPathfinder {
         public WaterActions(Snapshot w) { this.w=w; }
         public Iterable<SearchEngine.Edge<State,Action>> expand(State s) {
             List<SearchEngine.Edge<State,Action>> out=new ArrayList<>();
-            if(!w.cell(s,s.pos).water) return out;
+            if(!w.cell(s,s.pos).water) return allowed(w,s,out);
             if(w.settings.preferVerticalSurfacing && s.pos.getY()<w.goal.getY() && w.cell(s,s.pos.up()).water
                     && !w.cell(s,w.goal.up()).water) {
                 // A surfacing mission prefers the current water column when its whole
@@ -571,7 +616,7 @@ public final class ActionPathfinder {
                     if(!w.body(s,p) || !w.cell(s,p).water)break;
                     if(!w.cell(s,p.up()).water) {
                         if(p.getY()<=w.goal.getY()+1)
-                            return List.of(new Builder(w,s).edge(p,"surface rise",SimplePathfinder.MovementState.SWIMMING,rise*w.settings.swimTicks));
+                            return allowed(w,s,List.of(new Builder(w,s).edge(p,"surface rise",SimplePathfinder.MovementState.SWIMMING,rise*w.settings.swimTicks)));
                         break;
                     }
                 }
@@ -594,13 +639,47 @@ public final class ActionPathfinder {
                 if(w.cell(next,p).water || w.cell(next,p.down()).support)
                     out.add(b.edge(p,"swim/mine",w.cell(next,p).water ? waterMode(w,next,p) : SimplePathfinder.MovementState.WALKING,w.settings.swimTicks));
             }
-            return out;
+            return allowed(w,s,out);
         }
     }
     private static SimplePathfinder.MovementState waterMode(Snapshot w,State s,BlockPos p) {
         return w.cell(s,p.up()).water ? SimplePathfinder.MovementState.DIVING : SimplePathfinder.MovementState.SWIMMING;
     }
-    /** No smoothing: removing an intermediate action can erase a required break/place. */
+    /** Merge only level, effect-free walking. World-edit actions remain explicit barriers. */
+    public static SearchEngine.Result<State,Action> smooth(Snapshot snapshot,SearchEngine.Result<State,Action> plan,BooleanSupplier cancelled) {
+        if(!snapshot.settings.smoothPaths || plan.status!=SearchEngine.Status.COMPLETE)return plan;
+        List<SearchEngine.Edge<State,Action>> steps=new ArrayList<>();State from=snapshot.start;boolean changed=false;
+        for(int i=0;i<plan.steps.size();) {
+            if(cancelled.getAsBoolean())throw new java.util.concurrent.CancellationException();
+            int best=i;
+            for(int j=i;j<plan.steps.size();j++) {
+                var edge=plan.steps.get(j);Action a=edge.action;
+                if(a.movement!=SimplePathfinder.MovementState.WALKING || !a.breaks.isEmpty() || a.material!=null || edge.penalty!=0
+                        || (!a.kind.equals("walk/mine") && !a.isSmoothWalk()) || edge.next.pos.getY()!=from.pos.getY()
+                        || !edge.next.edits.equals(from.edits) || !edge.next.materials.equals(from.materials)
+                        || !edge.next.durability.equals(from.durability))break;
+                double length=Math.hypot(edge.next.pos.getX()-from.pos.getX(),edge.next.pos.getZ()-from.pos.getZ());
+                if(length>snapshot.settings.maxSmoothDistance)break;
+                State view=from;
+                boolean safe=WalkClearance.clear(from.pos.getX()+.5,from.pos.getZ()+.5,edge.next.pos.getX()+.5,edge.next.pos.getZ()+.5,from.pos.getY(),
+                        p -> {Cell c=snapshot.cell(view,p);return c.clear && c.doorPanels==null && !c.water && !c.lava;},
+                        p -> snapshot.cell(view,p).support,cancelled);
+                if(safe)best=j;
+            }
+            var end=plan.steps.get(best);
+            if(best>i) {
+                double length=Math.hypot(end.next.pos.getX()-from.pos.getX(),end.next.pos.getZ()-from.pos.getZ());
+                steps.add(new SearchEngine.Edge<>(end.next,new Action("smooth walk",SimplePathfinder.MovementState.WALKING,List.of(),List.of(),null),
+                        Math.max(1,length*snapshot.settings.walkTicks),0));changed=true;
+            } else steps.add(end);
+            from=end.next;i=best+1;
+            if(snapshot.diagnostics!=null)snapshot.diagnostics.operation("smooth path","worker",Map.of("processed_edges",i,"total_edges",plan.steps.size()));
+        }
+        double ticks=0,penalty=0;for(var edge:steps){ticks+=edge.ticks;penalty+=edge.penalty;}
+        if(snapshot.diagnostics!=null)snapshot.diagnostics.event("smoothing",Map.of("before",plan.steps.size(),"after",steps.size(),"ticks_before",plan.ticks,"ticks_after",ticks));
+        return changed?new SearchEngine.Result<>(SearchEngine.Status.COMPLETE,steps,ticks,penalty,plan.expanded,false,"SMOOTHED_ROUTE"):plan;
+    }
+    /** Prerequisites have been preserved before converting the final execution route. */
     public static List<SimplePathfinder.Node> toNodes(Snapshot snapshot,SearchEngine.Result<State,Action> result) {
         List<SimplePathfinder.Node> path=new ArrayList<>();
         SimplePathfinder.Node parent=new SimplePathfinder.Node(snapshot.start.pos,null,null,0,0,SimplePathfinder.MovementState.WALKING,0);

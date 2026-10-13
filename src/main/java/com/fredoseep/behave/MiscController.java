@@ -45,6 +45,19 @@ public class MiscController implements IBotModule {
     private BoatEntity boatEntity;
     private int pickupCoolDownTick = 0;
     private int pathingFailTicks = 0;
+    private int miningSearchFailures;
+    private long observedSearchFailureSerial;
+    private BlockPos lastMiningApproach;
+    private final Set<BlockPos> failedMiningApproaches=new java.util.HashSet<>();
+    private ItemEntity leafLogDrop;
+    private BlockPos lastLeafApproach;
+    private long leafFailureSerial;
+    private int leafApproachFailures;
+    private boolean uwGravelMission;
+    private com.fredoseep.algorithm.planning.UnderwaterGravelWork uwGravelWork;
+    private BlockPos uwIssuedTarget;
+    private int leafSettleTicks;
+    private final Set<BlockPos> failedLeafApproaches=new java.util.HashSet<>();
     private boolean gotOffBoat = false;
     private final Set<Item> validDrops = new java.util.HashSet<>();
     private final Set<Entity> unreachableEntities = new java.util.HashSet<>();
@@ -76,14 +89,82 @@ public class MiscController implements IBotModule {
     public void startTask(MiscType type, BlockPos pos) {
         this.currentTask = type;
         this.targetPos = pos;
+        var taskClient=MinecraftClient.getInstance();
+        uwGravelMission=taskClient.world!=null && pos!=null && taskClient.world.getBlockState(pos).getBlock()==Blocks.GRAVEL;
+        uwGravelWork=new com.fredoseep.algorithm.planning.UnderwaterGravelWork();uwIssuedTarget=null;
+        leafLogDrop=null;lastLeafApproach=null;failedLeafApproaches.clear();leafSettleTicks=0;
+        miningSearchFailures=0;lastMiningApproach=null;failedMiningApproaches.clear();
+        PathExecutor executor=BotEngine.getInstance().getModule(PathExecutor.class);
+        observedSearchFailureSerial=executor==null?0:executor.getSearchFailureSerial();
+        if(type==MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP) {
+            var client=MinecraftClient.getInstance();
+            if(client.world!=null && client.player!=null)pruneHighLeaves(client,client.player);
+        }
         System.out.println("FredoBot: 开始杂项任务 -> " + type.name());
     }
 
     public boolean isBusy() {
         return currentTask != null;
     }
+    private void resetMiningApproachFailures() {
+        miningSearchFailures=0;lastMiningApproach=null;failedMiningApproaches.clear();
+        PathExecutor executor=BotEngine.getInstance().getModule(PathExecutor.class);
+        observedSearchFailureSerial=executor==null?0:executor.getSearchFailureSerial();
+    }
+    private BlockPos findMiningApproach(MinecraftClient client,PlayerEntity player,BlockPos target) {
+        return findMiningApproach(client,player,target,failedMiningApproaches);
+    }
+    private boolean isMiningStance(MinecraftClient client,BlockPos p,Set<BlockPos> excluded,boolean avoidTrees) {
+        var world=client.world;
+        if(excluded.contains(p) || p.getY()<0 || p.getY()>254
+                || !world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4))return false;
+        BlockState support=world.getBlockState(p.down());
+        if((avoidTrees && (support.isIn(BlockTags.LEAVES) || support.isIn(BlockTags.LOGS)))
+                || support.getBlock()==Blocks.MAGMA_BLOCK
+                || !Block.isShapeFullCube(support.getCollisionShape(world,p.down())))return false;
+        BlockState feet=world.getBlockState(p),head=world.getBlockState(p.up());
+        return feet.getFluidState().isEmpty() && head.getFluidState().isEmpty()
+                && feet.getBlock()!=Blocks.FIRE && feet.getBlock()!=Blocks.SOUL_FIRE
+                && head.getBlock()!=Blocks.FIRE && head.getBlock()!=Blocks.SOUL_FIRE
+                && feet.getCollisionShape(world,p).isEmpty() && head.getCollisionShape(world,p.up()).isEmpty();
+    }
+    private boolean miningVisible(MinecraftClient client,PlayerEntity player,Vec3d eye,BlockPos target) {
+        var hit=client.world.rayTrace(new net.minecraft.world.RayTraceContext(eye,Vec3d.ofCenter(target),
+                net.minecraft.world.RayTraceContext.ShapeType.OUTLINE,net.minecraft.world.RayTraceContext.FluidHandling.NONE,player));
+        return hit.getType()==net.minecraft.util.hit.HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
+    }
+    private BlockPos findMiningApproach(MinecraftClient client,PlayerEntity player,BlockPos target,Set<BlockPos> excluded) {
+        return findMiningApproach(client,player,target,excluded,false);
+    }
+    private BlockPos findMiningApproach(MinecraftClient client,PlayerEntity player,BlockPos target,Set<BlockPos> excluded,boolean avoidTrees) {
+        return com.fredoseep.algorithm.planning.MiningApproach.select(target,player.getBlockPos(),player.getStandingEyeHeight(),
+                p -> isMiningStance(client,p,excluded,avoidTrees),p -> miningVisible(client,player,
+                        new Vec3d(p.getX()+.5,p.getY()+player.getStandingEyeHeight(),p.getZ()+.5),target));
+    }
+    /** One batch shares stance probes; high leaves are excluded before quota selection or any A* request. */
+    public java.util.function.Predicate<BlockPos> leafTargetFilter(MinecraftClient client,PlayerEntity player) {
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        var policy=new com.fredoseep.algorithm.planning.LeafTargetPolicy(player.getBlockPos(),player.getStandingEyeHeight(),
+                p -> isMiningStance(client,p,java.util.Set.of(),true),
+                p -> eye.squaredDistanceTo(Vec3d.ofCenter(p))<=20 && miningVisible(client,player,eye,p),
+                (stance,target) -> miningVisible(client,player,new Vec3d(stance.getX()+.5,
+                        stance.getY()+player.getStandingEyeHeight(),stance.getZ()+.5),target));
+        return p -> !client.world.getBlockState(p).isIn(BlockTags.LEAVES) || policy.test(p);
+    }
+    private void pruneHighLeaves(MinecraftClient client,PlayerEntity player) {
+        var eligible=leafTargetFilter(client,player);int before=MiningHelper.blockToMine.size();
+        MiningHelper.blockToMine.removeIf(p -> !eligible.test(p));
+        boolean skipCurrent=targetPos!=null && !eligible.test(targetPos);
+        int skipped=before-MiningHelper.blockToMine.size()+(skipCurrent?1:0);
+        if(skipped>0)System.out.println("FredoBot: LEAF_BATCH_SKIP count="+skipped+" reason=NO_GROUND_MINING_STANCE; no path search requested");
+        if(skipCurrent) {
+            if(!MiningHelper.blockToMine.isEmpty())targetPos=MiningHelper.blockToMine.remove(0);
+            else {targetPos=player.getBlockPos();pickupCoolDownTick=1;}
+        }
+    }
 
     public void stopTask() {
+        leafLogDrop=null;lastLeafApproach=null;failedLeafApproaches.clear();leafSettleTicks=0;
         if(currentTask==MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP)MiningHelper.currentTargetBlocks.clear();
         this.currentTask = null;
         this.targetPos = null;
@@ -93,6 +174,7 @@ public class MiscController implements IBotModule {
         targetEntity = null;
         pathingFailTicks = 0;
         uwPhase = UwDoorPhase.NONE;
+        uwGravelMission=false;uwGravelWork=null;uwIssuedTarget=null;
         doorPos = null;
         uwWaitTicks = 0;
         validDrops.clear();
@@ -230,21 +312,20 @@ public class MiscController implements IBotModule {
 
 
                     if (isUnderwater && doorSlot != -1) {
-                        BlockPos bestSpot = null;
-                        if (client.world.getBlockState(targetPos.up()).getMaterial().isLiquid() &&
-                                isSafeDoorFoundation(client, targetPos)) {
-                            bestSpot = targetPos.up();
-                        } else {
-                            for (net.minecraft.util.math.Direction d : net.minecraft.util.math.Direction.Type.HORIZONTAL) {
-                                BlockPos p = targetPos.up().offset(d);
-                                if (client.world.getBlockState(p).getMaterial().isLiquid() &&
-                                        isSafeDoorFoundation(client, p.down()) &&
-                                        !p.down().equals(targetPos)) {
-                                    bestSpot = p;
-                                    break;
+                        BlockPos bestSpot=null,fallbackSpot=null;
+                        for(net.minecraft.util.math.Direction d:net.minecraft.util.math.Direction.Type.HORIZONTAL) {
+                            BlockPos p=targetPos.up().offset(d);
+                            if(client.world.getBlockState(p).getMaterial().isLiquid() && isSafeDoorFoundation(client,p.down())
+                                    && !p.down().equals(targetPos)) {
+                                if(fallbackSpot==null)fallbackSpot=p;
+                                if(!MiningHelper.blockToMine.contains(p.down()) && client.world.getBlockState(p.down()).getBlock()!=Blocks.GRAVEL) {
+                                    bestSpot=p;break;
                                 }
                             }
                         }
+                        if(bestSpot==null)bestSpot=fallbackSpot;
+                        if(bestSpot==null && client.world.getBlockState(targetPos.up()).getMaterial().isLiquid()
+                                && isSafeDoorFoundation(client,targetPos))bestSpot=targetPos.up();
 
                         if (bestSpot != null) {
                             doorPos = bestSpot;
@@ -254,6 +335,24 @@ public class MiscController implements IBotModule {
                     }
                 }
                 if (uwPhase != UwDoorPhase.NONE) {
+                    if(uwGravelMission && (uwPhase==UwDoorPhase.MINE_TARGETS || uwPhase==UwDoorPhase.COLLECT_DROPS
+                            || uwPhase==UwDoorPhase.COLLECT_FINAL_DROPS)) {
+                        boolean flint=InventoryHelper.countItem(player,Items.FLINT)>0 || !client.world.getEntities(ItemEntity.class,
+                                new Box(doorPos).expand(6),e -> e.isAlive() && !e.getStack().isEmpty() && e.getStack().getItem()==Items.FLINT).isEmpty();
+                        uwGravelWork.observeFlint(flint);
+                        if(uwIssuedTarget!=null && (client.world.getBlockState(uwIssuedTarget).isAir()
+                                || client.world.getBlockState(uwIssuedTarget).getMaterial().isLiquid())) {
+                            uwGravelWork.broken();uwIssuedTarget=null;uwWaitTicks=2;
+                        }
+                        if(uwPhase==UwDoorPhase.MINE_TARGETS && uwGravelWork.collect()) {
+                            resetKeys();uwPhase=UwDoorPhase.COLLECT_DROPS;pickupCoolDownTick=0;
+                            System.out.println("FredoBot: UW_COLLECT mined="+uwGravelWork.count()+" flint="+uwGravelWork.hasFlint());
+                        }
+                        if(uwPhase==UwDoorPhase.COLLECT_DROPS && uwGravelWork.hasFlint() && targetEntity instanceof ItemEntity
+                                && ((ItemEntity)targetEntity).getStack().getItem()!=Items.FLINT) {
+                            if(pathExecutor.isBusy())pathExecutor.stop();targetEntity=null;
+                        }
+                    }
                     switch (uwPhase) {
                         case SINK_AND_CLEAR:
                             if (player.squaredDistanceTo(Vec3d.ofBottomCenter(doorPos)) > 0.65 || !player.isOnGround()) {
@@ -291,33 +390,32 @@ public class MiscController implements IBotModule {
                             return;
                         case MINE_TARGETS:
                             if (uwWaitTicks > 0) { uwWaitTicks--; return; }
-                            if (player.squaredDistanceTo(Vec3d.ofBottomCenter(doorPos)) > 0.65 || !player.isOnGround()) {
+                            if (!insideBreathingDoor(player)) {
                                 if (!pathExecutor.isBusy()) {
-                                    // 强制发起一次进门寻路！
-                                    pathExecutor.setGoal(doorPos,"door Pos");
+                                    resetKeys();
+                                    pathExecutor.trySetGoal(doorPos,"breathing door");
                                     System.out.println("FredoBot [水下作战]: 门已放置，正在进入氧气舱...");
                                 }
                                 return; // 没站进门里之前，坚决不准挥镐子！
                             }
                             if (pathExecutor.isBusy()) pathExecutor.stop();
+                            resetKeys();
 
-                            if (player.squaredDistanceTo(Vec3d.ofCenter(targetPos)) > 25.0) {
-                                uwPhase = UwDoorPhase.RETURN_AND_BREAK;
-                                return;
+                            Vec3d doorEye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+                            boolean targetStillSolid=!client.world.getBlockState(targetPos).isAir()
+                                    && !client.world.getBlockState(targetPos).getMaterial().isLiquid();
+                            if (targetStillSolid && (doorEye.squaredDistanceTo(Vec3d.ofCenter(targetPos))>20
+                                    || !miningVisible(client,player,doorEye,targetPos))) {
+                                advanceDoorTarget(client,player);return;
                             }
 
                             if (targetPos.equals(doorPos) || targetPos.equals(doorPos.down()) || targetPos.equals(doorPos.up())) {
-                                if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
-                                    targetPos = MiningHelper.blockToMine.remove(0); // 暂不挖地基，拿队列里的下一个去挖
-                                } else {
-                                    uwPhase = UwDoorPhase.COLLECT_DROPS;
-                                    pickupCoolDownTick = 0;
-                                }
-                                return;
+                                advanceDoorTarget(client,player);return;
                             }
 
                             boolean isMined = client.world.getBlockState(targetPos).isAir() || client.world.getBlockState(targetPos).getMaterial().isLiquid();
                             if (!isMined) {
+                                if(uwGravelMission)uwIssuedTarget=targetPos;
                                 // 正常挖掘周边目标
                                 registerValidDrop(client.world.getBlockState(targetPos).getBlock());
 
@@ -329,26 +427,24 @@ public class MiscController implements IBotModule {
                                 client.interactionManager.updateBlockBreakingProgress(targetPos, net.minecraft.util.math.Direction.UP);
                                 if (!player.handSwinging) player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                             } else {
-                                // 当前周边方块挖完，切换下一个
-                                if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
-                                    targetPos = MiningHelper.blockToMine.remove(0);
-                                } else {
-                                    uwPhase = UwDoorPhase.COLLECT_DROPS;
-                                    pickupCoolDownTick = 0;
-                                }
+                                advanceDoorTarget(client,player);
                             }
                             return;
 
                         case COLLECT_DROPS:
+                            if(uwGravelMission && uwGravelWork.hasFlint() && InventoryHelper.countItem(player,Items.FLINT)>0) {
+                                if(pathExecutor.isBusy())pathExecutor.stop();targetEntity=null;
+                                uwPhase=UwDoorPhase.RETURN_AND_BREAK;return;
+                            }
                             // 【核心修复】：防止疯狂发包重算！
                             if (pathExecutor.isBusy()) return;
-                            pickupCoolDownTick++;
+                            resetKeys();pickupCoolDownTick++;
 
                             net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(doorPos).expand(15.0, 10.0, 15.0);
                             java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
                                     net.minecraft.entity.ItemEntity.class,
                                     searchBox,
-                                    e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                                    e -> underwaterLootEligible(e,false)
                                             && !unreachableEntities.contains(e)
                                             // 【核心修复】：直接在这里过滤，只找落地/落水/完全静止的掉落物，坚决不追半空中的东西！
                                             && (e.isOnGround() || e.isTouchingWater() || Math.abs(e.getVelocity().y) < 0.001)
@@ -387,11 +483,14 @@ public class MiscController implements IBotModule {
 
                         case RETURN_AND_BREAK:
                             // 游回门里准备拆家
-                            if (player.squaredDistanceTo(Vec3d.ofBottomCenter(doorPos)) > 3.0 || !player.isOnGround()) {
-                                if (!pathExecutor.isBusy()) pathExecutor.setGoal(doorPos,"back to door pos");
+                            if (!insideBreathingDoor(player)) {
+                                if (!pathExecutor.isBusy()) {
+                                    resetKeys();pathExecutor.trySetGoal(doorPos,"breathing door");
+                                }
                                 return;
                             }
                             if (pathExecutor.isBusy()) pathExecutor.stop();
+                            resetKeys();
 
                             // ==========================================
                             // 【核心新增】：深呼吸！等待氧气完全回满再拆门
@@ -441,7 +540,7 @@ public class MiscController implements IBotModule {
                              drops = client.world.getEntities(
                                     net.minecraft.entity.ItemEntity.class,
                                     finalSearchBox,
-                                    e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                                    e -> underwaterLootEligible(e,true)
                                             && !unreachableEntities.contains(e)
                                             // 【核心修复】：直接在这里过滤，只找落地/落水/完全静止的掉落物，坚决不追半空中的东西！
                                             && (e.isOnGround() || e.isTouchingWater() || Math.abs(e.getVelocity().y) < 0.001)
@@ -478,8 +577,10 @@ public class MiscController implements IBotModule {
                                     pickupCoolDownTick = 0;
                                     pathingFailTicks = 0;
                                     targetEntity = null;
-                                    pathExecutor.resumeSuspendedGoal();
+                                    BlockPos returnMagma=com.fredoseep.utils.prenether.PreNether.magmaPos;
                                     stopTask();
+                                    if(returnMagma!=null)pathExecutor.setGoal(returnMagma.up(),"magma after underwater gravel");
+                                    else pathExecutor.resumeSuspendedGoal();
                                 }
                             }
                             return;
@@ -503,26 +604,38 @@ public class MiscController implements IBotModule {
                     double distSq = eyePos.squaredDistanceTo(Vec3d.ofCenter(targetPos));
 
                     if (distSq > 20.0) {
+                        long failureSerial=pathExecutor.getSearchFailureSerial();
+                        if(failureSerial!=observedSearchFailureSerial) {
+                            observedSearchFailureSerial=failureSerial;miningSearchFailures++;
+                            if(lastMiningApproach!=null)failedMiningApproaches.add(lastMiningApproach);
+                        }
                         // 阶段 1：距离太远，寻路靠近
-                        if (!pathExecutor.isBusy() && player.isOnGround()) {
-                            BlockPos topPos = new BlockPos(targetPos.getX(), BtStuff.groundYNoLeavesOrTrees(targetPos), targetPos.getZ());
+                        if (!pathExecutor.isBusy() && player.isOnGround() && miningSearchFailures<=6) {
+                            BlockPos topPos = new BlockPos(targetPos.getX(), BtStuff.groundYNoLeavesOrTrees(targetPos)+1, targetPos.getZ());
                             double horizDistSq = Math.pow(player.getX() - (targetPos.getX() + 0.5), 2) + Math.pow(player.getZ() - (targetPos.getZ() + 0.5), 2);
 
-                            pathExecutor.setGoal(targetPos,"ground block to mine");
-                            System.out.println("Fredodebug: distSq > 20, 开始寻路至目标");
-
-                            if (targetPos.getY() < topPos.getY() - 3 && horizDistSq > 16.0) {
-                                System.out.println("FredoBot [智能挖掘]: 目标深埋地下，先前往正上方地表...");
-                                pathExecutor.setTemporaryGoal(topPos, PathExecutor.TempMissionType.IDLE);
+                            boolean leafTarget=client.world.getBlockState(targetPos).isIn(BlockTags.LEAVES);
+                            BlockPos approach=findMiningApproach(client,player,targetPos,failedMiningApproaches,leafTarget);
+                            boolean buried=targetPos.getY()<topPos.getY()-3;
+                            if(approach==null && !leafTarget && buried)approach=horizDistSq>16?topPos:targetPos;
+                            if(approach==null && !leafTarget && InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks>0)approach=targetPos;
+                            if(approach==null) {
+                                System.out.println("FredoBot: 没有可直接挖掘的站位，跳过当前采集目标。");
+                                pathingFailTicks=301;
+                            } else if(pathExecutor.trySetGoal(approach,"mining approach")) {
+                                lastMiningApproach=approach;
+                                pathExecutor.recordMiningTarget(targetPos,approach);
+                                System.out.println("FredoBot: 寻路至挖掘站位 "+approach.toShortString()+"，方块目标 "+targetPos.toShortString());
                             }
-                            pathingFailTicks += 50;
                         }
 
-                        if (pathingFailTicks > 300) {
+                        if (pathingFailTicks > 300 || miningSearchFailures>6) {
                             System.out.println("FredoBot: 远距离寻路多次受阻，果断跳过该节点！");
                             if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
                                 targetPos = MiningHelper.blockToMine.remove(0);
+                                resetMiningApproachFailures();
                                 pathingFailTicks = 0;
+                                miningSearchFailures=0;failedMiningApproaches.clear();lastMiningApproach=null;
                                 if (pathExecutor.isBusy()) pathExecutor.stop();
                             } else {
                                 targetPos = player.getBlockPos(); // 强制进入打扫战场阶段
@@ -553,6 +666,7 @@ public class MiscController implements IBotModule {
                         System.out.println("FredoBot: 近战挖掘耗时过长，放弃当前挖掘！");
                         if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
                             targetPos = MiningHelper.blockToMine.remove(0);
+                            resetMiningApproachFailures();
                             pathingFailTicks = 0;
                         } else {
                             targetPos = player.getBlockPos();
@@ -591,6 +705,7 @@ public class MiscController implements IBotModule {
                         if (nextReachable != null) {
                             // 原地有目标，无缝衔接挖掘，绝不进入掉落物收集状态！
                             targetPos = nextReachable;
+                            resetMiningApproachFailures();
                             pathingFailTicks = 0;
                             return;
                         } else {
@@ -606,6 +721,13 @@ public class MiscController implements IBotModule {
                     }
 
                     // 阶段 3：真正的集中收集掉落物 (已锁定拾取模式)
+                    if(leafLogDrop!=null) {
+                        if(leafLogDrop.isAlive() && !leafLogDrop.getStack().isEmpty()) {
+                            if(releaseLeafLog(client,player,pathExecutor,leafLogDrop))return;
+                        } else if(pathExecutor.isBusy())pathExecutor.stop();
+                        if(targetEntity==leafLogDrop)targetEntity=null;
+                        leafLogDrop=null;lastLeafApproach=null;failedLeafApproaches.clear();
+                    }
                     if (pathExecutor.isBusy()) {
                         return; // 如果在走向掉落物的路上，耐心等待，绝不被挖矿逻辑打断
                     }
@@ -618,6 +740,7 @@ public class MiscController implements IBotModule {
                             ItemEntity.class,
                             searchBox,
                             e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                                    && !com.fredoseep.utils.ItemCategory.isSapling(e.getStack().getItem())
                                     && !unreachableEntities.contains(e)
                                     // 【核心防空中截停】：只找落地/落水/完全静止的掉落物
                                     && (e.isOnGround() || e.isTouchingWater() || Math.abs(e.getVelocity().y) < 0.001)
@@ -635,6 +758,12 @@ public class MiscController implements IBotModule {
                         }
 
                         if (nearestDrop != null) {
+                            if(nearestDrop.getStack().getItem().isIn(net.minecraft.tag.ItemTags.LOGS) && leafSupport(client,nearestDrop)!=null) {
+                                leafLogDrop=nearestDrop;targetEntity=nearestDrop;
+                                leafSettleTicks=0;
+                                leafFailureSerial=pathExecutor.getSearchFailureSerial();leafApproachFailures=0;lastLeafApproach=null;failedLeafApproaches.clear();
+                                releaseLeafLog(client,player,pathExecutor,nearestDrop);return;
+                            }
                             if (targetEntity == nearestDrop) {
                                 // 尝试去捡过，但失败了
                                 if (player.squaredDistanceTo(nearestDrop) > 4.0 || pickupCoolDownTick > 60) {
@@ -659,6 +788,7 @@ public class MiscController implements IBotModule {
                             // 阶段 4：打扫完毕，彻底退出拾取模式，前往下一片区域
                             if (MiningHelper.blockToMine != null && !MiningHelper.blockToMine.isEmpty()) {
                                 targetPos = MiningHelper.blockToMine.remove(0);
+                                resetMiningApproachFailures();
                                 System.out.println("FredoBot [陆地]: 当前驻点已清空并打扫完毕，前往下一片目标区域！ -> " + targetPos.toShortString());
                                 pickupCoolDownTick = 0; // 【重置标志位】：解除拾取状态锁，回到挖掘模式
                                 pathingFailTicks = 0;
@@ -734,6 +864,94 @@ public class MiscController implements IBotModule {
         BlockPos entityBlockPos = entity.getBlockPos();
         System.out.println("Fredodebug: tempGoal is Entity: "+ entity.toString());
         pathExecutor.setTemporaryGoal(new BlockPos(entityBlockPos.getX(), entityBlockPos.getY() + 0.5D, entityBlockPos.getZ()), PathExecutor.TempMissionType.GO_TO_ENTITY);
+    }
+    private boolean insideBreathingDoor(PlayerEntity player) {
+        return com.fredoseep.algorithm.planning.UnderwaterGravelWork.inside(
+                player.getX()-doorPos.getX()-.5,player.getY()-doorPos.getY(),player.getZ()-doorPos.getZ()-.5,
+                player.isOnGround(),player.isSubmergedIn(net.minecraft.tag.FluidTags.WATER));
+    }
+    private boolean underwaterLootEligible(ItemEntity drop,boolean finalRecovery) {
+        if(!drop.isAlive() || drop.getStack().isEmpty())return false;
+        Item item=drop.getStack().getItem();
+        if(finalRecovery && item.isIn(net.minecraft.tag.ItemTags.DOORS))return true;
+        if(uwGravelMission) {
+            if(finalRecovery && uwGravelWork.hasFlint())return item==Items.FLINT;
+            return uwGravelWork.wants(item==Items.GRAVEL,item==Items.FLINT);
+        }
+        return validDrops.isEmpty() || validDrops.contains(item);
+    }
+    private void advanceDoorTarget(MinecraftClient client,PlayerEntity player) {
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        if(!uwGravelMission || !uwGravelWork.collect()) {
+            for(int i=0;i<MiningHelper.blockToMine.size();i++) {
+                BlockPos candidate=MiningHelper.blockToMine.get(i);
+                if(candidate.equals(doorPos.down()) || candidate.equals(doorPos) || candidate.equals(doorPos.up()))continue;
+                if(uwGravelMission && client.world.getBlockState(candidate).getBlock()!=Blocks.GRAVEL)continue;
+                if(eye.squaredDistanceTo(Vec3d.ofCenter(candidate))>20 || !miningVisible(client,player,eye,candidate))continue;
+                targetPos=MiningHelper.blockToMine.remove(i);resetMiningApproachFailures();return;
+            }
+        }
+        if(uwGravelMission)MiningHelper.blockToMine.clear();
+        uwPhase=UwDoorPhase.COLLECT_DROPS;pickupCoolDownTick=0;resetKeys();
+        System.out.println("FredoBot: UW_COLLECT no more in-reach work targets");
+    }
+    private BlockPos leafSupport(MinecraftClient client,ItemEntity drop) {
+        Box box=drop.getBoundingBox();
+        return com.fredoseep.algorithm.planning.LeafLootSupport.find(box.minX,box.maxX,box.minY,box.minZ,box.maxZ,
+                p -> client.world.getBlockState(p).isIn(BlockTags.LEAVES));
+    }
+    private boolean releaseLeafLog(MinecraftClient client,PlayerEntity player,PathExecutor executor,ItemEntity drop) {
+        pickupCoolDownTick=5; // This tracked log is not blacklisted by the ordinary pickup timeout.
+        BlockPos support=leafSupport(client,drop);
+        if(support==null) {
+            leafSettleTicks++;
+            if(leafSettleTicks<=5 || (!drop.isOnGround() && !drop.isTouchingWater())) {
+                if(executor.isBusy())executor.stop();
+                resetKeys();return true; // Follow the same entity while it falls to the next layer.
+            }
+            if(!executor.isBusy() && player.squaredDistanceTo(drop)>4) {
+                BlockPos pickup=new BlockPos(drop.getX(),drop.getY()+.5,drop.getZ());
+                executor.trySetGoal(pickup,"collect released log");
+            }
+            return true; // Wait for this entity to be picked up, not an arbitrary pickup timeout.
+        }
+        leafSettleTicks=0;
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        var hit=client.world.rayTrace(new net.minecraft.world.RayTraceContext(eye,Vec3d.ofCenter(support),
+                net.minecraft.world.RayTraceContext.ShapeType.OUTLINE,net.minecraft.world.RayTraceContext.FluidHandling.NONE,player));
+        if(hit.getType()==net.minecraft.util.hit.HitResult.Type.BLOCK) {
+            BlockPos leaf=hit.getBlockPos();
+            if(leaf.getY()<=support.getY() && client.world.getBlockState(leaf).isIn(BlockTags.LEAVES)
+                    && eye.squaredDistanceTo(Vec3d.ofCenter(leaf))<=20) {
+                if(executor.isBusy())executor.stop();
+                resetKeys();ToolsHelper.equipBestTool(player,leaf,false);
+                float[] angles=MiningHelper.getValidMiningAngle(player,leaf);
+                MovementController.setLookDirection(player,angles[0],angles[1]);
+                client.interactionManager.updateBlockBreakingProgress(leaf,hit.getSide());
+                if(!player.handSwinging)player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                return true;
+            }
+        }
+        long failures=executor.getSearchFailureSerial();
+        if(failures!=leafFailureSerial) {
+            leafFailureSerial=failures;leafApproachFailures++;
+            if(lastLeafApproach!=null)failedLeafApproaches.add(lastLeafApproach);
+        }
+        if(!executor.isBusy() && player.isOnGround()) {
+            BlockPos approach=leafApproachFailures>=2?null:findMiningApproach(client,player,support,failedLeafApproaches,true);
+            if(approach==null) {
+                unreachableEntities.add(drop);resetKeys();pickupCoolDownTick=5;
+                if(targetEntity==drop)targetEntity=null;
+                leafLogDrop=null;lastLeafApproach=null;failedLeafApproaches.clear();
+                System.out.println("FredoBot: LEAF_DROP_SKIP support="+support.toShortString()
+                        +" reason="+(leafApproachFailures>=2?"APPROACH_FAILURE_LIMIT":"NO_GROUND_MINING_STANCE"));
+                return false; // Abandon this entire dropped-log objective, rather than trying each canopy leaf.
+            }
+            if(approach!=null && executor.trySetGoal(approach,"release log from leaves")) {
+                lastLeafApproach=approach;executor.recordMiningTarget(support,approach);
+            }
+        }
+        return true;
     }
     private void registerValidDrop(Block block) {
         if (block == Blocks.AIR || block == Blocks.WATER) return;

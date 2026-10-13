@@ -21,8 +21,14 @@ public final class PlannerSettings {
     public double materialPriceTicks = 5; // existing PlaceableBlock price 3 => 15 ticks per block
     public boolean dijkstra = false;
     public boolean preferVerticalSurfacing = true;
+    public boolean smoothPaths = true;
+    public double maxSmoothDistance = 12;
     public boolean diagnosticsEnabled = true;
     public boolean keepSuccessfulDiagnostics = false; // Error/no-route archives always retain the newest 50.
+    public int stuckWindowTicks = 30; // 1.5 nominal seconds, excluding intentional mining/paused ticks.
+    public double stuckMinMovement = .3; // Horizontal and vertical displacement thresholds, in blocks.
+    public int minimumRouteY = Integer.MIN_VALUE;
+    public boolean allowWorldEdits = true;
     public PlannerSettings copy() {
         PlannerSettings p = new PlannerSettings();
         p.margin=margin; p.maxExpanded=maxExpanded; p.maxEdits=maxEdits;
@@ -32,11 +38,15 @@ public final class PlannerSettings {
         p.bridgeTicks=bridgeTicks; p.pillarTicks=pillarTicks; p.aimTicks=aimTicks;
         p.breakDelayTicks=breakDelayTicks; p.materialPriceTicks=materialPriceTicks; p.dijkstra=dijkstra;p.diagnosticsEnabled=diagnosticsEnabled;
         p.preferVerticalSurfacing=preferVerticalSurfacing;
+        p.smoothPaths=smoothPaths;p.maxSmoothDistance=maxSmoothDistance;
         p.keepSuccessfulDiagnostics=keepSuccessfulDiagnostics;
-        if (optimizationMillis < 0 || optimizationMaxKnown < 0 || !Double.isFinite(searchWeight) || searchWeight < 1
+        p.stuckWindowTicks=stuckWindowTicks;p.stuckMinMovement=stuckMinMovement;
+        p.minimumRouteY=minimumRouteY;p.allowWorldEdits=allowWorldEdits;
+        if (!Double.isFinite(maxSmoothDistance) || maxSmoothDistance<1 || optimizationMillis < 0 || optimizationMaxKnown < 0 || !Double.isFinite(searchWeight) || searchWeight < 1
                 || captureBudgetMillis < 1 || terrainWaitSeconds < 1 || terrainStableMillis < 0 || margin < 1 || maxExpanded < 0 || maxEdits < 0 || walkTicks < 1 || swimTicks < 1
                 || jumpTicks < 2 || bridgeTicks < 1 || pillarTicks < 1 || aimTicks < 0
-                || breakDelayTicks < 0 || materialPriceTicks < 0)
+                || breakDelayTicks < 0 || materialPriceTicks < 0 || stuckWindowTicks < 1
+                || !Double.isFinite(stuckMinMovement) || stuckMinMovement <= 0)
             throw new IllegalArgumentException("Invalid planner settings");
         return p;
     }

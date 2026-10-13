@@ -5,6 +5,9 @@ import com.fredoseep.algorithm.planning.AsyncPlanner;
 import com.fredoseep.algorithm.planning.PlannerDebug;
 import com.fredoseep.algorithm.planning.PlannerSettings;
 import com.fredoseep.algorithm.planning.RetryBackoff;
+import com.fredoseep.algorithm.planning.PathReachBoxes;
+import com.fredoseep.algorithm.planning.StuckDump;
+import com.fredoseep.algorithm.planning.PlannerDiagnostics;
 
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
@@ -33,6 +36,21 @@ public class PathExecutor implements IBotModule {
     private PlannerDebug plannerDebug;
     private record RequestKey(World world,BlockPos start,BlockPos goal,Set<BlockPos> blacklist) {}
     private final RetryBackoff<RequestKey> retryBackoff=new RetryBackoff<>();
+    private boolean breathingDoorGoal;
+    private long searchFailureSerial;
+    public long getSearchFailureSerial(){return searchFailureSerial;}
+    public void recordMiningTarget(BlockPos block,BlockPos feetGoal) {
+        if(plannerDebug!=null && plannerDebug.diagnostics!=null)
+            plannerDebug.diagnostics.event("mining_target",java.util.Map.of("block",block.toShortString(),"feet_goal",feetGoal.toShortString()));
+    }
+    public boolean trySetGoal(BlockPos destination,String targetType) {
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(!client.isOnThread() || client.player==null || client.world==null || isBusy()
+                || !requestAllowed(destination,Collections.emptySet()))return false;
+        long before=calculationGeneration;
+        setGoal(destination,targetType);
+        return calculationGeneration!=before && currentState==State.CALCULATING;
+    }
     private RequestKey requestKey(MinecraftClient client,BlockPos goal,Set<BlockPos> blacklist) {
         return new RequestKey(client.world,new BlockPos(client.player.getX(),client.player.getY()+.2,client.player.getZ()),
                 goal.toImmutable(),Set.copyOf(blacklist));
@@ -42,6 +60,7 @@ public class PathExecutor implements IBotModule {
         return client.player==null || goal==null || retryBackoff.allowed(requestKey(client,goal,blacklist),System.nanoTime()/1_000_000);
     }
     private boolean reportFailure(MinecraftClient client) {
+        searchFailureSerial++;
         return client.player==null || finalDestination==null || retryBackoff.fail(requestKey(client,finalDestination,currentBlacklist),System.nanoTime()/1_000_000)==1;
     }
     public PlannerDebug.View getSearchView() {
@@ -83,6 +102,8 @@ public class PathExecutor implements IBotModule {
     // 废弃了 nextPath，因为我们将使用无缝拼接流！
     private boolean isCalculatingNext = false;
     private boolean isPaused = false;
+    private static final org.apache.logging.log4j.Logger STUCK_LOG =
+            org.apache.logging.log4j.LogManager.getLogger("FredoBotPathfinder");
     private int stuckCheckTicks = 0;
     private int consecutiveStuckCount = 0; // 【新增】：记录连续卡死的次数
     private Vec3d lastStuckCheckPos = null;
@@ -221,6 +242,7 @@ public class PathExecutor implements IBotModule {
         MinecraftClient dispatchClient=MinecraftClient.getInstance();
         if(!dispatchClient.isOnThread()) { dispatchClient.execute(() -> startNewPath(dest,targetType)); return; }
         if(!requestAllowed(dest,currentBlacklist))return;
+        this.breathingDoorGoal="breathing door".equals(targetType);
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -276,8 +298,20 @@ public class PathExecutor implements IBotModule {
         final Set<BlockPos> blacklist=Set.copyOf(currentBlacklist);
         if(USE_ACTION_PLANNER) {
             try {
-                plannerJob=new AsyncPlanner(client,destination,blacklist,PlannerSettings.DEFAULT,generation);
+                PlannerSettings settings=PlannerSettings.DEFAULT.copy();
+                if(breathingDoorGoal) {
+                    settings.preferVerticalSurfacing=false;settings.allowWorldEdits=false;
+                    settings.minimumRouteY=Math.min(startPos.getY(),destination.getY());
+                }
+                plannerJob=new AsyncPlanner(client,destination,blacklist,settings,generation);
                 plannerDebug=plannerJob.debug;
+                if(plannerDebug.diagnostics!=null) {
+                    MiscController misc=BotEngine.getInstance().getModule(MiscController.class);
+                    plannerDebug.diagnostics.event("movement_request",java.util.Map.of(
+                            "goal_kind",breathingDoorGoal?"BREATHING_DOOR":"GENERAL",
+                            "underwater_phase",misc==null?"NONE":misc.uwPhase.name(),
+                            "minimum_route_y",settings.minimumRouteY,"allow_world_edits",settings.allowWorldEdits));
+                }
             } catch(RuntimeException error) {
                 boolean notify=reportFailure(client);
                 error.printStackTrace(); stop();
@@ -332,6 +366,35 @@ public class PathExecutor implements IBotModule {
         }
     }
 
+    private void dumpStuck(MinecraftClient client,PlayerEntity player,double dx,double dy,double dz,double minMovement) {
+        if(!PlannerSettings.DEFAULT.diagnosticsEnabled)return;
+        PlannerDiagnostics diagnostic=null;
+        try {
+            var keys=java.util.Map.ofEntries(
+                    java.util.Map.entry("forward",client.options.keyForward.isPressed()),
+                    java.util.Map.entry("back",client.options.keyBack.isPressed()),
+                    java.util.Map.entry("left",client.options.keyLeft.isPressed()),
+                    java.util.Map.entry("right",client.options.keyRight.isPressed()),
+                    java.util.Map.entry("jump",client.options.keyJump.isPressed()),
+                    java.util.Map.entry("sprint",client.options.keySprint.isPressed()),
+                    java.util.Map.entry("sneak",client.options.keySneak.isPressed()),
+                    java.util.Map.entry("attack",client.options.keyAttack.isPressed()),
+                    java.util.Map.entry("use",client.options.keyUse.isPressed()));
+            var state=StuckDump.capture(client.world,player,currentPath,currentPathIndex,finalDestination,
+                    currentPathUsesActionPlanner,consecutiveStuckCount,stuckCheckTicks,dx,dy,dz,minMovement,keys);
+            diagnostic=new PlannerDiagnostics(client.runDirectory.toPath(),calculationGeneration,
+                    Thread.currentThread(),error -> STUCK_LOG.error("STUCK_DUMP_WRITE_FAILED",error),
+                    PlannerSettings.DEFAULT.keepSuccessfulDiagnostics);
+            diagnostic.phase("STUCK","captured before releasing movement keys");
+            diagnostic.stuckDump(state);diagnostic.close("failed");
+            STUCK_LOG.info("[ActionPlanner #{}] STUCK_DUMP index={} count={} ticks={} archive={} (async finalization)",
+                    calculationGeneration,currentPathIndex,consecutiveStuckCount+1,stuckCheckTicks,diagnostic.archive());
+        } catch(RuntimeException error) {
+            if(diagnostic!=null){diagnostic.error(error);diagnostic.close("failed");}
+            STUCK_LOG.error("STUCK_DUMP_CAPTURE_FAILED",error);
+        }
+    }
+
     @Override
     public void onTick(MinecraftClient client, PlayerEntity player) {
         if (isPaused) return;
@@ -343,7 +406,8 @@ public class PathExecutor implements IBotModule {
         } else {
             if (currentPathIndex < currentPath.size()) {
                 SimplePathfinder.Node stuckNode = currentPath.get(currentPathIndex);
-                if (stuckNode.state == SimplePathfinder.MovementState.MINING
+                if ((stuckNode.plannedAction == null && stuckNode.state == SimplePathfinder.MovementState.MINING
+                            && !MovementController.getObstaclesInTunnel(player,client.world,stuckNode.pos).isEmpty())
                         || (stuckNode.plannedAction != null && stuckNode.plannedAction.breaks.stream().anyMatch(
                                 p -> !client.world.getBlockState(p).getCollisionShape(client.world, p).isEmpty()))) {
                     isMining = true;
@@ -355,13 +419,16 @@ public class PathExecutor implements IBotModule {
             lastStuckCheckPos = player.getPos();
         } else {
             stuckCheckTicks++;
-            if (stuckCheckTicks >= 60) { // 3秒 = 60 Tick
+            if (stuckCheckTicks >= Math.max(1,PlannerSettings.DEFAULT.stuckWindowTicks)) {
                 double dx = player.getX() - lastStuckCheckPos.x;
                 double dz = player.getZ() - lastStuckCheckPos.z;
                 double dy = Math.abs(player.getY() - lastStuckCheckPos.y);
                 double horizontalDistSq = dx * dx + dz * dz;
 
-                if (horizontalDistSq < 1.0 && dy < 1.0) {
+                double minMovement = PlannerSettings.DEFAULT.stuckMinMovement;
+                if (!Double.isFinite(minMovement) || minMovement <= 0) minMovement = .3;
+                if (horizontalDistSq < minMovement*minMovement && dy < minMovement) {
+                    dumpStuck(client,player,dx,player.getY()-lastStuckCheckPos.y,dz,minMovement);
                     consecutiveStuckCount++;
                     player.sendMessage(new net.minecraft.text.LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
                     System.out.println("FredoBot: 触发被困保护，连续次数: " + consecutiveStuckCount + "，正在重新计算！");
@@ -507,26 +574,7 @@ public class PathExecutor implements IBotModule {
 
         boolean isStrictMode = consecutiveStuckCount >= 2;
 
-        net.minecraft.util.math.Box lowerBody;
-
-        if (isStrictMode) {
-            lowerBody = new net.minecraft.util.math.Box(
-                    player.getX() - 0.3, player.getY(), player.getZ() - 0.3,
-                    player.getX() + 0.3, player.getY() + 0.5, player.getZ() + 0.3
-            );
-        } else if (player.hasVehicle()) {
-            lowerBody = player.getVehicle().getBoundingBox().expand(0.5, 0.0, 0.5);
-        } else if (player.isSwimming() || player.isTouchingWater()) {
-            net.minecraft.util.math.Box baseBox = player.getBoundingBox().expand(0.2, 0.2, 0.2);
-            net.minecraft.util.math.Vec3d lookDir = player.getRotationVec(1.0F).normalize().multiply(1.2);
-            net.minecraft.util.math.Box headBox = baseBox.offset(lookDir.x, lookDir.y, lookDir.z);
-            lowerBody = baseBox.union(headBox);
-        } else {
-            lowerBody = new net.minecraft.util.math.Box(
-                    player.getX() - 0.3, player.getY(), player.getZ() - 0.3,
-                    player.getX() + 0.3, player.getY() + 0.5, player.getZ() + 0.3
-            );
-        }
+        net.minecraft.util.math.Box lowerBody = PathReachBoxes.player(player,isStrictMode);
 
         int lookAheadLimit = Math.min(currentPathIndex + 5, currentPath.size());
         if (currentPathUsesActionPlanner) lookAheadLimit = Math.min(currentPathIndex + 1, currentPath.size());
@@ -535,43 +583,7 @@ public class PathExecutor implements IBotModule {
         for (int i = currentPathIndex; i < lookAheadLimit; i++) {
             SimplePathfinder.Node node = currentPath.get(i);
 
-            double expandXZ = 0.0;
-            double expandYDown = 0.0;
-            double expandYUp = 0.0;
-
-            if (!isStrictMode) {
-                if (node.state == SimplePathfinder.MovementState.SWIMMING) {
-                    expandXZ = 0.35;
-                    expandYDown = 0.5;
-                    expandYUp = 0.5;
-                } else if (node.state == SimplePathfinder.MovementState.DIVING) {
-                    expandXZ = 0.5;
-                    expandYDown = 1.0;
-                    expandYUp = 1.0;
-                } else if (node.state == SimplePathfinder.MovementState.JUMPING_UP ||
-                        node.state == SimplePathfinder.MovementState.JUMPING_AIR ||
-                        node.state == SimplePathfinder.MovementState.FALLING) {
-                    expandXZ = 0.25;
-                    expandYDown = 1.0;
-                    expandYUp = 1.5;
-                }
-
-                if (node.state == SimplePathfinder.MovementState.WALKING && (i + 1 < currentPath.size())) {
-                    SimplePathfinder.Node nextNode = currentPath.get(i + 1);
-                    if (nextNode.state == SimplePathfinder.MovementState.JUMPING_UP) {
-                        expandXZ = 0.35;
-                    }
-                }
-            }
-
-            net.minecraft.util.math.Box nodeBox = new net.minecraft.util.math.Box(
-                    node.pos.getX() + 0.25 - expandXZ,
-                    node.pos.getY() - expandYDown,
-                    node.pos.getZ() + 0.25 - expandXZ,
-                    node.pos.getX() + 0.75 + expandXZ,
-                    node.pos.getY() + 1.0 + expandYUp,
-                    node.pos.getZ() + 0.75 + expandXZ
-            );
+            net.minecraft.util.math.Box nodeBox = PathReachBoxes.node(currentPath,i,isStrictMode);
 
             boolean isPhysicallyReached = lowerBody.intersects(nodeBox);
             if (node.plannedAction != null) {
@@ -585,6 +597,10 @@ public class PathExecutor implements IBotModule {
                 if (node.state == SimplePathfinder.MovementState.FALLING || node.state == SimplePathfinder.MovementState.JUMPING_AIR
                         || node.state == SimplePathfinder.MovementState.JUMPING_UP)
                     isPhysicallyReached &= Math.abs(player.getY() - node.pos.getY()) < 0.3 && (player.isOnGround() || player.isTouchingWater());
+                if(node.state==SimplePathfinder.MovementState.JUMPING_UP) {
+                    double landingX=player.getX()-node.pos.getX()-.5,landingZ=player.getZ()-node.pos.getZ()-.5;
+                    isPhysicallyReached &= landingX*landingX+landingZ*landingZ<=.12;
+                }
             }
 
             if (node.plannedAction != null && node.plannedAction.isShoreExit()) {
@@ -600,12 +616,7 @@ public class PathExecutor implements IBotModule {
                 double dz = player.getZ() - (node.pos.getZ() + 0.5);
                 double dy = Math.abs(player.getY() - node.pos.getY());
 
-                boolean isWater = node.state == SimplePathfinder.MovementState.SWIMMING || node.state == SimplePathfinder.MovementState.DIVING;
-                double allowedDistSq = isWater ? 0.12 : 0.03;
-
-                if (isStrictMode) {
-                    allowedDistSq = 0.03;
-                }
+                double allowedDistSq = PathReachBoxes.finalHorizontalLimit(node,isStrictMode);
 
                 // Keep planned break/place/landing prerequisites even at the final mission node.
                 isPhysicallyReached &= (dx * dx + dz * dz <= allowedDistSq) && (dy <= 0.5);

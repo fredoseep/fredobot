@@ -6,6 +6,7 @@ import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.*;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.Material;
 import net.minecraft.client.MinecraftClient;
@@ -51,6 +52,9 @@ public class MovementController implements IBotModule {
     private int boatHorizontalCollisionTicks = 0;
     private boolean boatHasBeenPlacedDown = false;
     private SimplePathfinder.MovementState nextState = SimplePathfinder.MovementState.WALKING;
+    private SimplePathfinder.Node activeJumpNode,smoothCheckNode;
+    private boolean jumpLaunched;
+    private int smoothCheckTicks;
 
 
     public void resetKeys() {
@@ -72,6 +76,7 @@ public class MovementController implements IBotModule {
         this.boatHorizontalCollisionTicks = 0;
 
         lastState = SimplePathfinder.MovementState.WALKING;
+        activeJumpNode=null;jumpLaunched=false;smoothCheckNode=null;smoothCheckTicks=0;
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client != null && client.options != null) {
@@ -125,6 +130,19 @@ public class MovementController implements IBotModule {
         targetNode.plannedAction = originalNode.plannedAction;
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
         if (originalNode.plannedAction != null && preparePlannedBreaks(client, player, originalNode)) return;
+        if(originalNode.plannedAction!=null && originalNode.plannedAction.isSmoothWalk()
+                && (smoothCheckNode!=originalNode || ++smoothCheckTicks>=10)) {
+            smoothCheckNode=originalNode;smoothCheckTicks=0;
+            BlockPos from=originalNode.parent==null?player.getBlockPos():originalNode.parent.pos;
+            boolean safe=com.fredoseep.algorithm.planning.WalkClearance.clear(from.getX()+.5,from.getZ()+.5,
+                    originalNode.pos.getX()+.5,originalNode.pos.getZ()+.5,originalNode.pos.getY(),
+                    p -> {BlockState b=client.world.getBlockState(p);return b.getCollisionShape(client.world,p).isEmpty()
+                            && b.getFluidState().isEmpty() && b.getBlock()!=Blocks.FIRE && b.getBlock()!=Blocks.SOUL_FIRE
+                            && b.getBlock()!=Blocks.SWEET_BERRY_BUSH;},
+                    p -> {BlockState b=client.world.getBlockState(p);return b.getBlock()!=Blocks.MAGMA_BLOCK
+                            && Block.isShapeFullCube(b.getCollisionShape(client.world,p));},() -> false);
+            if(!safe){resetKeys();pathExecutor.replanFromPlayer();return;}
+        }
         List<SimplePathfinder.Node> nodeList = pathExecutor.getCurrentPath();
         int currentIndex = pathExecutor.getCurrentPathIndex();
         if (currentIndex + 1 < nodeList.size()) nextState = nodeList.get(currentIndex + 1).state;
@@ -239,12 +257,16 @@ public class MovementController implements IBotModule {
                     client.interactionManager.updateBlockBreakingProgress(targetNode.pos, Direction.UP);
                 }
                 pressForward = true;
+                if(targetNode.plannedAction!=null && targetNode.plannedAction.isSmoothWalk()
+                        && Math.abs(MathHelper.wrapDegrees(player.yaw-targetYaw))>8) {
+                    pressForward=false;pressSprint=false;player.setSprinting(false);
+                }
                 if (pathExecutor.getCurrentPath() != null) {
                     int nextIndex = pathExecutor.getCurrentPathIndex() + 1;
                     List<SimplePathfinder.Node> path = pathExecutor.getCurrentPath();
                     if (nextIndex < path.size()) {
                         SimplePathfinder.Node nextNode = path.get(nextIndex);
-                        if (nextNode.state == SimplePathfinder.MovementState.JUMPING_UP) {
+                        if (nextNode.state == SimplePathfinder.MovementState.JUMPING_UP && nextNode.plannedAction==null) {
                             double distToNextXZ = Math.sqrt(Math.pow(player.getX() - (nextNode.pos.getX() + 0.5), 2) + Math.pow(player.getZ() - (nextNode.pos.getZ() + 0.5), 2));
                             if (distToNextXZ < 1.15) {
                                 pressJump = true;
@@ -266,9 +288,7 @@ public class MovementController implements IBotModule {
                 if (MinecraftClient.getInstance().world.getBlockState(targetNode.pos).getBlock() == Blocks.SWEET_BERRY_BUSH) {
                     client.interactionManager.updateBlockBreakingProgress(targetNode.pos, Direction.UP);
                 }
-                pressForward = true;
-                pressSprint = true;
-                pressJump = true;
+                controlLanding(player,originalNode,distSq,false);
                 break;
 
             case JUMPING_AIR:
@@ -563,6 +583,18 @@ public class MovementController implements IBotModule {
     }
 
     private BlockPos plannedBreakTarget;
+    private void controlLanding(PlayerEntity player,SimplePathfinder.Node node,double distSq,boolean gap) {
+        if(activeJumpNode!=node){activeJumpNode=node;jumpLaunched=!player.isOnGround();}
+        if(!player.isOnGround())jumpLaunched=true;
+        double distance=Math.sqrt(distSq),dx=node.pos.getX()+.5-player.getX(),dz=node.pos.getZ()+.5-player.getZ();
+        Vec3d velocity=player.getVelocity();
+        double closing=distance<1e-6?0:(velocity.x*dx+velocity.z*dz)/distance;
+        var input=com.fredoseep.algorithm.planning.JumpControl.step(distance,closing,player.isOnGround(),
+                player.getY()>=node.pos.getY()-.15,jumpLaunched,gap);
+        if(!input.sprint())player.setSprinting(false);
+        pressForward=input.forward();pressBack=input.back();pressJump=input.jump();pressSprint=input.sprint();
+        if(pressJump)jumpLaunched=true;
+    }
     private int plannedBreakTicks;
 
     /** Execute explicit prerequisites before movement, including overhead mining for jumps/pillars. */
