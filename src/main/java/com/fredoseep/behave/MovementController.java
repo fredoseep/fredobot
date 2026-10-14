@@ -7,6 +7,8 @@ import com.fredoseep.algorithm.planning.SurfaceSwimControl;
 import com.fredoseep.algorithm.planning.SurfaceWaterDepth;
 import com.fredoseep.algorithm.planning.DiveClearance;
 import com.fredoseep.algorithm.planning.SurfaceBoatRoute;
+import com.fredoseep.algorithm.planning.DoorArrivalControl;
+import com.fredoseep.algorithm.planning.BoatSteering;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.bt.BtStuff;
@@ -56,11 +58,11 @@ public class MovementController implements IBotModule {
     private int swimStateStabilizationTicks = 0;
     private final SurfaceSwimControl surfaceSwim=new SurfaceSwimControl();
     public String swimPhase(){return surfaceSwim.phase().name();}
+    public boolean boatLaunching(){return boatLaunch.active();}
     public boolean swimStarting(){return surfaceSwim.starting();}
-    private int boatInventorySleepingTick = 0;
+    private final BoatLaunch boatLaunch=new BoatLaunch();
     private int horizontalCollisionTicks = 0;
     private int boatHorizontalCollisionTicks = 0;
-    private boolean boatHasBeenPlacedDown = false;
     private SimplePathfinder.MovementState nextState = SimplePathfinder.MovementState.WALKING;
     private SimplePathfinder.Node activeJumpNode,smoothCheckNode;
     private com.fredoseep.algorithm.planning.JumpControl.Attempt jumpAttempt;
@@ -81,8 +83,7 @@ public class MovementController implements IBotModule {
         this.aimStabilizationTicks = 0;
         this.swimStateStabilizationTicks = 0;
         surfaceSwim.reset();
-        this.boatInventorySleepingTick = 0;
-        this.boatHasBeenPlacedDown = false;
+        boatLaunch.reset();
         this.horizontalCollisionTicks = 0;
         this.boatHorizontalCollisionTicks = 0;
 
@@ -136,10 +137,21 @@ public class MovementController implements IBotModule {
         applyKeys(client);
     }
 
+    public void alignNewBoatRoute(PathExecutor path,PlayerEntity player) {
+        if(boatLaunch.boarded(player)) {path.enterBoatSurfaceRoute();boatLaunch.reset();}
+    }
+
     public void executeMovementNode(MinecraftClient client, PlayerEntity player, SimplePathfinder.Node originalNode) {
         SimplePathfinder.Node targetNode = new SimplePathfinder.Node(originalNode.pos, originalNode.extraPos, originalNode.parent, originalNode.costFromStart, originalNode.estimatedCostToEnd, originalNode.state, originalNode.blocksUsed);
         targetNode.plannedAction = originalNode.plannedAction;
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+        if (!player.hasVehicle()) {
+            BoatLaunch.Input launch=boatLaunch.tick(client,player,pathExecutor);
+            if(launch.active()) {
+                pressBack=pressRight=pressLeft=pressUse=pressSneak=pressAttack=pressSprint=false;
+                pressForward=launch.forward();pressJump=launch.jump();player.setSprinting(false);return;
+            }
+        }
         if (PlayerHelper.isDrivingBoat(player) && originalNode.state != SimplePathfinder.MovementState.SWIMMING) {
             resetKeys();pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING,originalNode.pos);
@@ -255,6 +267,15 @@ public class MovementController implements IBotModule {
             boatHorizontalCollisionTicks = 0;
         }
 
+        if(pathExecutor.isBreathingDoorGoal() && pathExecutor.isFinalNode() && distSq<=1
+                && Math.abs(player.getY()-targetNode.pos.getY())<=.75) {
+            player.setSprinting(false);
+            DoorArrivalControl.Keys settle=DoorArrivalControl.settle(targetX-player.getX(),
+                    player.getY()-targetNode.pos.getY(),targetZ-player.getZ(),player.isOnGround());
+            pressForward=settle.forward();pressSneak=settle.sneak();pressJump=settle.jump();
+            setLookDirection(player,targetYaw,0);lastState=targetNode.state;return;
+        }
+
         if(targetNode.plannedAction!=null && targetNode.plannedAction.isSurfaceRise() && !player.hasVehicle()) {
             // The camera follows the vertical target; retain forward sprint propulsion.
             pressJump=player.getY()<targetNode.pos.getY()+.05 || player.isSubmergedIn(FluidTags.WATER);
@@ -268,7 +289,7 @@ public class MovementController implements IBotModule {
         }
 
         boolean boatingSurface = SurfaceBoatRoute.allowed(client.world,targetNode)
-                && isBoatingNeeded(player) && (InventoryHelper.hasBoat(player) || boatHasBeenPlacedDown);
+                && isBoatingNeeded(player) && (InventoryHelper.hasBoat(player) || boatLaunch.active());
         if(PathReachBoxes.plannedWater(targetNode) && !player.hasVehicle() && !boatingSurface) {
             double verticalError=targetNode.pos.getY()-player.getY();
             if(targetNode.state==SimplePathfinder.MovementState.SWIMMING) {
@@ -543,60 +564,14 @@ public class MovementController implements IBotModule {
 
             case SWIMMING:
                 if (PlayerHelper.isDrivingBoat(player)) {
-                    boatInventorySleepingTick = 0;
-                    BoatEntity boat = (BoatEntity) player.getVehicle();
-                    SimplePathfinder.Node aimNode = targetNode;
-
-                    if (pathExecutor.getCurrentPath() != null) {
-                        List<SimplePathfinder.Node> path = pathExecutor.getCurrentPath();
-
-                        for (int i = currentIndex; i < path.size(); i++) {
-                            SimplePathfinder.Node checkNode = path.get(i);
-                            if (checkNode.state != SimplePathfinder.MovementState.SWIMMING) {
-                                break;
-                            }
-
-                            Vec3d startVec = new Vec3d(boat.getX(), boat.getY() + 0.5D, boat.getZ());
-                            Vec3d endVec = new Vec3d(checkNode.pos.getX() + 0.5D, boat.getY() + 0.5D, checkNode.pos.getZ() + 0.5D);
-                            RayTraceContext context = new RayTraceContext(startVec, endVec, RayTraceContext.ShapeType.COLLIDER, RayTraceContext.FluidHandling.NONE, boat);
-                            HitResult hitResult = client.world.rayTrace(context);
-
-                            if (hitResult.getType() == HitResult.Type.BLOCK) {
-                                if (i > currentIndex) aimNode = path.get(i - 1);
-                                break;
-                            }
-
-                            aimNode = checkNode;
-                            double dx = checkNode.pos.getX() + 0.5D - boat.getX();
-                            double dz = checkNode.pos.getZ() + 0.5D - boat.getZ();
-                            if ((dx * dx + dz * dz) > 64.0) break;
-                        }
-                    }
-
-                    double bX = boat.getX();
-                    double bZ = boat.getZ();
-                    double tX = aimNode.pos.getX() + 0.5D;
-                    double tZ = aimNode.pos.getZ() + 0.5D;
-
-                    float targetBoatYaw = (float) Math.toDegrees(Math.atan2(-(tX - bX), tZ - bZ));
-                    float deltaYaw = MathHelper.wrapDegrees(targetBoatYaw - boat.yaw);
-                    float absDeltaYaw = Math.abs(deltaYaw);
-
-                    boolean shouldTurn = false;
-                    if (absDeltaYaw > 30.0F) shouldTurn = true;
-                    else if (absDeltaYaw > 10.0F) shouldTurn = (player.age % 2 == 0);
-                    else if (absDeltaYaw > 4.0F) shouldTurn = (player.age % 3 == 0);
-                    else if (absDeltaYaw > 1.0F) shouldTurn = (player.age % 5 == 0);
-
-                    if (shouldTurn) {
-                        if (deltaYaw < 0.0F) pressLeft = true;
-                        else pressRight = true;
-                    }
-                    if (absDeltaYaw < 60.0F) pressForward = true;
-
-                    targetYaw = targetBoatYaw;
-                    targetPitch = 0.0F;
-
+                    BoatEntity boat=(BoatEntity)player.getVehicle();
+                    BoatPathFollower.Aim aim=BoatPathFollower.aim(client.world,boat,nodeList,currentIndex);
+                    double dx=aim.point().x-boat.getX(),dz=aim.point().z-boat.getZ();
+                    float heading=(float)Math.toDegrees(Math.atan2(-dx,dz));
+                    BoatSteering.Keys steering=BoatSteering.tick(MathHelper.wrapDegrees(heading-boat.yaw),
+                            Math.hypot(boat.getVelocity().x,boat.getVelocity().z),aim.stoppingDistance(),player.age);
+                    pressLeft=steering.left();pressRight=steering.right();pressForward=steering.forward();pressBack=steering.back();
+                    targetYaw=heading;targetPitch=0;
                 } else if (player.isSwimming()) {
                     if (MinecraftClient.getInstance().world.getBlockState(targetNode.pos.up()).getBlock() == Blocks.LILY_PAD) {
                         client.interactionManager.updateBlockBreakingProgress(targetNode.pos.up(), Direction.UP);
@@ -610,7 +585,7 @@ public class MovementController implements IBotModule {
                     } else {
                         pressJump = player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D;
                     }
-                } else if (!boatingSurface || (!InventoryHelper.hasBoat(player)) && !boatHasBeenPlacedDown) {
+                } else if (!boatingSurface || (!InventoryHelper.hasBoat(player)) && !boatLaunch.active()) {
                     if (MinecraftClient.getInstance().world != null && (!isWaterDeepEnough() || MinecraftClient.getInstance().world.getBlockState(new BlockPos(player.getX(), player.getY(), player.getZ()).down()).getMaterial() != Material.WATER) || player.getHungerManager().getFoodLevel() <= 6) {
                         trySurfaceFloat();
                         break;
@@ -621,7 +596,7 @@ public class MovementController implements IBotModule {
                     if (MinecraftClient.getInstance().world.getBlockState(targetNode.pos.up()).getBlock() == Blocks.LILY_PAD) {
                         client.interactionManager.updateBlockBreakingProgress(targetNode.pos.up(), Direction.UP);
                     }
-                    tryToBoating(player);
+                    trySurfaceFloat(); // No valid launch yet: advance to the next usable water position.
                 }
                 break;
         }
@@ -730,24 +705,6 @@ public class MovementController implements IBotModule {
         KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(), pressSprint);
     }
 
-
-    private void tryToBoating(PlayerEntity player) {
-        if (InventoryHelper.putBoatToHotBar(player)) {
-            player.inventory.selectedSlot = 7;
-            targetPitch = 45F;
-            boatInventorySleepingTick++;
-        }
-        if (boatInventorySleepingTick > 0) boatHasBeenPlacedDown = true;
-        if (boatHasBeenPlacedDown) boatInventorySleepingTick++;
-        if (boatInventorySleepingTick >= 4) {
-            float deltaYaw = MathHelper.wrapDegrees(player.yaw - targetYaw);
-            if (Math.abs(deltaYaw) < 2.0f) {
-                pressJump = player.isTouchingWater();
-                targetPitch = 60;
-                pressUse = true;
-            }
-        }
-    }
 
     private void tryToSwim(PlayerEntity player) {
         pressForward = true;

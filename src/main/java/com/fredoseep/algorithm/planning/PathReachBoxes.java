@@ -26,7 +26,7 @@ public final class PathReachBoxes {
     }
     public static Box player(PlayerEntity player, boolean strict) {
         if (!strict && player.hasVehicle()) return player.getVehicle().getBoundingBox().expand(.5,0,.5);
-        if (!strict && (player.isSwimming() || player.isTouchingWater())) {
+        if (!strict && player.isSwimming()) {
             Box body=player.getBoundingBox().expand(.2,.2,.2);
             var look=player.getRotationVec(1F).normalize().multiply(1.2);
             return body.union(body.offset(look.x,look.y,look.z));

@@ -1,0 +1,305 @@
+package com.fredoseep.testing;
+
+import com.fredoseep.Fredobot;
+import com.fredoseep.Test;
+import com.fredoseep.excutor.BotEngine;
+import com.google.gson.Gson;
+import me.voidxwalker.autoreset.Atum;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.TitleScreen;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.network.packet.s2c.play.InventoryS2CPacket;
+import net.minecraft.resource.DataPackSettings;
+import net.minecraft.text.LiteralText;
+import net.minecraft.text.Text;
+import net.minecraft.util.registry.RegistryTracker;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.GameMode;
+import net.minecraft.world.GameRules;
+import net.minecraft.world.dimension.DimensionType;
+import net.minecraft.world.gen.GeneratorOptions;
+import net.minecraft.world.level.LevelInfo;
+import net.minecraft.world.level.storage.LevelStorage;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+/** Client-side reusable normal-creative-world batch template.
+ * No Atum world creation or treasure seed filter. No automatic run at game startup.
+ */
+public final class CreativeWorldTestRunner {
+    private static final CreativeWorldTestRunner INSTANCE = new CreativeWorldTestRunner();
+    private static final Logger LOGGER = LogManager.getLogger("FredoBotTests");
+    private static final Gson JSON = new Gson();
+    private static final Map<String, Supplier<CreativeWorldScenario>> SCENARIOS = new LinkedHashMap<>();
+    static { register("treasure", TreasurePredictionScenario::new); }
+
+    private enum Phase { PREPARE_WORLD, WAIT_WORLD, RUNNING, ROUND_FINISHED }
+    private record SavedRound(String directory, TestBatch.Outcome outcome) {}
+    private final List<SavedRound> ownedWorlds = new ArrayList<>();
+    private boolean active, creating, previousTesting;
+    private Phase phase;
+    private TestBatch batch;
+    private Supplier<CreativeWorldScenario> factory;
+    private CreativeWorldScenario scenario;
+    private CreativeTestContext context;
+    private ClientWorld expectedWorld;
+    private String runId, worldName;
+    private long requestedSeed, deadline, roundFinishedAt;
+    private Long firstSeed;
+    private Random seeds;
+    private BufferedWriter report;
+    private Path reportPath;
+    private int consecutiveErrors;
+
+    private CreativeWorldTestRunner() {}
+    public static boolean isActive() { return INSTANCE.active; }
+    public static void register(String name, Supplier<CreativeWorldScenario> scenario) { SCENARIOS.put(name, scenario); }
+
+    public static void start(String name, int rounds, Long firstSeed) {
+        INSTANCE.begin(MinecraftClient.getInstance(), name, rounds, firstSeed);
+    }
+
+    public static void tick(MinecraftClient client) { INSTANCE.pump(client); }
+    public static void chat(Text message) {
+        if (INSTANCE.active && INSTANCE.context != null && !INSTANCE.context.done()
+                && INSTANCE.phase == Phase.RUNNING) INSTANCE.guard(() -> INSTANCE.scenario.onChat(INSTANCE.context, message));
+    }
+    public static void inventory(InventoryS2CPacket packet) {
+        if (INSTANCE.active && INSTANCE.context != null && !INSTANCE.context.done()
+                && INSTANCE.phase == Phase.RUNNING) INSTANCE.guard(() -> INSTANCE.scenario.onInventory(INSTANCE.context, packet));
+    }
+
+    /** Consumes only this local command; ordinary commands continue through vanilla. */
+    public static boolean command(String message) {
+        String[] args = message.trim().split("\\s+");
+        if (args.length == 0 || !args[0].equalsIgnoreCase("/fredotest")) return false;
+        MinecraftClient client = MinecraftClient.getInstance();
+        try {
+            if (args.length == 2 && args[1].equalsIgnoreCase("stop")) INSTANCE.cancel("USER_STOP");
+            else if (args.length == 2 && args[1].equalsIgnoreCase("status")) say(client, INSTANCE.status());
+            else if (args.length >= 2 && args.length <= 4 && SCENARIOS.containsKey(args[1])) {
+                int rounds = args.length >= 3 ? Integer.parseInt(args[2]) : 10;
+                Long seed = args.length == 4 ? Long.valueOf(args[3]) : null;
+                INSTANCE.begin(client, args[1], rounds, seed);
+            } else say(client, "用法：/fredotest treasure [轮数1..1000] [第一轮seed] | stop | status");
+        } catch (IllegalArgumentException exception) { say(client, "参数错误：" + exception.getMessage()); }
+        return true;
+    }
+
+    private void begin(MinecraftClient client, String name, int rounds, Long firstSeed) {
+        if (active) { say(client, "已有测试运行；/fredotest stop 可停止。"); return; }
+        if (client.world != null && !client.isInSingleplayer()) { say(client, "测试只支持单人世界或标题界面。"); return; }
+        Supplier<CreativeWorldScenario> selected = SCENARIOS.get(name);
+        if (selected == null) throw new IllegalArgumentException("unknown test: " + name);
+        TestBatch requested = new TestBatch(rounds);
+        runId = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + "-" + UUID.randomUUID();
+        reportPath = client.runDirectory.toPath().resolve("logs/fredobot-tests/" + runId + ".jsonl");
+        try {
+            Files.createDirectories(reportPath.getParent());
+            pruneReports(reportPath.getParent());
+            report = Files.newBufferedWriter(reportPath, StandardCharsets.UTF_8);
+        } catch (IOException exception) {
+            LOGGER.error("Cannot create test report", exception);
+            say(client, "无法创建测试报告，测试没有开始。");
+            return;
+        }
+        previousTesting = Fredobot.isTesting;
+        BotEngine.getInstance().stop();
+        Test.reset();
+        Atum.stopRunning(); // clears pending reset and seed futures; config is not changed/saved
+        Fredobot.isTesting = true;
+        batch = requested; factory = selected; this.firstSeed = firstSeed;
+        seeds = firstSeed == null ? new Random() : new Random(firstSeed);
+        ownedWorlds.clear(); context = null; expectedWorld = null; scenario = null;
+        consecutiveErrors = 0;
+        active = true; phase = Phase.PREPARE_WORLD;
+        event("batch_start", Map.of("test", name, "rounds", rounds, "firstSeed", firstSeed == null ? "random" : firstSeed.toString(),
+                "worldMode", "normal creative; structures enabled; cheats enabled; vanilla datapacks"));
+        say(client, "开始 " + name + " 自动测试，共 " + rounds + " 轮；当前世界会保存并退出。");
+    }
+
+    private void pump(MinecraftClient client) {
+        if (!active || creating) return;
+        guard(() -> {
+            if (phase == Phase.PREPARE_WORLD) {
+                if (client.world != null) {
+                    client.world.disconnect();
+                    client.disconnect();
+                }
+                client.openScreen(new TitleScreen());
+                cleanupWorlds(client, null);
+                requestedSeed = batch.completed() == 0 && firstSeed != null ? firstSeed : seeds.nextLong();
+                worldName = "FredoTest-" + runId + "-r" + batch.round();
+                LevelInfo info = new LevelInfo(worldName, GameMode.CREATIVE, false, Difficulty.NORMAL,
+                        true, new GameRules(), DataPackSettings.SAFE_MODE);
+                GeneratorOptions options = new GeneratorOptions(requestedSeed, true, false,
+                        DimensionType.method_28517(requestedSeed));
+                phase = Phase.WAIT_WORLD;
+                deadline = System.nanoTime() + 180_000_000_000L;
+                event("create_world", Map.of("directory", worldName, "requestedSeed", requestedSeed));
+                if (!active) return;
+                creating = true;
+                try { client.method_29607(worldName, info, RegistryTracker.create(), options); }
+                finally { creating = false; }
+                // createWorld's loading loop can render/tick: scenario entry waits for the next outer client tick.
+            } else if (phase == Phase.WAIT_WORLD) {
+                if (client.world != null && client.player != null && client.getNetworkHandler() != null
+                        && client.player.abilities.creativeMode && client.player.abilities.allowFlying) {
+                    expectedWorld = client.world;
+                    context = new CreativeTestContext(this, client, batch.round());
+                    scenario = factory.get();
+                    phase = Phase.RUNNING;
+                    client.openScreen(null);
+                    scenario.start(context);
+                } else if (System.nanoTime() > deadline) {
+                    roundCompleted(TestBatch.Outcome.ERROR, "CREATE_WORLD_TIMEOUT", Map.of());
+                }
+            } else if (phase == Phase.RUNNING) {
+                if (client.world != expectedWorld || client.player == null) {
+                    cancel("WORLD_LEFT_OR_REPLACED");
+                    return;
+                }
+                context.setPaused(client.isPaused());
+                if (client.isPaused()) return;
+                scenario.tick(context);
+            } else if (phase == Phase.ROUND_FINISHED && System.nanoTime() - roundFinishedAt > 1_000_000_000L) {
+                if (client.isPaused()) return;
+                if (!batch.hasNext()) { finishBatch(); return; }
+                if (context != null) scenario.close(context);
+                context = null; expectedWorld = null; scenario = null;
+                phase = Phase.PREPARE_WORLD;
+            }
+        });
+    }
+
+    boolean seedMatchesCreatedWorld(long observedSeed) { return requestedSeed == observedSeed; }
+
+    void roundCompleted(TestBatch.Outcome outcome, String reason, Map<String, ?> details) {
+        if (!active || phase == Phase.ROUND_FINISHED) return;
+        int round = batch.round();
+        event("round_result", Map.of("outcome", outcome.name(), "reason", reason, "details", details,
+                "worldDirectory", worldName, "requestedSeed", requestedSeed));
+        if (!active) return;
+        batch.record(outcome);
+        ownedWorlds.add(new SavedRound(worldName, outcome));
+        if (outcome == TestBatch.Outcome.ERROR) consecutiveErrors++; else consecutiveErrors = 0;
+        if (consecutiveErrors >= 3) {
+            batch.stop();
+            event("abort", Map.of("reason", "THREE_CONSECUTIVE_INFRASTRUCTURE_ERRORS"));
+        }
+        phase = Phase.ROUND_FINISHED; roundFinishedAt = System.nanoTime();
+        say(MinecraftClient.getInstance(), "第 " + round + "/" + batch.requested() + " 轮：" + outcome + " " + reason);
+    }
+
+    private void guard(Runnable action) {
+        try { action.run(); }
+        catch (Exception exception) {
+            LOGGER.error("Automatic world test failed", exception);
+            if (phase == Phase.ROUND_FINISHED) { batch.stop(); finishBatch(); }
+            else roundCompleted(TestBatch.Outcome.ERROR, "EXCEPTION", Map.of("exception", exception.toString(), "phase", phase.name()));
+        }
+    }
+
+    private void cancel(String reason) {
+        if (!active) { say(MinecraftClient.getInstance(), "没有自动测试运行。"); return; }
+        if (phase == Phase.RUNNING && context != null && !context.done()) {
+            context.complete(TestBatch.Outcome.CANCELLED, reason, Map.of("phase", context.phase()));
+        } else if (phase != Phase.ROUND_FINISHED) {
+            roundCompleted(TestBatch.Outcome.CANCELLED, reason, Map.of());
+        }
+        batch.stop(); finishBatch();
+    }
+
+    private void finishBatch() {
+        if (!active) return;
+        active = false;
+        Fredobot.isTesting = previousTesting;
+        Atum.stopRunning();
+        cleanupWorlds(MinecraftClient.getInstance(), worldName);
+        event("batch_summary", Map.of("completed", batch.completed(), "requested", batch.requested(), "counts", batch.counts()));
+        try { if (report != null) report.close(); } catch (IOException exception) { LOGGER.error("Closing test report failed", exception); }
+        report = null;
+        say(MinecraftClient.getInstance(), "测试结束：" + batch.counts() + "；报告：" + reportPath);
+        // Leave final world/chest open for inspection. Never resume the bot automatically.
+    }
+
+    public static List<String> hudLines() {
+        if (!INSTANCE.active) return List.of();
+        return List.of("[Fredo 测试] 第 " + Math.min(INSTANCE.batch.round(), INSTANCE.batch.requested()) + "/" + INSTANCE.batch.requested() + " 轮",
+                "测试状态：" + (INSTANCE.context == null ? INSTANCE.phase.name() : INSTANCE.context.phase()),
+                "结果：" + INSTANCE.batch.counts());
+    }
+
+    private String status() {
+        return active ? String.join(" | ", hudLines()) : "自动测试未运行" + (reportPath == null ? "" : "；上次报告：" + reportPath);
+    }
+
+    void event(String type, Map<String, ?> data) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("time", LocalDateTime.now().toString()); row.put("event", type);
+        if (batch != null) row.put("round", batch.round());
+        row.putAll(data);
+        LOGGER.info("[WorldTest] {}", JSON.toJson(row));
+        if (report != null) {
+            try { report.write(JSON.toJson(row)); report.newLine(); report.flush(); }
+            catch (IOException exception) {
+                LOGGER.error("Writing test report failed; automatic test stopped", exception);
+                active = false;
+                if (batch != null) batch.stop();
+                Fredobot.isTesting = previousTesting;
+                Atum.stopRunning();
+                try { report.close(); } catch (IOException closeFailure) { LOGGER.warn("Closing failed test report failed", closeFailure); }
+                report = null;
+                say(MinecraftClient.getInstance(), "报告写入失败，自动测试已停止：" + reportPath);
+            }
+        }
+    }
+
+    private static void say(MinecraftClient client, String message) {
+        LOGGER.info("[WorldTest] {}", message);
+        if (client.player != null) client.inGameHud.getChatHud().addMessage(new LiteralText("[Fredo 测试] " + message));
+    }
+
+    private static void pruneReports(Path directory) throws IOException {
+        try (Stream<Path> files = Files.list(directory)) {
+            List<Path> reports = files.filter(p -> Files.isRegularFile(p) && p.getFileName().toString().endsWith(".jsonl"))
+                    .sorted(Comparator.comparing(p -> p.getFileName().toString())).toList();
+            for (int i = 0; i < reports.size() - 49; i++) Files.deleteIfExists(reports.get(i));
+        }
+    }
+
+    private void cleanupWorlds(MinecraftClient client, String retainActive) {
+        int failuresKept = 0;
+        for (int i = ownedWorlds.size() - 1; i >= 0; i--) {
+            SavedRound saved = ownedWorlds.get(i);
+            boolean failed = saved.outcome == TestBatch.Outcome.MISMATCH || saved.outcome == TestBatch.Outcome.ERROR;
+            if (failed && failuresKept++ < 2) continue;
+            if (saved.directory == null || saved.directory.equals(retainActive)) continue;
+            // Only exact names created and recorded by THIS batch are eligible.
+            Path directory = client.getLevelStorage().getSavesDirectory().resolve(saved.directory);
+            if (!Files.isDirectory(directory)) { ownedWorlds.remove(i); continue; }
+            try (LevelStorage.Session session = client.getLevelStorage().createSession(saved.directory)) {
+                session.deleteSessionLock();
+                ownedWorlds.remove(i);
+                event("remove_completed_test_world", Map.of("directory", saved.directory));
+            } catch (IOException exception) { LOGGER.warn("Cannot clean completed test world {}", saved.directory, exception); }
+        }
+    }
+}

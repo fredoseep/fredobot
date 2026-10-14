@@ -7,6 +7,9 @@ import com.fredoseep.algorithm.planning.PlannerSettings;
 import com.fredoseep.algorithm.planning.RetryBackoff;
 import com.fredoseep.algorithm.planning.PathReachBoxes;
 import com.fredoseep.algorithm.planning.StuckDump;
+import com.fredoseep.algorithm.planning.UnderwaterGravelWork;
+import com.fredoseep.algorithm.planning.SurfaceBoatRoute;
+import net.minecraft.tag.FluidTags;
 import com.fredoseep.algorithm.planning.PlannerDiagnostics;
 
 import com.fredoseep.behave.IBotModule;
@@ -47,6 +50,19 @@ public class PathExecutor implements IBotModule {
         return searchFailureSerial>sinceSerial && lastSearchFailureWorld==world
                 && goal!=null && goal.equals(lastSearchFailureGoal);
     }
+    /** A confirmed bank launch has already traversed the dry entry; retain only the safe water segment. */
+    public void enterBoatSurfaceRoute() {
+        World world=MinecraftClient.getInstance().world;
+        if(currentPath==null || world==null)return;
+        int entry=SurfaceBoatRoute.launchEntry(world,currentPath,currentPathIndex);
+        if(entry>=0) {
+            STUCK_LOG.info("BOAT_ROUTE_ENTRY old_index={} water_index={}",currentPathIndex,entry);
+            currentPathIndex=entry;
+        }
+    }
+
+    public boolean isBreathingDoorGoal(){return breathingDoorGoal;}
+    public boolean isFinalNode(){return currentPath!=null && currentPathIndex==currentPath.size()-1;}
     public long getSearchFailureSerial(){return searchFailureSerial;}
     public void recordMiningTarget(BlockPos block,BlockPos feetGoal) {
         if(plannerDebug!=null && plannerDebug.diagnostics!=null)
@@ -92,6 +108,8 @@ public class PathExecutor implements IBotModule {
             } else {
                 retryBackoff.clear();
                 currentPath=path;currentPathUsesActionPlanner=true; currentPathIndex=0; currentState=State.EXECUTING;
+                if(breathingDoorGoal) STUCK_LOG.info("BREATHING_DOOR_ROUTE player={} swimming={} nodes={}",client.player.getPos(),
+                        client.player.isSwimming(),path.stream().map(n -> n.pos.toShortString()+":"+n.state).toList());
             }
         } else if(job.failed() || job.cancelled()) {
             boolean notify=!job.failed() || reportFailure(client);
@@ -441,10 +459,12 @@ public class PathExecutor implements IBotModule {
             }
         }
         MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
+        if(movement!=null)movement.alignNewBoatRoute(this,player);
         boolean turningJump=movement!=null && currentPathIndex<currentPath.size()
                 && movement.jumpTurningProgress(currentPath.get(currentPathIndex));
         boolean startingSwim=movement!=null && movement.swimStarting();
-        if (isMining || turningJump || startingSwim) {
+        boolean startingBoat=movement!=null && movement.boatLaunching();
+        if (isMining || turningJump || startingSwim || startingBoat) {
             stuckCheckTicks = 0;
             lastStuckCheckPos = player.getPos();
         } else {
@@ -606,11 +626,14 @@ public class PathExecutor implements IBotModule {
         Box lowerBody = PathReachBoxes.player(player,isStrictMode);
 
         int lookAheadLimit = Math.min(currentPathIndex + 5, currentPath.size());
-        if (currentPathUsesActionPlanner) lookAheadLimit = Math.min(currentPathIndex + 1, currentPath.size());
+        if (player.hasVehicle() && SurfaceBoatRoute.allowed(world,currentPath.get(currentPathIndex)))
+            lookAheadLimit=Math.min(currentPathIndex+32,currentPath.size());
+        else if (currentPathUsesActionPlanner) lookAheadLimit = Math.min(currentPathIndex + 1, currentPath.size());
         int furthestReachedIndex = -1;
 
         for (int i = currentPathIndex; i < lookAheadLimit; i++) {
             SimplePathfinder.Node node = currentPath.get(i);
+            if(player.hasVehicle() && i>currentPathIndex && !SurfaceBoatRoute.allowed(world,node)) break;
 
             Box nodeBox = PathReachBoxes.node(currentPath,i,isStrictMode);
 
@@ -666,6 +689,14 @@ public class PathExecutor implements IBotModule {
                 // Keep planned break/place/landing prerequisites even at the final mission node.
                 double finalVertical=PathReachBoxes.plannedWater(node)?PathReachBoxes.waterUpperLimit(node):.5;
                 isPhysicallyReached &= (dx * dx + dz * dz <= allowedDistSq) && (dy <= finalVertical);
+                if(breathingDoorGoal) {
+                    isPhysicallyReached &= UnderwaterGravelWork.inside(dx,player.getY()-node.pos.getY(),dz,
+                            player.isOnGround(),player.isSubmergedIn(FluidTags.WATER));
+                    if(!isPhysicallyReached && dx*dx+dz*dz<1 && player.age%20==0)
+                        STUCK_LOG.info("BREATHING_DOOR_SETTLE index={} nodes={} pos={} goal={} grounded={} submerged={} dy={}",
+                                i,currentPath.size(),player.getPos(),node.pos.toShortString(),player.isOnGround(),
+                                player.isSubmergedIn(FluidTags.WATER),player.getY()-node.pos.getY());
+                }
             }
 
             boolean isPathBlocked = false;
@@ -721,6 +752,8 @@ public class PathExecutor implements IBotModule {
         }
 
         if (furthestReachedIndex != -1) {
+            if(breathingDoorGoal) STUCK_LOG.info("BREATHING_DOOR_PROGRESS {} -> {} player={} swimming={} grounded={} submerged={}",
+                    currentPathIndex,furthestReachedIndex+1,player.getPos(),player.isSwimming(),player.isOnGround(),player.isSubmergedIn(FluidTags.WATER));
             currentPathIndex = furthestReachedIndex + 1;
         } else {
             boolean inAir = !player.isOnGround() && !player.isTouchingWater() && !player.isSwimming() && !player.hasVehicle();
