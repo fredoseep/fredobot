@@ -3,6 +3,7 @@ package com.fredoseep;
 import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.algorithm.planning.PlannerDebug;
+import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.render.BotStatusHud;
 import com.fredoseep.preflight.TreasureLootValidation;
 import com.fredoseep.preflight.EarlyResetPreflight;
@@ -20,6 +21,7 @@ public class FredoBotClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(EarlyResetPreflight::pump);
         ClientTickEvents.END_CLIENT_TICK.register(CreativeWorldTestRunner::tick);
         ClientTickEvents.END_CLIENT_TICK.register(TreasureLootValidation::pump);
+        ClientTickEvents.END_CLIENT_TICK.register(GlobalStateLogger::tick);
         HudRenderCallback.EVENT.register((matrices,tickDelta) -> {
             MinecraftClient client=MinecraftClient.getInstance();
             EarlyResetPreflight.pump(client);

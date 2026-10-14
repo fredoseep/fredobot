@@ -13,6 +13,7 @@
   },
   "client": [
     "MixinWorldRenderer",
+    "MixinGameMenuScreen",
     "MixinTreasureSeedProvider",
     "MixinTestClientPlayer",
     "MixinTestChatHud",

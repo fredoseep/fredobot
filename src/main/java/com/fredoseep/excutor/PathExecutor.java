@@ -31,6 +31,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.Stack;
 import java.util.concurrent.CompletableFuture;
+import java.util.ArrayList;
+import java.util.Map;
 
 public class PathExecutor implements IBotModule {
 
@@ -66,7 +68,7 @@ public class PathExecutor implements IBotModule {
     public long getSearchFailureSerial(){return searchFailureSerial;}
     public void recordMiningTarget(BlockPos block,BlockPos feetGoal) {
         if(plannerDebug!=null && plannerDebug.diagnostics!=null)
-            plannerDebug.diagnostics.event("mining_target",java.util.Map.of("block",block.toShortString(),"feet_goal",feetGoal.toShortString()));
+            plannerDebug.diagnostics.event("mining_target",Map.of("block",block.toShortString(),"feet_goal",feetGoal.toShortString()));
     }
     public boolean trySetGoal(BlockPos destination,String targetType) {
         MinecraftClient client=MinecraftClient.getInstance();
@@ -185,6 +187,18 @@ public class PathExecutor implements IBotModule {
 
     public int getCurrentPathIndex() {
         return this.currentPathIndex;
+    }
+
+    public BlockPos getFinalDestination() {
+        return this.finalDestination;
+    }
+
+    public boolean isUsingActionPlanner() {
+        return this.currentPathUsesActionPlanner;
+    }
+
+    public int getConsecutiveStuckCount() {
+        return this.consecutiveStuckCount;
     }
 
     public boolean isPaused() {
@@ -336,7 +350,7 @@ public class PathExecutor implements IBotModule {
                 plannerDebug=plannerJob.debug;
                 if(plannerDebug.diagnostics!=null) {
                     MiscController misc=BotEngine.getInstance().getModule(MiscController.class);
-                    plannerDebug.diagnostics.event("movement_request",java.util.Map.of(
+                    plannerDebug.diagnostics.event("movement_request",Map.of(
                             "goal_kind",breathingDoorGoal?"BREATHING_DOOR":"GENERAL",
                             "underwater_phase",misc==null?"NONE":misc.uwPhase.name(),
                             "minimum_route_y",settings.minimumRouteY,"allow_world_edits",settings.allowWorldEdits));
@@ -399,16 +413,16 @@ public class PathExecutor implements IBotModule {
         if(!PlannerSettings.DEFAULT.diagnosticsEnabled)return;
         PlannerDiagnostics diagnostic=null;
         try {
-            var keys=java.util.Map.ofEntries(
-                    java.util.Map.entry("forward",client.options.keyForward.isPressed()),
-                    java.util.Map.entry("back",client.options.keyBack.isPressed()),
-                    java.util.Map.entry("left",client.options.keyLeft.isPressed()),
-                    java.util.Map.entry("right",client.options.keyRight.isPressed()),
-                    java.util.Map.entry("jump",client.options.keyJump.isPressed()),
-                    java.util.Map.entry("sprint",client.options.keySprint.isPressed()),
-                    java.util.Map.entry("sneak",client.options.keySneak.isPressed()),
-                    java.util.Map.entry("attack",client.options.keyAttack.isPressed()),
-                    java.util.Map.entry("use",client.options.keyUse.isPressed()));
+            var keys=Map.ofEntries(
+                    Map.entry("forward",client.options.keyForward.isPressed()),
+                    Map.entry("back",client.options.keyBack.isPressed()),
+                    Map.entry("left",client.options.keyLeft.isPressed()),
+                    Map.entry("right",client.options.keyRight.isPressed()),
+                    Map.entry("jump",client.options.keyJump.isPressed()),
+                    Map.entry("sprint",client.options.keySprint.isPressed()),
+                    Map.entry("sneak",client.options.keySneak.isPressed()),
+                    Map.entry("attack",client.options.keyAttack.isPressed()),
+                    Map.entry("use",client.options.keyUse.isPressed()));
             var state=StuckDump.capture(client.world,player,currentPath,currentPathIndex,finalDestination,
                     currentPathUsesActionPlanner,consecutiveStuckCount,stuckCheckTicks,dx,dy,dz,minMovement,keys);
             state.put("min_vertical_movement_blocks",PlannerSettings.DEFAULT.stuckMinVerticalMovement);
@@ -676,7 +690,7 @@ public class PathExecutor implements IBotModule {
             }
             if(node.plannedAction!=null && node.plannedAction.isSurfaceRise()) {
                 isPhysicallyReached &= player.getY()>=node.pos.getY()-.25
-                        && !player.isSubmergedIn(net.minecraft.tag.FluidTags.WATER);
+                        && !player.isSubmergedIn(FluidTags.WATER);
             }
 
             if (i == currentPath.size() - 1) {
@@ -799,7 +813,7 @@ public class PathExecutor implements IBotModule {
         this.consecutiveStuckCount = 0;
         resetMovementKeys();
 
-        this.currentPath = new java.util.ArrayList<>(customPath);
+        this.currentPath = new ArrayList<>(customPath);
         this.currentPathIndex = 0;
 
         this.finalDestination = customPath.get(customPath.size() - 1).pos;

@@ -36,6 +36,10 @@ import net.minecraft.world.World;
 import java.sql.SQLOutput;
 import java.util.ArrayList;
 import java.util.List;
+import com.fredoseep.algorithm.planning.JumpControl;
+import com.fredoseep.algorithm.planning.WalkClearance;
+import java.util.Map;
+import net.minecraft.util.shape.VoxelShape;
 
 public class MovementController implements IBotModule {
 
@@ -58,6 +62,7 @@ public class MovementController implements IBotModule {
     private int swimStateStabilizationTicks = 0;
     private final SurfaceSwimControl surfaceSwim=new SurfaceSwimControl();
     public String swimPhase(){return surfaceSwim.phase().name();}
+    public SimplePathfinder.MovementState getLastState() { return this.lastState; }
     public boolean boatLaunching(){return boatLaunch.active();}
     public boolean swimStarting(){return surfaceSwim.starting();}
     private final BoatLaunch boatLaunch=new BoatLaunch();
@@ -65,7 +70,7 @@ public class MovementController implements IBotModule {
     private int boatHorizontalCollisionTicks = 0;
     private SimplePathfinder.MovementState nextState = SimplePathfinder.MovementState.WALKING;
     private SimplePathfinder.Node activeJumpNode,smoothCheckNode;
-    private com.fredoseep.algorithm.planning.JumpControl.Attempt jumpAttempt;
+    private JumpControl.Attempt jumpAttempt;
     private int smoothCheckTicks;
 
 
@@ -174,7 +179,7 @@ public class MovementController implements IBotModule {
                 && (smoothCheckNode!=originalNode || ++smoothCheckTicks>=10)) {
             smoothCheckNode=originalNode;smoothCheckTicks=0;
             BlockPos from=originalNode.parent==null?player.getBlockPos():originalNode.parent.pos;
-            boolean safe=com.fredoseep.algorithm.planning.WalkClearance.clear(from.getX()+.5,from.getZ()+.5,
+            boolean safe=WalkClearance.clear(from.getX()+.5,from.getZ()+.5,
                     originalNode.pos.getX()+.5,originalNode.pos.getZ()+.5,originalNode.pos.getY(),
                     p -> {BlockState b=client.world.getBlockState(p);return b.getCollisionShape(client.world,p).isEmpty()
                             && b.getFluidState().isEmpty() && b.getBlock()!=Blocks.FIRE && b.getBlock()!=Blocks.SOUL_FIRE
@@ -354,7 +359,7 @@ public class MovementController implements IBotModule {
                             double approachDistance=Math.sqrt(distSq);
                             Vec3d v=player.getVelocity();
                             double closing=approachDistance<1e-6?0:(v.x*(targetX-player.getX())+v.z*(targetZ-player.getZ()))/approachDistance;
-                            var approach=com.fredoseep.algorithm.planning.JumpControl.approach(approachDistance,closing,
+                            var approach=JumpControl.approach(approachDistance,closing,
                                     MathHelper.wrapDegrees(player.yaw-targetYaw));
                             pressForward=approach.forward();pressBack=approach.back();
                             pressSprint=false;player.setSprinting(false);
@@ -472,7 +477,7 @@ public class MovementController implements IBotModule {
                     BlockPos blockToMine = obstacles.get(0);
 
                     BlockPos playerPos = player.getBlockPos();
-                    boolean isHeadInWater = client.world.getBlockState(new BlockPos(player.getX(), player.getEyeY(), player.getZ())).getMaterial() == net.minecraft.block.Material.WATER;
+                    boolean isHeadInWater = client.world.getBlockState(new BlockPos(player.getX(), player.getEyeY(), player.getZ())).getMaterial() == Material.WATER;
 
                     if (isHeadInWater) {
                         boolean is1x1 = client.world.getBlockState(playerPos.north()).getMaterial().isSolid() &&
@@ -499,7 +504,7 @@ public class MovementController implements IBotModule {
                                         direction = Direction.EAST;
                                     }
                                     BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(wallPos), direction, wallPos, false);
-                                    client.interactionManager.interactBlock(client.player, client.world, net.minecraft.util.Hand.MAIN_HAND, hit);
+                                    client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, hit);
 
                                     return;
                                 }
@@ -519,7 +524,7 @@ public class MovementController implements IBotModule {
                     client.interactionManager.updateBlockBreakingProgress(blockToMine, Direction.UP);
 
                     if (!player.handSwinging) {
-                        player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                        player.swingHand(Hand.MAIN_HAND);
                     }
                 } else {
                     double tX = targetNode.pos.getX() + 0.5D;
@@ -637,11 +642,11 @@ public class MovementController implements IBotModule {
     public boolean jumpTurningProgress(SimplePathfinder.Node node) {
         return activeJumpNode==node && jumpAttempt!=null && jumpAttempt.turningProgress();
     }
-    public java.util.Map<String,Object> jumpDiagnostic(SimplePathfinder.Node node) {
-        return activeJumpNode==node && jumpAttempt!=null?jumpAttempt.diagnostic():java.util.Map.of("phase","NOT_ACTIVE");
+    public Map<String,Object> jumpDiagnostic(SimplePathfinder.Node node) {
+        return activeJumpNode==node && jumpAttempt!=null?jumpAttempt.diagnostic():Map.of("phase","NOT_ACTIVE");
     }
     private void controlLanding(PlayerEntity player,SimplePathfinder.Node node,double distSq,boolean gap) {
-        if(activeJumpNode!=node){activeJumpNode=node;jumpAttempt=new com.fredoseep.algorithm.planning.JumpControl.Attempt();}
+        if(activeJumpNode!=node){activeJumpNode=node;jumpAttempt=new JumpControl.Attempt();}
         double distance=Math.sqrt(distSq),dx=node.pos.getX()+.5-player.getX(),dz=node.pos.getZ()+.5-player.getZ();
         Vec3d velocity=player.getVelocity();
         double closing=distance<1e-6?0:(velocity.x*dx+velocity.z*dz)/distance;
@@ -739,13 +744,13 @@ public class MovementController implements IBotModule {
                 BlockPos p = new BlockPos(targetPos.getX(), y, targetPos.getZ());
 
                 // 工作台免死金牌
-                if (com.fredoseep.utils.bt.BtStuff.craftingTablePos != null && p.equals(com.fredoseep.utils.bt.BtStuff.craftingTablePos)) {
+                if (BtStuff.craftingTablePos != null && p.equals(BtStuff.craftingTablePos)) {
                     continue;
                 }
 
                 BlockState state = world.getBlockState(p);
                 // 【免死金牌 1】：垂直下挖时，绝对不把门当成障碍物
-                if (state.getBlock() instanceof net.minecraft.block.DoorBlock) continue;
+                if (state.getBlock() instanceof DoorBlock) continue;
 
                 if (!state.isAir() && state.getMaterial().isSolid()) {
                     obstacles.add(p);
@@ -802,16 +807,16 @@ public class MovementController implements IBotModule {
                     }
 
                     BlockState state = world.getBlockState(mutable);
-                    if (state.getBlock() instanceof net.minecraft.block.DoorBlock) continue;
+                    if (state.getBlock() instanceof DoorBlock) continue;
 
                     if (!state.isAir() && !state.getMaterial().isLiquid() && state.getMaterial().isSolid()) {
-                        net.minecraft.util.shape.VoxelShape shape = state.getCollisionShape(world, mutable);
+                        VoxelShape shape = state.getCollisionShape(world, mutable);
 
                         if (!shape.isEmpty()) {
                             Box blockBox = shape.getBoundingBox().offset(mutable);
                             Box expandedBox = blockBox.expand(radiusX, radiusY, radiusZ);
 
-                            if (com.fredoseep.utils.player.PlayerHelper.isLineIntersectingBox(startCenter, targetCenter, expandedBox)) {
+                            if (PlayerHelper.isLineIntersectingBox(startCenter, targetCenter, expandedBox)) {
                                 obstacles.add(mutable.toImmutable());
                             }
                         }

@@ -5,6 +5,10 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.BoatItem;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.screen.CraftingScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
 
 public class CraftingController implements IBotModule {
 
@@ -32,6 +36,9 @@ public class CraftingController implements IBotModule {
     }
 
     public boolean isDone() { return state == CraftState.DONE; }
+    public CraftState getState() { return this.state; }
+    public Item getCurrentTarget() { return this.currentTarget; }
+    public int getCurrentTimes() { return this.currentTimes; }
     public String hudStatus() {
         String phase=switch(state) {
             case IDLE -> "等待合成";
@@ -121,24 +128,24 @@ public class CraftingController implements IBotModule {
      * 专属模拟物理合成：彻底无视配方书限制，强行摆放船的 5 个格子
      */
     private void manualCraftBoat(MinecraftClient client, PlayerEntity player, Item boatType) {
-        if (!(player.currentScreenHandler instanceof net.minecraft.screen.CraftingScreenHandler)) return;
+        if (!(player.currentScreenHandler instanceof CraftingScreenHandler)) return;
 
         System.out.println("FredoBot [合成模块]: 侦测到船的合成请求，为规避原版配方锁，启动物理级模拟摆放...");
 
         // 1. 根据船反推需要的木板
-        Item plankType = net.minecraft.item.Items.OAK_PLANKS;
-        if (boatType == net.minecraft.item.Items.SPRUCE_BOAT) plankType = net.minecraft.item.Items.SPRUCE_PLANKS;
-        else if (boatType == net.minecraft.item.Items.BIRCH_BOAT) plankType = net.minecraft.item.Items.BIRCH_PLANKS;
-        else if (boatType == net.minecraft.item.Items.JUNGLE_BOAT) plankType = net.minecraft.item.Items.JUNGLE_PLANKS;
-        else if (boatType == net.minecraft.item.Items.ACACIA_BOAT) plankType = net.minecraft.item.Items.ACACIA_PLANKS;
-        else if (boatType == net.minecraft.item.Items.DARK_OAK_BOAT) plankType = net.minecraft.item.Items.DARK_OAK_PLANKS;
+        Item plankType = Items.OAK_PLANKS;
+        if (boatType == Items.SPRUCE_BOAT) plankType = Items.SPRUCE_PLANKS;
+        else if (boatType == Items.BIRCH_BOAT) plankType = Items.BIRCH_PLANKS;
+        else if (boatType == Items.JUNGLE_BOAT) plankType = Items.JUNGLE_PLANKS;
+        else if (boatType == Items.ACACIA_BOAT) plankType = Items.ACACIA_PLANKS;
+        else if (boatType == Items.DARK_OAK_BOAT) plankType = Items.DARK_OAK_PLANKS;
 
         int syncId = player.currentScreenHandler.syncId;
         int plankSlotId = -1;
 
         // 2. 遍历工作台 GUI 的背包区 (槽位 10 到 45) 寻找至少 5 个木板
         for (int i = 10; i < 46; i++) {
-            net.minecraft.item.ItemStack stack = player.currentScreenHandler.getSlot(i).getStack();
+            ItemStack stack = player.currentScreenHandler.getSlot(i).getStack();
             if (stack.getItem() == plankType && stack.getCount() >= 5) {
                 plankSlotId = i;
                 break;
@@ -152,15 +159,15 @@ public class CraftingController implements IBotModule {
 
         // 3. 执行物理级动作：左键整组拿起 -> 依次右键发牌 -> 左键放回原处
         // 拿起整组木板
-        client.interactionManager.clickSlot(syncId, plankSlotId, 0, net.minecraft.screen.slot.SlotActionType.PICKUP, player);
+        client.interactionManager.clickSlot(syncId, plankSlotId, 0, SlotActionType.PICKUP, player);
 
         // 船的 U 型摆放槽位：4(左中), 6(右中), 7(左下), 8(下中), 9(右下)
         int[] boatSlots = {4, 6, 7, 8, 9};
         for (int slot : boatSlots) {
-            client.interactionManager.clickSlot(syncId, slot, 1, net.minecraft.screen.slot.SlotActionType.PICKUP, player); // 1 代表鼠标右键，仅放置 1 个
+            client.interactionManager.clickSlot(syncId, slot, 1, SlotActionType.PICKUP, player); // 1 代表鼠标右键，仅放置 1 个
         }
 
         // 将剩余的木板放回原来的格子
-        client.interactionManager.clickSlot(syncId, plankSlotId, 0, net.minecraft.screen.slot.SlotActionType.PICKUP, player);
+        client.interactionManager.clickSlot(syncId, plankSlotId, 0, SlotActionType.PICKUP, player);
     }
 }

@@ -35,6 +35,7 @@ public class PreNether {
     private static World requestWorld;
     private static int pendingRavineTicks;
     public static String magmaFallbackStatus(){return magmaDescent==null?null:magmaDescent.hudStatus();}
+    public static BlockPos getGravelPos() { return gravelPos; }
     public static void requestMagmaRoute(PlayerEntity player,PathExecutor path) {
         if(magmaPos==null || magmaDescent!=null)return;
         requestedMagma=magmaPos.toImmutable();requestWorld=MinecraftClient.getInstance().world;

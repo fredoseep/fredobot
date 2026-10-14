@@ -37,6 +37,11 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.List;
 import java.util.Set;
+import com.fredoseep.algorithm.planning.LeafTargetPolicy;
+import com.fredoseep.algorithm.planning.MiningApproach;
+import java.util.HashSet;
+import java.util.function.Predicate;
+import net.minecraft.tag.FluidTags;
 
 public class MiscController implements IBotModule {
 
@@ -59,7 +64,7 @@ public class MiscController implements IBotModule {
     private int miningSearchFailures;
     private long observedSearchFailureSerial;
     private BlockPos lastMiningApproach;
-    private final Set<BlockPos> failedMiningApproaches=new java.util.HashSet<>();
+    private final Set<BlockPos> failedMiningApproaches=new HashSet<>();
     private ItemEntity leafLogDrop;
     private BlockPos lastLeafApproach;
     private long leafFailureSerial;
@@ -69,11 +74,11 @@ public class MiscController implements IBotModule {
     private BlockPos uwIssuedTarget;
     private BlockPos uwDoorAdjustedTarget;
     private int leafSettleTicks;
-    private final Set<BlockPos> failedLeafApproaches=new java.util.HashSet<>();
+    private final Set<BlockPos> failedLeafApproaches=new HashSet<>();
     private boolean gotOffBoat = false;
     private boolean boatRecoveryForDescent;
-    private final Set<Item> validDrops = new java.util.HashSet<>();
-    private final Set<Entity> unreachableEntities = new java.util.HashSet<>();
+    private final Set<Item> validDrops = new HashSet<>();
+    private final Set<Entity> unreachableEntities = new HashSet<>();
 
     public enum MiscType {
         HARVEST_TREE,
@@ -134,20 +139,40 @@ public class MiscController implements IBotModule {
         stopTask();treeHarvest=session;currentTask=MiscType.HARVEST_TREE;
     }
     public BlockPos findHarvestApproach(MinecraftClient client,PlayerEntity player,BlockPos block,boolean leaves) {
-        return findMiningApproach(client,player,block,java.util.Set.of(),leaves);
+        return findMiningApproach(client,player,block,Set.of(),leaves);
     }
     public boolean harvestStandable(MinecraftClient client,BlockPos pos) {
-        return isMiningStance(client,pos,java.util.Set.of(),true);
+        return isMiningStance(client,pos,Set.of(),true);
     }
     public void beginTreePickup(BlockPos stump) {
         currentTask=MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP;targetPos=stump;
         uwGravelMission=false;uwPhase=UwDoorPhase.NONE;targetEntity=null;pickupCoolDownTick=1;pathingFailTicks=0;
-        validDrops.clear();validDrops.addAll(net.minecraft.tag.ItemTags.LOGS.values());validDrops.addAll(net.minecraft.tag.ItemTags.LEAVES.values());
+        validDrops.clear();validDrops.addAll(ItemTags.LOGS.values());validDrops.addAll(ItemTags.LEAVES.values());
         leafLogDrop=null;unreachableEntities.clear();resetKeys();
     }
 
     public boolean isBusy() {
         return currentTask != null;
+    }
+
+    public MiscType getCurrentTask() {
+        return this.currentTask;
+    }
+
+    public BlockPos getTargetPos() {
+        return this.targetPos;
+    }
+
+    public boolean isUwGravelMission() {
+        return this.uwGravelMission;
+    }
+
+    public UnderwaterGravelWork getUwGravelWork() {
+        return this.uwGravelWork;
+    }
+
+    public BlockPos getUwIssuedTarget() {
+        return this.uwIssuedTarget;
     }
     public String hudStatus(PlayerEntity player) {
         if(currentTask==null)return "等待任务";
@@ -195,23 +220,23 @@ public class MiscController implements IBotModule {
                 && feet.getCollisionShape(world,p).isEmpty() && head.getCollisionShape(world,p.up()).isEmpty();
     }
     private boolean miningVisible(MinecraftClient client,PlayerEntity player,Vec3d eye,BlockPos target) {
-        var hit=client.world.rayTrace(new net.minecraft.world.RayTraceContext(eye,Vec3d.ofCenter(target),
-                net.minecraft.world.RayTraceContext.ShapeType.OUTLINE,net.minecraft.world.RayTraceContext.FluidHandling.NONE,player));
-        return hit.getType()==net.minecraft.util.hit.HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
+        var hit=client.world.rayTrace(new RayTraceContext(eye,Vec3d.ofCenter(target),
+                RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
+        return hit.getType()==HitResult.Type.BLOCK && hit.getBlockPos().equals(target);
     }
     private BlockPos findMiningApproach(MinecraftClient client,PlayerEntity player,BlockPos target,Set<BlockPos> excluded) {
         return findMiningApproach(client,player,target,excluded,false);
     }
     private BlockPos findMiningApproach(MinecraftClient client,PlayerEntity player,BlockPos target,Set<BlockPos> excluded,boolean avoidTrees) {
-        return com.fredoseep.algorithm.planning.MiningApproach.select(target,player.getBlockPos(),player.getStandingEyeHeight(),
+        return MiningApproach.select(target,player.getBlockPos(),player.getStandingEyeHeight(),
                 p -> isMiningStance(client,p,excluded,avoidTrees),p -> miningVisible(client,player,
                         new Vec3d(p.getX()+.5,p.getY()+player.getStandingEyeHeight(),p.getZ()+.5),target));
     }
     /** One batch shares stance probes; high leaves are excluded before quota selection or any A* request. */
-    public java.util.function.Predicate<BlockPos> leafTargetFilter(MinecraftClient client,PlayerEntity player) {
+    public Predicate<BlockPos> leafTargetFilter(MinecraftClient client,PlayerEntity player) {
         Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
-        var policy=new com.fredoseep.algorithm.planning.LeafTargetPolicy(player.getBlockPos(),player.getStandingEyeHeight(),
-                p -> isMiningStance(client,p,java.util.Set.of(),true),
+        var policy=new LeafTargetPolicy(player.getBlockPos(),player.getStandingEyeHeight(),
+                p -> isMiningStance(client,p,Set.of(),true),
                 p -> eye.squaredDistanceTo(Vec3d.ofCenter(p))<=20 && miningVisible(client,player,eye,p),
                 (stance,target) -> miningVisible(client,player,new Vec3d(stance.getX()+.5,
                         stance.getY()+player.getStandingEyeHeight(),stance.getZ()+.5),target));
@@ -298,7 +323,7 @@ public class MiscController implements IBotModule {
 
                 prepareMineBlockAboveHead(player, targetPos);
 
-                client.interactionManager.updateBlockBreakingProgress(targetPos, net.minecraft.util.math.Direction.DOWN);
+                client.interactionManager.updateBlockBreakingProgress(targetPos, Direction.DOWN);
                 if (!player.handSwinging) {
                     player.swingHand(Hand.MAIN_HAND);
                 }
@@ -381,7 +406,7 @@ public class MiscController implements IBotModule {
 
                     int doorSlot = -1;
                     for (int i = 0; i < 36; i++) {
-                        if (player.inventory.getStack(i).getItem().isIn(net.minecraft.tag.ItemTags.DOORS)) {
+                        if (player.inventory.getStack(i).getItem().isIn(ItemTags.DOORS)) {
                             doorSlot = i;
                             break;
                         }
@@ -390,7 +415,7 @@ public class MiscController implements IBotModule {
 
                     if (isUnderwater && doorSlot != -1) {
                         BlockPos bestSpot=null,fallbackSpot=null;
-                        for(net.minecraft.util.math.Direction d:net.minecraft.util.math.Direction.Type.HORIZONTAL) {
+                        for(Direction d:Direction.Type.HORIZONTAL) {
                             BlockPos p=targetPos.up().offset(d);
                             if(client.world.getBlockState(p).getMaterial().isLiquid() && isSafeDoorFoundation(client,p.down())
                                     && !p.down().equals(targetPos)) {
@@ -454,7 +479,7 @@ public class MiscController implements IBotModule {
                         case PLACE_DOOR:
                             int dSlot = -1;
                             for (int i = 0; i < 36; i++) {
-                                if (player.inventory.getStack(i).getItem().isIn(net.minecraft.tag.ItemTags.DOORS)) {
+                                if (player.inventory.getStack(i).getItem().isIn(ItemTags.DOORS)) {
                                     dSlot = i; break;
                                 }
                             }
@@ -539,9 +564,9 @@ public class MiscController implements IBotModule {
                             if (pathExecutor.isBusy()) return;
                             resetKeys();pickupCoolDownTick++;
 
-                            net.minecraft.util.math.Box searchBox = new net.minecraft.util.math.Box(doorPos).expand(15.0, 10.0, 15.0);
-                            java.util.List<net.minecraft.entity.ItemEntity> drops = client.world.getEntities(
-                                    net.minecraft.entity.ItemEntity.class,
+                            Box searchBox = new Box(doorPos).expand(15.0, 10.0, 15.0);
+                            List<ItemEntity> drops = client.world.getEntities(
+                                    ItemEntity.class,
                                     searchBox,
                                     e -> underwaterLootEligible(e,false)
                                             && !unreachableEntities.contains(e)
@@ -550,9 +575,9 @@ public class MiscController implements IBotModule {
                             );
 
                             if (!drops.isEmpty()) {
-                                net.minecraft.entity.ItemEntity nearestDrop = drops.get(0);
+                                ItemEntity nearestDrop = drops.get(0);
                                 double minDist = player.squaredDistanceTo(nearestDrop);
-                                for (net.minecraft.entity.ItemEntity drop : drops) {
+                                for (ItemEntity drop : drops) {
                                     double d = player.squaredDistanceTo(drop);
                                     if (d < minDist) { minDist = d; nearestDrop = drop; }
                                 }
@@ -647,9 +672,9 @@ public class MiscController implements IBotModule {
                             if (pathExecutor.isBusy()) return; // 防止疯狂发包
                             pickupCoolDownTick++;
 
-                            net.minecraft.util.math.Box finalSearchBox = new net.minecraft.util.math.Box(doorPos).expand(8.0, 8.0, 8.0);
+                            Box finalSearchBox = new Box(doorPos).expand(8.0, 8.0, 8.0);
                              drops = client.world.getEntities(
-                                    net.minecraft.entity.ItemEntity.class,
+                                    ItemEntity.class,
                                     finalSearchBox,
                                     e -> underwaterLootEligible(e,true)
                                             && !unreachableEntities.contains(e)
@@ -658,9 +683,9 @@ public class MiscController implements IBotModule {
                             );
 
                             if (!drops.isEmpty()) {
-                                net.minecraft.entity.ItemEntity nearestDrop = drops.get(0);
+                                ItemEntity nearestDrop = drops.get(0);
                                 double minDist = player.squaredDistanceTo(nearestDrop);
-                                for (net.minecraft.entity.ItemEntity drop : drops) {
+                                for (ItemEntity drop : drops) {
                                     double d = player.squaredDistanceTo(drop);
                                     if (d < minDist) { minDist = d; nearestDrop = drop; }
                                 }
@@ -1005,12 +1030,12 @@ public class MiscController implements IBotModule {
     private boolean insideBreathingDoor(PlayerEntity player) {
         return UnderwaterGravelWork.inside(
                 player.getX()-doorPos.getX()-.5,player.getY()-doorPos.getY(),player.getZ()-doorPos.getZ()-.5,
-                player.isOnGround(),player.isSubmergedIn(net.minecraft.tag.FluidTags.WATER));
+                player.isOnGround(),player.isSubmergedIn(FluidTags.WATER));
     }
     private boolean underwaterLootEligible(ItemEntity drop,boolean finalRecovery) {
         if(!drop.isAlive() || drop.getStack().isEmpty())return false;
         Item item=drop.getStack().getItem();
-        if(finalRecovery && item.isIn(net.minecraft.tag.ItemTags.DOORS))return true;
+        if(finalRecovery && item.isIn(ItemTags.DOORS))return true;
         if(uwGravelMission) {
             if(finalRecovery && uwGravelWork.hasFlint())return item==Items.FLINT;
             return uwGravelWork.wants(item==Items.GRAVEL,item==Items.FLINT);
