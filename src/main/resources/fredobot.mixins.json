@@ -12,6 +12,13 @@
     "requireAnnotations": true
   },
   "client": [
-    "MixinWorldRenderer"
+    "MixinWorldRenderer",
+    "MixinTreasureSeedProvider",
+    "MixinTestClientPlayer",
+    "MixinTestChatHud",
+    "MixinTestInventory",
+    "MixinTestTitleScreen",
+    "MixinPreflightWorldCreation",
+    "MixinPreflightPauseState"
   ]
 }

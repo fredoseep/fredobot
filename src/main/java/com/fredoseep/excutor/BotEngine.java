@@ -2,6 +2,8 @@ package com.fredoseep.excutor;
 
 import com.fredoseep.Fredobot;
 import com.fredoseep.Test;
+import com.fredoseep.testing.CreativeWorldTestRunner;
+import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
@@ -63,12 +65,14 @@ public class BotEngine {
     }
 
     public void start() {
+        if (CreativeWorldTestRunner.isActive()) return;
         if (isRunning) return;
         isRunning = true;
         for (IBotModule module : modules) {
             module.onEnable();
         }
     }
+    public boolean isRunning() { return isRunning; }
 
     public void stop() {
         if (!isRunning) return;
@@ -80,6 +84,8 @@ public class BotEngine {
 
     // 每 0.05 秒被 Fabric 自动调用
     private void onClientTick(MinecraftClient client) {
+        EarlyResetPreflight.pump(client);
+        if (EarlyResetPreflight.blocking(client)) return;
         Test.tick();
         if (!isRunning || client.player == null || client.world == null) return;
 

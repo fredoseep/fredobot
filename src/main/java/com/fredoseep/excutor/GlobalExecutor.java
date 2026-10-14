@@ -1,6 +1,9 @@
 package com.fredoseep.excutor;
 
 import com.fredoseep.Test;
+import com.fredoseep.preflight.EarlyResetPreflight;
+import com.fredoseep.preflight.ResetHistory;
+import org.apache.logging.log4j.LogManager;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
 import com.fredoseep.behave.MiscController;
@@ -43,6 +46,13 @@ public class GlobalExecutor implements IBotModule {
     }
 
     public void resetWorld() {
+        resetWorld("未注明分支（阶段 " + currentState.name() + "）");
+    }
+
+    public void resetWorld(String reason) {
+        ResetHistory.record(reason);
+        LogManager.getLogger("FredoBotReset").info("[Reset] reason={} stage={}", reason, currentState);
+        EarlyResetPreflight.resetScheduled();
         resetState();
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
         if (pathExecutor != null) {

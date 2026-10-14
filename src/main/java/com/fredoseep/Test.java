@@ -69,8 +69,9 @@ public class Test {
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
         if(NetherPortalBuilding.currentTBOState== NetherPortalBuilding.TwoByOneBuildState.IDLE){
         if(pathExecutor.isBusy())return;
-        if(!PlayerHelper.isNear(client.player,PreNether.magmaPos.up(),1)){
-            pathExecutor.setGoal(PreNether.magmaPos.up(),"Testing Magma Pos");
+        if(!PlayerHelper.isNear(client.player,PreNether.magmaPos.up(),1) || PreNether.magmaFallbackStatus()!=null){
+            PreNether.requestMagmaRoute(client.player,pathExecutor);
+            PreNether.preNetherStuff(client.player);
             return;
         }
         }

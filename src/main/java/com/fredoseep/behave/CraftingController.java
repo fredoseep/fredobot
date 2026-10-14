@@ -32,6 +32,17 @@ public class CraftingController implements IBotModule {
     }
 
     public boolean isDone() { return state == CraftState.DONE; }
+    public String hudStatus() {
+        String phase=switch(state) {
+            case IDLE -> "等待合成";
+            case SEND_PACKET -> "提交合成";
+            case WAITING_FOR_RESULT -> "等待合成结果";
+            case COLLECTING -> "取出合成物";
+            case DONE -> "合成完成";
+            case FAILED -> "合成失败";
+        };
+        return phase+(currentTarget==null?"":"："+currentTarget.getName().getString()+" ×"+currentTimes);
+    }
     public boolean isFailed() { return state == CraftState.FAILED; }
 
     public void startCrafting(Item item, int times) {

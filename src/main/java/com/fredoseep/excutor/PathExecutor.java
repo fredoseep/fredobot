@@ -17,6 +17,9 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.text.LiteralText;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
@@ -38,6 +41,12 @@ public class PathExecutor implements IBotModule {
     private final RetryBackoff<RequestKey> retryBackoff=new RetryBackoff<>();
     private boolean breathingDoorGoal;
     private long searchFailureSerial;
+    private World lastSearchFailureWorld;
+    private BlockPos lastSearchFailureGoal;
+    public boolean searchFailedFor(World world,BlockPos goal,long sinceSerial) {
+        return searchFailureSerial>sinceSerial && lastSearchFailureWorld==world
+                && goal!=null && goal.equals(lastSearchFailureGoal);
+    }
     public long getSearchFailureSerial(){return searchFailureSerial;}
     public void recordMiningTarget(BlockPos block,BlockPos feetGoal) {
         if(plannerDebug!=null && plannerDebug.diagnostics!=null)
@@ -61,6 +70,8 @@ public class PathExecutor implements IBotModule {
     }
     private boolean reportFailure(MinecraftClient client) {
         searchFailureSerial++;
+        lastSearchFailureWorld=client.world;
+        lastSearchFailureGoal=finalDestination==null?null:finalDestination.toImmutable();
         return client.player==null || finalDestination==null || retryBackoff.fail(requestKey(client,finalDestination,currentBlacklist),System.nanoTime()/1_000_000)==1;
     }
     public PlannerDebug.View getSearchView() {
@@ -102,8 +113,8 @@ public class PathExecutor implements IBotModule {
     // 废弃了 nextPath，因为我们将使用无缝拼接流！
     private boolean isCalculatingNext = false;
     private boolean isPaused = false;
-    private static final org.apache.logging.log4j.Logger STUCK_LOG =
-            org.apache.logging.log4j.LogManager.getLogger("FredoBotPathfinder");
+    private static final Logger STUCK_LOG =
+            LogManager.getLogger("FredoBotPathfinder");
     private int stuckCheckTicks = 0;
     private int consecutiveStuckCount = 0; // 【新增】：记录连续卡死的次数
     private Vec3d lastStuckCheckPos = null;
@@ -382,6 +393,10 @@ public class PathExecutor implements IBotModule {
                     java.util.Map.entry("use",client.options.keyUse.isPressed()));
             var state=StuckDump.capture(client.world,player,currentPath,currentPathIndex,finalDestination,
                     currentPathUsesActionPlanner,consecutiveStuckCount,stuckCheckTicks,dx,dy,dz,minMovement,keys);
+            state.put("min_vertical_movement_blocks",PlannerSettings.DEFAULT.stuckMinVerticalMovement);
+            MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
+            if(movement!=null && currentPathIndex<currentPath.size())state.put("jump_control",movement.jumpDiagnostic(currentPath.get(currentPathIndex)));
+            if(movement!=null)state.put("surface_swim_phase",movement.swimPhase());
             diagnostic=new PlannerDiagnostics(client.runDirectory.toPath(),calculationGeneration,
                     Thread.currentThread(),error -> STUCK_LOG.error("STUCK_DUMP_WRITE_FAILED",error),
                     PlannerSettings.DEFAULT.keepSuccessfulDiagnostics);
@@ -393,6 +408,17 @@ public class PathExecutor implements IBotModule {
             if(diagnostic!=null){diagnostic.error(error);diagnostic.close("failed");}
             STUCK_LOG.error("STUCK_DUMP_CAPTURE_FAILED",error);
         }
+    }
+
+    public void failCurrentJump(PlayerEntity player) {
+        if(currentState!=State.EXECUTING || currentPath==null)return;
+        Vec3d before=lastStuckCheckPos==null?player.getPos():lastStuckCheckPos;
+        dumpStuck(MinecraftClient.getInstance(),player,player.getX()-before.x,player.getY()-before.y,
+                player.getZ()-before.z,PlannerSettings.DEFAULT.stuckMinMovement);
+        consecutiveStuckCount++;
+        STUCK_LOG.info("JUMP_RETRY_LIMIT count={} node={}",consecutiveStuckCount,currentPathIndex);
+        if(consecutiveStuckCount>=3){stop();return;}
+        stuckCheckTicks=0;lastStuckCheckPos=player.getPos();replanFromPlayer();
     }
 
     @Override
@@ -414,7 +440,11 @@ public class PathExecutor implements IBotModule {
                 }
             }
         }
-        if (isMining) {
+        MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
+        boolean turningJump=movement!=null && currentPathIndex<currentPath.size()
+                && movement.jumpTurningProgress(currentPath.get(currentPathIndex));
+        boolean startingSwim=movement!=null && movement.swimStarting();
+        if (isMining || turningJump || startingSwim) {
             stuckCheckTicks = 0;
             lastStuckCheckPos = player.getPos();
         } else {
@@ -423,14 +453,13 @@ public class PathExecutor implements IBotModule {
                 double dx = player.getX() - lastStuckCheckPos.x;
                 double dz = player.getZ() - lastStuckCheckPos.z;
                 double dy = Math.abs(player.getY() - lastStuckCheckPos.y);
-                double horizontalDistSq = dx * dx + dz * dz;
 
                 double minMovement = PlannerSettings.DEFAULT.stuckMinMovement;
                 if (!Double.isFinite(minMovement) || minMovement <= 0) minMovement = .3;
-                if (horizontalDistSq < minMovement*minMovement && dy < minMovement) {
+                if (PlannerSettings.DEFAULT.isStuckDisplacement(dx,dy,dz)) {
                     dumpStuck(client,player,dx,player.getY()-lastStuckCheckPos.y,dz,minMovement);
                     consecutiveStuckCount++;
-                    player.sendMessage(new net.minecraft.text.LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
+                    player.sendMessage(new LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
                     System.out.println("FredoBot: 触发被困保护，连续次数: " + consecutiveStuckCount + "，正在重新计算！");
 
                     // 【核心修复 1】：连续卡死 3 次直接放弃治疗！切断无限安全港刷屏。
@@ -574,7 +603,7 @@ public class PathExecutor implements IBotModule {
 
         boolean isStrictMode = consecutiveStuckCount >= 2;
 
-        net.minecraft.util.math.Box lowerBody = PathReachBoxes.player(player,isStrictMode);
+        Box lowerBody = PathReachBoxes.player(player,isStrictMode);
 
         int lookAheadLimit = Math.min(currentPathIndex + 5, currentPath.size());
         if (currentPathUsesActionPlanner) lookAheadLimit = Math.min(currentPathIndex + 1, currentPath.size());
@@ -583,9 +612,12 @@ public class PathExecutor implements IBotModule {
         for (int i = currentPathIndex; i < lookAheadLimit; i++) {
             SimplePathfinder.Node node = currentPath.get(i);
 
-            net.minecraft.util.math.Box nodeBox = PathReachBoxes.node(currentPath,i,isStrictMode);
+            Box nodeBox = PathReachBoxes.node(currentPath,i,isStrictMode);
 
             boolean isPhysicallyReached = lowerBody.intersects(nodeBox);
+            // A sprint-swimming body's forward projection must not skip a rise or a turn.
+            if(PathReachBoxes.plannedWater(node) && !player.hasVehicle())
+                isPhysicallyReached &= PathReachBoxes.waterPositionReached(player.getX(),player.getY(),player.getZ(),node);
             if (node.plannedAction != null) {
                 // A node cannot be skipped while any explicit prerequisite remains unfinished.
                 for (BlockPos obstacle : node.plannedAction.breaks) {
@@ -600,6 +632,19 @@ public class PathExecutor implements IBotModule {
                 if(node.state==SimplePathfinder.MovementState.JUMPING_UP) {
                     double landingX=player.getX()-node.pos.getX()-.5,landingZ=player.getZ()-node.pos.getZ()-.5;
                     isPhysicallyReached &= landingX*landingX+landingZ*landingZ<=.12;
+                }
+            }
+
+            if(node.plannedAction!=null && node.state==SimplePathfinder.MovementState.WALKING
+                    && i+1<currentPath.size()) {
+                SimplePathfinder.Node next=currentPath.get(i+1);
+                if(next.state==SimplePathfinder.MovementState.JUMPING_UP && next.plannedAction!=null
+                        && !next.plannedAction.isShoreExit()) {
+                    double approachX=player.getX()-node.pos.getX()-.5,approachZ=player.getZ()-node.pos.getZ()-.5;
+                    Vec3d v=player.getVelocity();
+                    isPhysicallyReached &= approachX*approachX+approachZ*approachZ<=.06
+                            && Math.abs(player.getY()-node.pos.getY())<.3 && player.isOnGround()
+                            && v.x*v.x+v.z*v.z<=.01;
                 }
             }
 
@@ -619,7 +664,8 @@ public class PathExecutor implements IBotModule {
                 double allowedDistSq = PathReachBoxes.finalHorizontalLimit(node,isStrictMode);
 
                 // Keep planned break/place/landing prerequisites even at the final mission node.
-                isPhysicallyReached &= (dx * dx + dz * dz <= allowedDistSq) && (dy <= 0.5);
+                double finalVertical=PathReachBoxes.plannedWater(node)?PathReachBoxes.waterUpperLimit(node):.5;
+                isPhysicallyReached &= (dx * dx + dz * dz <= allowedDistSq) && (dy <= finalVertical);
             }
 
             boolean isPathBlocked = false;

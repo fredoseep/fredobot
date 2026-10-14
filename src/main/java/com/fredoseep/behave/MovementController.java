@@ -1,11 +1,18 @@
 package com.fredoseep.behave;
 
 import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.algorithm.planning.PathReachBoxes;
+import com.fredoseep.algorithm.planning.WaterSteering;
+import com.fredoseep.algorithm.planning.SurfaceSwimControl;
+import com.fredoseep.algorithm.planning.SurfaceWaterDepth;
+import com.fredoseep.algorithm.planning.DiveClearance;
+import com.fredoseep.algorithm.planning.SurfaceBoatRoute;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.PathExecutor;
 import com.fredoseep.utils.bt.BtStuff;
 import com.fredoseep.utils.player.*;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.Material;
@@ -47,13 +54,16 @@ public class MovementController implements IBotModule {
 
     private int aimStabilizationTicks = 0;
     private int swimStateStabilizationTicks = 0;
+    private final SurfaceSwimControl surfaceSwim=new SurfaceSwimControl();
+    public String swimPhase(){return surfaceSwim.phase().name();}
+    public boolean swimStarting(){return surfaceSwim.starting();}
     private int boatInventorySleepingTick = 0;
     private int horizontalCollisionTicks = 0;
     private int boatHorizontalCollisionTicks = 0;
     private boolean boatHasBeenPlacedDown = false;
     private SimplePathfinder.MovementState nextState = SimplePathfinder.MovementState.WALKING;
     private SimplePathfinder.Node activeJumpNode,smoothCheckNode;
-    private boolean jumpLaunched;
+    private com.fredoseep.algorithm.planning.JumpControl.Attempt jumpAttempt;
     private int smoothCheckTicks;
 
 
@@ -70,13 +80,14 @@ public class MovementController implements IBotModule {
 
         this.aimStabilizationTicks = 0;
         this.swimStateStabilizationTicks = 0;
+        surfaceSwim.reset();
         this.boatInventorySleepingTick = 0;
         this.boatHasBeenPlacedDown = false;
         this.horizontalCollisionTicks = 0;
         this.boatHorizontalCollisionTicks = 0;
 
         lastState = SimplePathfinder.MovementState.WALKING;
-        activeJumpNode=null;jumpLaunched=false;smoothCheckNode=null;smoothCheckTicks=0;
+        activeJumpNode=null;jumpAttempt=null;smoothCheckNode=null;smoothCheckTicks=0;
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client != null && client.options != null) {
@@ -129,7 +140,24 @@ public class MovementController implements IBotModule {
         SimplePathfinder.Node targetNode = new SimplePathfinder.Node(originalNode.pos, originalNode.extraPos, originalNode.parent, originalNode.costFromStart, originalNode.estimatedCostToEnd, originalNode.state, originalNode.blocksUsed);
         targetNode.plannedAction = originalNode.plannedAction;
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+        if (PlayerHelper.isDrivingBoat(player) && originalNode.state != SimplePathfinder.MovementState.SWIMMING) {
+            resetKeys();pathExecutor.pause();
+            BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING,originalNode.pos);
+            return;
+        }
         if (originalNode.plannedAction != null && preparePlannedBreaks(client, player, originalNode)) return;
+        if(originalNode.plannedAction!=null && originalNode.plannedAction.isSmoothDive()
+                && (smoothCheckNode!=originalNode || ++smoothCheckTicks>=10)) {
+            smoothCheckNode=originalNode;smoothCheckTicks=0;
+            BlockPos to=originalNode.pos;
+            Box body=player.getBoundingBox();
+            boolean safe=DiveClearance.clear(player.getX(),player.getY(),player.getZ(),to.getX()+.5,to.getY(),to.getZ()+.5,body.maxY-body.minY,
+                    p -> client.world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
+                            && client.world.getBlockState(p).getCollisionShape(client.world,p).isEmpty()
+                            && client.world.getBlockState(p).getFluidState().isIn(FluidTags.WATER)
+                            && !(client.world.getBlockState(p).getBlock() instanceof DoorBlock),() -> false);
+            if(!safe){resetKeys();BotEngine.getInstance().getModule(PathExecutor.class).replanFromPlayer();return;}
+        }
         if(originalNode.plannedAction!=null && originalNode.plannedAction.isSmoothWalk()
                 && (smoothCheckNode!=originalNode || ++smoothCheckTicks>=10)) {
             smoothCheckNode=originalNode;smoothCheckTicks=0;
@@ -186,6 +214,7 @@ public class MovementController implements IBotModule {
         }
         if (lastState == SimplePathfinder.MovementState.SWIMMING && targetNode.state != SimplePathfinder.MovementState.SWIMMING
                 && (targetNode.plannedAction == null || PlayerHelper.isDrivingBoat(player))) {
+            resetKeys();player.setSprinting(false);
             pathExecutor.pause();
             BotEngine.getInstance().getModule(MiscController.class).startTask(MiscController.MiscType.BACK_FROM_SWIMMING, targetNode.pos);
             return;
@@ -211,6 +240,7 @@ public class MovementController implements IBotModule {
         pressSneak = false;
         pressAttack = false;
         pressSprint = false;
+        if(targetNode.state!=SimplePathfinder.MovementState.SWIMMING)surfaceSwim.reset();
 
         if (PlayerHelper.isDrivingBoat(player) && player.getVehicle().horizontalCollision) {
             boatHorizontalCollisionTicks++;
@@ -233,6 +263,38 @@ public class MovementController implements IBotModule {
             double verticalTarget=targetNode.pos.getY()+1.8-player.getEyeY();
             float risePitch=(float)-Math.toDegrees(Math.atan2(verticalTarget,Math.sqrt(distSq)));
             setLookDirection(player,targetYaw,risePitch);
+            lastState=targetNode.state;
+            return;
+        }
+
+        boolean boatingSurface = SurfaceBoatRoute.allowed(client.world,targetNode)
+                && isBoatingNeeded(player) && (InventoryHelper.hasBoat(player) || boatHasBeenPlacedDown);
+        if(PathReachBoxes.plannedWater(targetNode) && !player.hasVehicle() && !boatingSurface) {
+            double verticalError=targetNode.pos.getY()-player.getY();
+            if(targetNode.state==SimplePathfinder.MovementState.SWIMMING) {
+                boolean deep=canImmerseHere(client,player);
+                int waterRun=0;
+                for(int i=currentIndex;i<nodeList.size() && waterRun<8;i++) {
+                    SimplePathfinder.MovementState state=nodeList.get(i).state;
+                    if(state!=SimplePathfinder.MovementState.SWIMMING && state!=SimplePathfinder.MovementState.DIVING)break;
+                    waterRun++;
+                }
+                // A swimming body's feet sit about half a block above the surface cell's base.
+                SurfaceSwimControl.Keys swim=surfaceSwim.tick(player.isTouchingWater(),deep,player.isSwimming(),
+                        player.isSubmergedIn(FluidTags.WATER),player.getHungerManager().getFoodLevel()>6,
+                        waterRun>=8,targetNode.pos.getY()-player.getY(),player.getVelocity().y);
+                pressForward=true;pressSprint=swim.sprint();pressSneak=swim.sneak();pressJump=swim.jump();
+                setLookDirection(player,targetYaw,swim.pitch());lastState=targetNode.state;return;
+            }
+            if(WaterSteering.enterSwimming(player.isTouchingWater(),player.isSwimming(),verticalError))
+                tryToSwim(player); // Preserve the original immersion/sprint startup before steering takes over.
+            Vec3d velocity=player.getVelocity();
+            BlockPos fluidPos=player.getBlockPos();
+            Vec3d flow=client.world.getBlockState(fluidPos).getFluidState().getVelocity(client.world,fluidPos);
+            WaterSteering.Aim aim=WaterSteering.aim(targetX-player.getX(),verticalError,
+                    targetZ-player.getZ(),velocity.x,velocity.y,velocity.z,flow.x,flow.y,flow.z,player.yaw);
+            pressForward=true;pressSprint=true;pressJump=aim.rise();
+            setLookDirection(player,aim.yaw(),aim.pitch());
             lastState=targetNode.state;
             return;
         }
@@ -266,6 +328,16 @@ public class MovementController implements IBotModule {
                     List<SimplePathfinder.Node> path = pathExecutor.getCurrentPath();
                     if (nextIndex < path.size()) {
                         SimplePathfinder.Node nextNode = path.get(nextIndex);
+                        if(nextNode.state==SimplePathfinder.MovementState.JUMPING_UP && nextNode.plannedAction!=null
+                                && !nextNode.plannedAction.isShoreExit() && distSq<2.25) {
+                            double approachDistance=Math.sqrt(distSq);
+                            Vec3d v=player.getVelocity();
+                            double closing=approachDistance<1e-6?0:(v.x*(targetX-player.getX())+v.z*(targetZ-player.getZ()))/approachDistance;
+                            var approach=com.fredoseep.algorithm.planning.JumpControl.approach(approachDistance,closing,
+                                    MathHelper.wrapDegrees(player.yaw-targetYaw));
+                            pressForward=approach.forward();pressBack=approach.back();
+                            pressSprint=false;player.setSprinting(false);
+                        }
                         if (nextNode.state == SimplePathfinder.MovementState.JUMPING_UP && nextNode.plannedAction==null) {
                             double distToNextXZ = Math.sqrt(Math.pow(player.getX() - (nextNode.pos.getX() + 0.5), 2) + Math.pow(player.getZ() - (nextNode.pos.getZ() + 0.5), 2));
                             if (distToNextXZ < 1.15) {
@@ -280,6 +352,7 @@ public class MovementController implements IBotModule {
                 if (targetNode.plannedAction != null && targetNode.plannedAction.isShoreExit()) {
                     // Stop sprint-swimming, rise toward the bank top, then settle onto it.
                     pressSprint = false;
+                    pressSneak = false;player.setSprinting(false);surfaceSwim.reset();
                     pressForward = distSq > 0.03;
                     pressJump = player.isTouchingWater() || player.getY() < targetNode.pos.getY() - 0.1;
                     targetPitch = -20f;
@@ -452,7 +525,9 @@ public class MovementController implements IBotModule {
                 break;
             case DIVING:
                 double dX = targetX - player.getX();
-                double dY = targetNode.pos.getY() + 0.5D - (player.getY() + player.getEyeHeight(player.getPose()));
+                // Planner coordinates are feet positions; using eyes biases a swimming pose by its eye height.
+                double dY = targetNode.plannedAction!=null?targetNode.pos.getY()-player.getY():
+                        targetNode.pos.getY() + 0.5D - (player.getY() + player.getEyeHeight(player.getPose()));
                 double dZ = targetZ - player.getZ();
                 double horizontalDist = Math.sqrt(dX * dX + dZ * dZ);
 
@@ -462,6 +537,7 @@ public class MovementController implements IBotModule {
                 }
                 pressForward = true;
                 pressSprint = true;
+                if(targetNode.plannedAction!=null && dY>.25)pressJump=true;
 
                 break;
 
@@ -532,9 +608,9 @@ public class MovementController implements IBotModule {
                     if (swimStateStabilizationTicks <= 25) {
                         swimStateStabilizationTicks++;
                     } else {
-                        pressJump = (player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D) || player.getY() <= 61;
+                        pressJump = player.isSubmergedIn(FluidTags.WATER) && player.getVelocity().y < 0.03D;
                     }
-                } else if (targetNode.plannedAction != null || !isBoatingNeeded(player) || (!InventoryHelper.hasBoat(player)) && !boatHasBeenPlacedDown) {
+                } else if (!boatingSurface || (!InventoryHelper.hasBoat(player)) && !boatHasBeenPlacedDown) {
                     if (MinecraftClient.getInstance().world != null && (!isWaterDeepEnough() || MinecraftClient.getInstance().world.getBlockState(new BlockPos(player.getX(), player.getY(), player.getZ()).down()).getMaterial() != Material.WATER) || player.getHungerManager().getFoodLevel() <= 6) {
                         trySurfaceFloat();
                         break;
@@ -583,17 +659,23 @@ public class MovementController implements IBotModule {
     }
 
     private BlockPos plannedBreakTarget;
+    public boolean jumpTurningProgress(SimplePathfinder.Node node) {
+        return activeJumpNode==node && jumpAttempt!=null && jumpAttempt.turningProgress();
+    }
+    public java.util.Map<String,Object> jumpDiagnostic(SimplePathfinder.Node node) {
+        return activeJumpNode==node && jumpAttempt!=null?jumpAttempt.diagnostic():java.util.Map.of("phase","NOT_ACTIVE");
+    }
     private void controlLanding(PlayerEntity player,SimplePathfinder.Node node,double distSq,boolean gap) {
-        if(activeJumpNode!=node){activeJumpNode=node;jumpLaunched=!player.isOnGround();}
-        if(!player.isOnGround())jumpLaunched=true;
+        if(activeJumpNode!=node){activeJumpNode=node;jumpAttempt=new com.fredoseep.algorithm.planning.JumpControl.Attempt();}
         double distance=Math.sqrt(distSq),dx=node.pos.getX()+.5-player.getX(),dz=node.pos.getZ()+.5-player.getZ();
         Vec3d velocity=player.getVelocity();
         double closing=distance<1e-6?0:(velocity.x*dx+velocity.z*dz)/distance;
-        var input=com.fredoseep.algorithm.planning.JumpControl.step(distance,closing,player.isOnGround(),
-                player.getY()>=node.pos.getY()-.15,jumpLaunched,gap);
+        double lateral=distance<1e-6?Math.hypot(velocity.x,velocity.z):(velocity.x*dz-velocity.z*dx)/distance;
+        var input=jumpAttempt.tick(distance,closing,lateral,player.isOnGround(),
+                player.getY()>=node.pos.getY()-.15,MathHelper.wrapDegrees(player.yaw-targetYaw),gap);
         if(!input.sprint())player.setSprinting(false);
         pressForward=input.forward();pressBack=input.back();pressJump=input.jump();pressSprint=input.sprint();
-        if(pressJump)jumpLaunched=true;
+        if(jumpAttempt.failed())BotEngine.getInstance().getModule(PathExecutor.class).failCurrentJump(player);
     }
     private int plannedBreakTicks;
 
@@ -611,6 +693,9 @@ public class MovementController implements IBotModule {
                 BotEngine.getInstance().getModule(PathExecutor.class).replanFromPlayer();
                 return true;
             }
+            BlockPos feet=player.getBlockPos();
+            if(p.getX()==feet.getX() && p.getZ()==feet.getZ() && p.getY()<feet.getY()
+                    && ShaftRoof.seal(client,player)==ShaftRoof.Result.WAITING) return true;
             if (!ToolsHelper.equipPlannedTool(player, p, node.plannedAction.tools.get(actionIndex))) {
                 BotEngine.getInstance().getModule(PathExecutor.class).replanFromPlayer();
                 return true;
@@ -667,7 +752,8 @@ public class MovementController implements IBotModule {
     private void tryToSwim(PlayerEntity player) {
         pressForward = true;
         pressSprint = true;
-        if (player.isTouchingWater() && MinecraftClient.getInstance().world.getBlockState(player.getBlockPos().down(2)).getMaterial().isLiquid())
+        if (player.isTouchingWater() && !player.isSubmergedIn(FluidTags.WATER)
+                && canImmerseHere(MinecraftClient.getInstance(),player))
             pressSneak = true;
         swimStateStabilizationTicks = 0;
     }
@@ -784,12 +870,13 @@ public class MovementController implements IBotModule {
 
 
     private boolean isWaterDeepEnough() {
-        PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
-        if (pathExecutor == null) return false;
-        MinecraftClient minecraftClient = MinecraftClient.getInstance();
-        if (minecraftClient.world == null) return false;
-        BlockState downState = minecraftClient.world.getBlockState(pathExecutor.getCurrentNode().pos.down());
-        return downState.getMaterial() == Material.WATER || downState.getFluidState().isIn(FluidTags.WATER);
+        MinecraftClient client=MinecraftClient.getInstance();
+        return client.player!=null && canImmerseHere(client,client.player);
+    }
+    private boolean canImmerseHere(MinecraftClient client,PlayerEntity player) {
+        return client.world!=null && SurfaceWaterDepth.canImmerse(player.getX(),player.getY(),player.getZ(),
+                p -> client.world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
+                        && client.world.getBlockState(p).getFluidState().isIn(FluidTags.WATER));
     }
 
     private boolean isBoatingNeeded(PlayerEntity player) {
@@ -798,13 +885,8 @@ public class MovementController implements IBotModule {
         if (player.getHungerManager().getFoodLevel() <= 6) return true;
         if (pathExecutor == null) return false;
         List<SimplePathfinder.Node> currentPathList = pathExecutor.getCurrentPath();
-        int waterCounter = 0;
-        for (int i = pathExecutor.getCurrentPathIndex(); i < currentPathList.size(); i++) {
-            if (waterCounter > 7) return true;
-            if (currentPathList.get(i).state != SimplePathfinder.MovementState.SWIMMING) return false;
-            waterCounter++;
-        }
-        return false;
+        return SurfaceBoatRoute.distance(MinecraftClient.getInstance().world,currentPathList,
+                pathExecutor.getCurrentPathIndex(),player.getX(),player.getZ())>7;
     }
 
     public static void setLookDirection(PlayerEntity player, float targetYaw, float targetPitch) {

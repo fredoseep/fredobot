@@ -1,6 +1,9 @@
 package com.fredoseep.utils.bt;
 
 import com.fredoseep.BtPosContext;
+import com.fredoseep.preflight.EarlyResetPreflight;
+import com.fredoseep.preflight.PreflightGeometry;
+import com.fredoseep.preflight.TreasureLootValidation;
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.MiscController;
@@ -28,6 +31,7 @@ import net.minecraft.tag.ItemTags;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.Heightmap;
@@ -55,6 +59,7 @@ public class BtStuff {
     public static BlockPos btPos = null;
     public static BlockPos btStandingPos = null;
     public static BlockPos craftingTablePos = null;
+    public static BlockPos workbenchAnchor = null;
     public static BlockPos TNTSetupPos = null;
     public static boolean treeQueueGenerated = false;
     public static boolean tntQueueGenerated = false;
@@ -108,6 +113,7 @@ public class BtStuff {
         btPos = null;
         btStandingPos = null;
         craftingTablePos = null;
+        workbenchAnchor = null;
         TNTSetupPos = null;
         treeQueueGenerated = false;
         tntQueueGenerated = false;
@@ -117,100 +123,24 @@ public class BtStuff {
         InventoryHelper.doorType = null;
     }
 
-    public static int groundYNoLeavesOrTrees(BlockPos checkCol) {
-        BlockPos topPos = MinecraftClient.getInstance().world.getTopPosition(Heightmap.Type.WORLD_SURFACE, checkCol);
-        int groundY = -1;
-        for (int y = topPos.getY(); y > 40; y--) {
-            BlockState state = MinecraftClient.getInstance().world.getBlockState(new BlockPos(checkCol.getX(), y, checkCol.getZ()));
-            if (state.getMaterial().isSolid() && !state.isIn(BlockTags.LEAVES) && !state.isIn(BlockTags.LOGS)) {
-                groundY = y;
-                break;
-            }
-        }
-        return groundY;
+    public static int groundYNoLeavesOrTrees(BlockPos column) {
+        return PreflightGeometry.ground(MinecraftClient.getInstance().world, column);
     }
 
-
     public static BlockPos calTNTSetupPos(PlayerEntity player) {
-        World world = player.world;
-        BlockPos pPos = player.getBlockPos();
-        int pX = pPos.getX();
-        int pZ = pPos.getZ();
-        BlockPos bestTwoTreePos = null;
-        BlockPos bestOneTreePos = null;
-
-        for (int r = 0; r <= 50; r++) {
-            for (int x = -r; x <= r; x++) {
-                for (int z = -r; z <= r; z++) {
-                    if (Math.abs(x) != r && Math.abs(z) != r) continue;
-                    int worldX = pX + x;
-                    int worldZ = pZ + z;
-                    if (!world.getChunkManager().isChunkLoaded(worldX >> 4, worldZ >> 4)) continue;
-
-                    BlockPos checkCol = new BlockPos(worldX, 0, worldZ);
-                    int groundY = groundYNoLeavesOrTrees(checkCol);
-                    if (groundY <= 40) continue;
-
-                    BlockPos surfacePos = new BlockPos(worldX, groundY + 1, worldZ);
-                    BlockState surfaceState = world.getBlockState(surfacePos);
-
-                    boolean isSurfaceClear = surfaceState.isAir() || surfaceState.isIn(BlockTags.LEAVES) || surfaceState.getMaterial().isReplaceable() || surfaceState.getHardness(world, surfacePos) == 0.0f;
-
-                    if (!isSurfaceClear || surfaceState.getMaterial().isLiquid()) continue;
-
-                    int treeCount = 0;
-                    treeSearchLoop:
-                    for (int dx = -3; dx <= 3; dx++) {
-                        for (int dz = -3; dz <= 3; dz++) {
-                            if (dx * dx + dz * dz > 9) continue;
-                            for (int dy = 1; dy <= 2; dy++) {
-                                BlockPos treeCheckPos = new BlockPos(worldX + dx, groundY + dy, worldZ + dz);
-                                if (world.getBlockState(treeCheckPos).isIn(BlockTags.LOGS)) {
-                                    treeCount++;
-                                    if (treeCount >= 3) break treeSearchLoop;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    int targetY = -1;
-                    if (treeCount >= 3) targetY = groundY + 1;
-                    else if (treeCount == 2) targetY = groundY + 2;
-                    else if (treeCount == 1) targetY = groundY + 3;
-                    else continue;
-
-                    BlockPos candidate = new BlockPos(worldX, targetY, worldZ);
-                    BlockState candidateState = world.getBlockState(candidate);
-
-                    boolean canPlaceTNT = candidateState.isAir() || candidateState.isIn(BlockTags.LEAVES) || candidateState.getMaterial().isReplaceable() || candidateState.getHardness(world, candidate) == 0.0f;
-
-                    if (!canPlaceTNT || candidateState.getMaterial().isLiquid()) continue;
-
-                    if (treeCount >= 3) {
-                        return candidate;
-                    } else if (treeCount == 2 && bestTwoTreePos == null) {
-                        bestTwoTreePos = candidate;
-                    } else if (treeCount == 1 && bestOneTreePos == null) {
-                        bestOneTreePos = candidate;
-                    }
-                }
-            }
-        }
-
-        if (bestTwoTreePos != null) {
-            return bestTwoTreePos;
-        }
-        if (bestOneTreePos != null) {
-            return bestOneTreePos;
-        }
-        return new BlockPos(-1, -1, -1);
+        var saved = EarlyResetPreflight.plan(MinecraftClient.getInstance());
+        if (saved != null && saved.tnt() != null) return saved.tnt();
+        BlockPos result = PreflightGeometry.tnt(player.world, btPos != null ? btPos : player.getBlockPos(), () -> {});
+        return result == null ? new BlockPos(-1, -1, -1) : result;
     }
 
     public static void TNTSetupStaffs(PlayerEntity player) {
+        var saved = EarlyResetPreflight.plan(MinecraftClient.getInstance());
+        if (saved != null && saved.tnt() != null && !player.world.getChunkManager()
+                .isChunkLoaded(saved.tnt().getX() >> 4, saved.tnt().getZ() >> 4)) return;
         TNTSetupPos = calTNTSetupPos(player);
         if (TNTSetupPos.equals(new BlockPos(-1, -1, -1))) {
-            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("TNT 布置条件不足：无合适位置");
             System.out.println("Fredobot: reset because no place to set up TNT");
             return;
         }
@@ -224,7 +154,7 @@ public class BtStuff {
                 if (!lands.isEmpty()) {
                     BotEngine.getInstance().getModule(PathExecutor.class).setGoal(lands.get(0), "the land pos");
                 } else {
-                    BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                    BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("TNT 垫高材料不足：水中找不到草地");
                     System.out.println("Fredobot: reset because no land found");
                 }
                 return;
@@ -233,7 +163,7 @@ public class BtStuff {
             MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), neededBlockCount, 30));
 
             if (MiningHelper.blockToMine.size() < neededBlockCount) {
-                BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("TNT 垫高材料不足：草方块不够");
                 System.out.println("Fredobot : reset because cannot find enough grassblock");
                 return;
             }
@@ -245,25 +175,7 @@ public class BtStuff {
     }
 
     public static BlockPos findAProperCraftingTablePos(PlayerEntity player) {
-        BlockPos playerPos = player.getBlockPos();
-        World world = MinecraftClient.getInstance().world;
-        for (Direction dir : new Direction[]{Direction.EAST, Direction.WEST, Direction.NORTH, Direction.SOUTH}) {
-            BlockPos currentBlockPos = playerPos.offset(dir);
-
-            // 优先放同一层 (要求目标位置可替换，且脚下必须是实心方块)
-            if (world.getBlockState(currentBlockPos).getMaterial().isReplaceable() && world.getBlockState(currentBlockPos.down()).getMaterial().isSolid()) {
-                return currentBlockPos;
-            }
-            // 其次放高一层
-            if (world.getBlockState(currentBlockPos.up()).getMaterial().isReplaceable() && world.getBlockState(currentBlockPos).getMaterial().isSolid()) {
-                return currentBlockPos.up();
-            }
-            // 最后放低一层
-            if (world.getBlockState(currentBlockPos.down()).getMaterial().isReplaceable() && world.getBlockState(currentBlockPos.down().down()).getMaterial().isSolid()) {
-                return currentBlockPos.down();
-            }
-        }
-        return null;
+        return PreflightGeometry.table(player.world, player.getBlockPos());
     }
 
     public static BlockPos findAProperPosThen() {
@@ -347,10 +259,16 @@ public class BtStuff {
 
 
         if (hasTNT) {
-            if (currentIronCount >= 3) {
+            var trigger=TntTriggerPolicy.choose(InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL)>=0,
+                    InventoryHelper.countItem(player,Items.FLINT),currentIronCount,currentIronCount>=3,currentGoldCount>=2);
+            if(trigger==TntTriggerPolicy.Trigger.EXISTING_LIGHTER) {
+                // Reuse an existing lighter; no trigger recipe required.
+            } else if(trigger==TntTriggerPolicy.Trigger.CRAFT_LIGHTER) {
+                itemsToCraft.add(Items.FLINT_AND_STEEL);currentIronCount--;
+            } else if (trigger==TntTriggerPolicy.Trigger.IRON_PLATE) {
                 itemsToCraft.add(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
                 currentIronCount -= 2;
-            } else if (currentGoldCount >= 2) {
+            } else if (trigger==TntTriggerPolicy.Trigger.GOLD_PLATE) {
                 itemsToCraft.add(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
                 currentGoldCount -= 2;
             } else {
@@ -393,6 +311,21 @@ public class BtStuff {
     }
 
 
+    private static boolean canCraftTntLighter(PlayerEntity player) {
+        int reserved=0;
+        for(Item item:itemsToCraft) {
+            if(item==Items.IRON_PICKAXE || item==Items.IRON_AXE || item==Items.BUCKET)reserved+=3;
+            else if(item==Items.SHEARS || item==Items.IRON_SWORD)reserved+=2;
+            else if(item==Items.IRON_SHOVEL)reserved++;
+        }
+        return TntTriggerPolicy.choose(false,InventoryHelper.countItem(player,Items.FLINT),
+                InventoryHelper.countItem(player,Items.IRON_INGOT)-reserved,false,false)==TntTriggerPolicy.Trigger.CRAFT_LIGHTER;
+    }
+    private static void removeTntTriggerRecipes() {
+        itemsToCraft.remove(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);itemsToCraft.remove(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
+        itemsToCraft.remove(Items.STONE_BUTTON);itemsToCraft.remove(Items.FLINT_AND_STEEL);
+    }
+
     public static void lightUpTNT(PlayerEntity player) {
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
@@ -427,12 +360,18 @@ public class BtStuff {
                 if (tntCrafter.isFailed()) {
                     System.out.println("FredoBot: reset because fail to craft trigger");
                     tntCrafter.resetStatus();
-                    globalExecutor.resetWorld();
+                    globalExecutor.resetWorld("TNT 激活物合成失败");
                     return;
                 }
 
                 switch (tntCraftPhase) {
                     case EVALUATE:
+                        if(InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL)>=0) {
+                            removeTntTriggerRecipes();tntState=TNTState.PLACE_TNT_AND_TRIGGER;break;
+                        }
+                        if(canCraftTntLighter(player)) {
+                            tempCraftTarget=Items.FLINT_AND_STEEL;tntCraftPhase=TNTCraftPhase.CRAFT_TRIGGER;break;
+                        }
                         boolean needIronPlate = itemsToCraft.contains(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
                         boolean needGoldPlate = itemsToCraft.contains(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
 
@@ -467,9 +406,7 @@ public class BtStuff {
                     case CRAFT_TRIGGER:
                         if (tntCrafter.isDone()) {
                             tntCrafter.resetStatus(); // 结算
-                            itemsToCraft.remove(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
-                            itemsToCraft.remove(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
-                            itemsToCraft.remove(Items.STONE_BUTTON);
+                            removeTntTriggerRecipes();
                             tntState = TNTState.PLACE_TNT_AND_TRIGGER;
                             tntCraftPhase = TNTCraftPhase.EVALUATE;
                         } else {
@@ -489,7 +426,7 @@ public class BtStuff {
 
                     int tntSlot = InventoryHelper.findItemSlot(player, Items.TNT);
                     if (tntSlot == -1) {
-                        BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                        BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("背包找不到 TNT");
                         System.out.println("Fredbot: reset because cannot found TNT");
                         return;
                     }
@@ -499,6 +436,13 @@ public class BtStuff {
                     player.inventory.selectedSlot = 0;
                     MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity) player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, tntHit);
 
+                    int lighterSlot=InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL);
+                    if(lighterSlot>=0) {
+                        InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(),player,lighterSlot,1);player.inventory.selectedSlot=1;
+                        MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity)player,MinecraftClient.getInstance().world,
+                                net.minecraft.util.Hand.MAIN_HAND,new BlockHitResult(Vec3d.ofCenter(TNTSetupPos),Direction.UP,TNTSetupPos,false));
+                        tntState=TNTState.TAKING_COVER_MOVE;tntWaitTicks=0;break;
+                    }
                     Item triggerItem = Items.OAK_BUTTON;
                     if (InventoryHelper.findItemSlot(player, Items.HEAVY_WEIGHTED_PRESSURE_PLATE) != -1) {
                         triggerItem = Items.HEAVY_WEIGHTED_PRESSURE_PLATE;
@@ -516,7 +460,7 @@ public class BtStuff {
 
                     int triggerSlot = InventoryHelper.findItemSlot(player, triggerItem);
                     if (triggerSlot == -1) {
-                        BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+                        BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("背包找不到 TNT 激活物");
                         System.out.println("Fredobot: reset because cannot find trigger item");
                         return;
                     }
@@ -578,13 +522,15 @@ public class BtStuff {
                 break;
 
             case COLLECT_LOOT:
-                List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new net.minecraft.util.math.Box(TNTSetupPos).expand(12.0),
-                        e -> e.isAlive() && !e.getStack().isEmpty() && !ItemCategory.isSapling(e.getStack().getItem()));
+                List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new Box(TNTSetupPos).expand(12.0),
+                        e -> e.isAlive() && !e.getStack().isEmpty() && !ItemCategory.isSapling(e.getStack().getItem())
+                                && e.getStack().getItem()!=Items.WHEAT_SEEDS);
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
                         ItemEntity nearestDrop=TntActions.nearest(drops,drop -> drop.isAlive() && !drop.getStack().isEmpty()
-                                && drop.getStack().getItem()!=Items.STICK && !ItemCategory.isSapling(drop.getStack().getItem()),
+                                && drop.getStack().getItem()!=Items.STICK && !ItemCategory.isSapling(drop.getStack().getItem())
+                                && drop.getStack().getItem()!=Items.WHEAT_SEEDS,
                                 drop -> player.squaredDistanceTo(drop));
                         if(nearestDrop==null){tntState=TNTState.DONE;break;}
                         BlockPos safePos = new BlockPos(nearestDrop.getX(), nearestDrop.getY() + 0.5, nearestDrop.getZ());
@@ -612,14 +558,14 @@ public class BtStuff {
 
             if (!minecraftClient.world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) {
                 waitTicks++;
-                if (waitTicks > 60) globalExecutor.resetWorld();
+                if (waitTicks > 60) globalExecutor.resetWorld("宝藏区块加载超时");
                 System.out.println("Fredobot: reset because bt chunk cannot loaded");
                 return;
             }
 
             setBtPos();
             if (btPos == null) {
-                globalExecutor.resetWorld();
+                globalExecutor.resetWorld("目标宝藏箱子不存在");
                 System.out.println("Fredobot: reset because btPos is empty");
                 return;
             }
@@ -656,6 +602,8 @@ public class BtStuff {
 
             case LOOTING_BT:
                 if (player.currentScreenHandler instanceof GenericContainerScreenHandler) {
+                    TreasureLootValidation.compare(minecraftClient,
+                            (GenericContainerScreenHandler) player.currentScreenHandler, btPos);
                     int syncId = player.currentScreenHandler.syncId;
                     for (int slot = 0; slot < 27; slot++) {
                         if (!InventoryHelper.BtUsefulStaff.isUseful(player.currentScreenHandler.getSlot(slot).getStack()))
@@ -667,7 +615,7 @@ public class BtStuff {
                     player.closeHandledScreen();
                     minecraftClient.openScreen(null);
                     if (!evaluateBt(player)) {
-                        globalExecutor.resetWorld();
+                        globalExecutor.resetWorld("宝藏资源不达标（实际开箱）");
                         System.out.println("Fredodebut: reset because bt not enough");
                         return;
                     }
@@ -685,7 +633,8 @@ public class BtStuff {
                 if (!treeQueueGenerated) {
                     if (pathExecutor.isBusy()) break;
                     if (hasTNT) {
-                        if (itemsToCraft.contains(Items.STONE_BUTTON)) {
+                        if (itemsToCraft.contains(Items.STONE_BUTTON) && InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL)<0
+                                && !canCraftTntLighter(player)) {
                             MiningHelper.mineAndCollect(player, InventoryHelper.anyLogs, 1, 100);
                         }
                     } else {
@@ -731,7 +680,7 @@ public class BtStuff {
                 if (crafter.isFailed()) {
                     System.out.println("FredoBot [异常]: 主流程合成模块报错失败！");
                     crafter.resetStatus();
-                    globalExecutor.resetWorld();
+                    globalExecutor.resetWorld("主流程合成失败");
                     return;
                 }
 
@@ -770,6 +719,12 @@ public class BtStuff {
 
                     case PLACE_TABLE:
                         if(pathExecutor.isBusy())return;
+                        var savedPlan = EarlyResetPreflight.plan(minecraftClient);
+                        if (savedPlan != null && player.getPos().squaredDistanceTo(
+                                Vec3d.ofCenter(savedPlan.workspace().stand()).add(0, -0.5, 0)) > 1.0) {
+                            pathExecutor.setGoal(savedPlan.workspace().stand(), "preflight workbench stance");
+                            return;
+                        }
                         if (itemsToCraft.isEmpty()&&InventoryHelper.findItemSlot(player,Items.CRAFTING_TABLE)==-1) {
                             btCraftPhase = BtCraftPhase.BREAK_TABLE;
                             break;
@@ -783,8 +738,9 @@ public class BtStuff {
 
                         InventoryHelper.moveItemToHotbar(minecraftClient, player, tableSlot, 4);
                         craftingTablePos = findAProperCraftingTablePos(player);
+                        workbenchAnchor = craftingTablePos;
                         if (craftingTablePos == null) {
-                            globalExecutor.resetWorld();
+                            globalExecutor.resetWorld("无法放置工作台");
                             return;
                         }
 
@@ -978,7 +934,7 @@ public class BtStuff {
 
                     case RETURN_TO_TABLE:
                         if (craftingTablePos == null) {
-                            globalExecutor.resetWorld();
+                            globalExecutor.resetWorld("返回合成时工作台坐标丢失");
                             return;
                         }
                         if (minecraftClient.world.getBlockState(craftingTablePos).getBlock() != Blocks.CRAFTING_TABLE) {
@@ -1074,8 +1030,10 @@ public class BtStuff {
 
                         boolean hasShears = InventoryHelper.findItemSlot(player, Items.SHEARS) != -1;
                         int currentLeaves = InventoryHelper.countItem(player, net.minecraft.tag.ItemTags.LEAVES);
-                        if (!hasShears || currentLeaves >= 64) {
-                            if (!hasShears) {
+                        if (!hasShears || currentLeaves >= 64 || MiningHelper.harvestExhaustedIn(minecraftClient.world)) {
+                            if(MiningHelper.harvestExhaustedIn(minecraftClient.world) && currentLeaves<64) {
+                                System.out.println("FredoBot: no further safe harvest target or usable shears; continue without repeating the same search");
+                            } else if (!hasShears) {
                                 System.out.println("FredoBot : no shears go next");
                             } else {
                                 System.out.println("FredoBot : 64 leaves done go next");

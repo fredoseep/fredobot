@@ -54,7 +54,7 @@ public class Fredobot implements ModInitializer {
 				BotEngine.getInstance().stop();
 				return 1;
 			})).then(CommandManager.literal("reset").executes(commandContext -> {
-				BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+				MinecraftClient.getInstance().execute(() -> BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("手动命令 /speedrun reset"));
 				return 1;
 					}))
 			);

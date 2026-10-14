@@ -26,6 +26,7 @@ public final class ActionPathfinder {
         public boolean isShoreExit() { return "shore exit".equals(kind); }
         public boolean isSurfaceRise() { return "surface rise".equals(kind); }
         public boolean isSmoothWalk() { return "smooth walk".equals(kind); }
+        public boolean isSmoothDive() { return "smooth dive".equals(kind); }
         Action(String kind, SimplePathfinder.MovementState movement, List<BlockPos> breaks, List<Item> tools, Item material) {
             this.kind = kind; this.movement = movement;
             this.breaks = List.copyOf(breaks); this.tools = List.copyOf(tools); this.material = material;
@@ -284,6 +285,7 @@ public final class ActionPathfinder {
                                                           java.util.function.Consumer<String> stage) {
         prepareMiningCosts(snapshot,cancelled);
         PlannerSettings settings=snapshot.settings;
+        int stateLimit=effectiveStateLimit(snapshot);
         GroundActions ground=new GroundActions(snapshot);WaterActions water=new WaterActions(snapshot);
         java.util.function.ToDoubleFunction<State> h=s -> settings.dijkstra?0:estimateMinimumTicks(s.pos,snapshot.goal,settings);
         java.util.function.ToDoubleFunction<State> progress=s -> distance(s.pos,snapshot.goal);
@@ -296,7 +298,7 @@ public final class ActionPathfinder {
         if(stage!=null)stage.accept("SEARCH_BASELINE");
         var plain=baseline.search(snapshot.start,s -> s.pos.equals(snapshot.goal),h,progress,settings.maxExpanded,cancelled,observer,
                 snapshot.diagnostics==null?null:new DiagnosticProfiler(snapshot,"BASELINE"),
-                new SearchEngine.Policy<>(1,settings.optimizationMillis,settings.optimizationMaxKnown,null));
+                new SearchEngine.Policy<>(1,settings.optimizationMillis,stateLimit,null));
         searchPass(snapshot,"BASELINE_DONE",plain);
         if(plain.status==SearchEngine.Status.CANCELLED || cancelled.getAsBoolean())return plain;
         SearchEngine<State,Action> engine=new SearchEngine<>();engine.register(ground);engine.register(water);
@@ -304,7 +306,7 @@ public final class ActionPathfinder {
         if(stage!=null)stage.accept("SEARCH_OPTIMIZING");
         var result=engine.search(snapshot.start,s -> s.pos.equals(snapshot.goal),h,progress,settings.maxExpanded,cancelled,observer,
                 snapshot.diagnostics==null?null:new DiagnosticProfiler(snapshot,"OPTIMIZING"),
-                new SearchEngine.Policy<>(settings.dijkstra?1:settings.searchWeight,settings.optimizationMillis,settings.optimizationMaxKnown,
+                new SearchEngine.Policy<>(settings.dijkstra?1:settings.searchWeight,settings.optimizationMillis,stateLimit,
                         plain.status==SearchEngine.Status.COMPLETE?plain:null));
         searchPass(snapshot,"RESULT",result);
         return result;
@@ -341,9 +343,14 @@ public final class ActionPathfinder {
         for(var edge:edges)if(edge.next.edits.equals(start.edits))result.add(edge);
         return result;
     }
+    public static int effectiveStateLimit(Snapshot snapshot) {
+        BlockPos a=snapshot.start.pos,b=snapshot.goal;
+        return snapshot.settings.effectiveStateLimit((double)b.getX()-a.getX(),(double)b.getY()-a.getY(),(double)b.getZ()-a.getZ());
+    }
     private static void searchPass(Snapshot snapshot,String pass,SearchEngine.Result<State,Action> result) {
         if(snapshot.diagnostics==null)return;
         Map<String,Object> data=new LinkedHashMap<>();data.put("pass",pass);
+        data.put("effective_max_known",effectiveStateLimit(snapshot));
         data.put("optimal_scope",pass.startsWith("BASELINE")?"unchanged_terrain":"full_action_graph");
         if(result!=null){data.put("status",result.status.name());data.put("ticks",result.ticks);data.put("penalty",result.penalty);
             data.put("expanded",result.expanded);data.put("steps",result.steps.size());
@@ -385,10 +392,13 @@ public final class ActionPathfinder {
     }
     private static Map<String,Object> settingsDiagnostic(PlannerSettings s) {
         Map<String,Object> m=new LinkedHashMap<>();m.put("margin",s.margin);m.put("max_expanded",s.maxExpanded);m.put("max_edits",s.maxEdits);
+        m.put("dynamic_state_budget",s.dynamicStateBudget);m.put("state_budget_reference_distance",s.stateBudgetReferenceDistance);
+        m.put("state_budget_max_known",s.stateBudgetMaxKnown);
         m.put("optimization_millis",s.optimizationMillis);m.put("optimization_max_known",s.optimizationMaxKnown);m.put("search_weight",s.searchWeight);
         m.put("keep_successful_diagnostics",s.keepSuccessfulDiagnostics);m.put("diagnostic_error_retention",50);
         m.put("minimum_route_y",s.minimumRouteY);m.put("allow_world_edits",s.allowWorldEdits);
         m.put("stuck_window_ticks",s.stuckWindowTicks);m.put("stuck_min_movement",s.stuckMinMovement);
+        m.put("stuck_min_vertical_movement",s.stuckMinVerticalMovement);
         m.put("smooth_paths",s.smoothPaths);m.put("max_smooth_distance",s.maxSmoothDistance);
         m.put("walk_ticks",s.walkTicks);m.put("swim_ticks",s.swimTicks);m.put("jump_ticks",s.jumpTicks);m.put("bridge_ticks",s.bridgeTicks);
         m.put("pillar_ticks",s.pillarTicks);m.put("aim_ticks",s.aimTicks);m.put("break_delay_ticks",s.breakDelayTicks);
@@ -645,13 +655,34 @@ public final class ActionPathfinder {
     private static SimplePathfinder.MovementState waterMode(Snapshot w,State s,BlockPos p) {
         return w.cell(s,p.up()).water ? SimplePathfinder.MovementState.DIVING : SimplePathfinder.MovementState.SWIMMING;
     }
-    /** Merge only level, effect-free walking. World-edit actions remain explicit barriers. */
+    /** Merge effect-free walking and at most five deep-water actions. World edits remain barriers. */
     public static SearchEngine.Result<State,Action> smooth(Snapshot snapshot,SearchEngine.Result<State,Action> plan,BooleanSupplier cancelled) {
         if(!snapshot.settings.smoothPaths || plan.status!=SearchEngine.Status.COMPLETE)return plan;
         List<SearchEngine.Edge<State,Action>> steps=new ArrayList<>();State from=snapshot.start;boolean changed=false;
         for(int i=0;i<plan.steps.size();) {
             if(cancelled.getAsBoolean())throw new java.util.concurrent.CancellationException();
             int best=i;
+            if(plan.steps.get(i).action.movement==SimplePathfinder.MovementState.DIVING) {
+                for(int j=i;j<Math.min(i+5,plan.steps.size());j++) {
+                    var edge=plan.steps.get(j);Action a=edge.action;
+                    if(a.movement!=SimplePathfinder.MovementState.DIVING || !a.breaks.isEmpty() || a.material!=null
+                            || edge.penalty!=0 || (!a.kind.equals("swim/mine") && !a.isSmoothDive())
+                            || !edge.next.edits.equals(from.edits) || !edge.next.materials.equals(from.materials)
+                            || !edge.next.durability.equals(from.durability))break;
+                    State view=from;BlockPos end=edge.next.pos;
+                    if(DiveClearance.clear(from.pos.getX()+.5,from.pos.getY(),from.pos.getZ()+.5,
+                            end.getX()+.5,end.getY(),end.getZ()+.5,
+                            p -> {Cell c=snapshot.cell(view,p);return c.clear && c.water && !c.lava && c.doorPanels==null;},cancelled))best=j;
+                }
+                var end=plan.steps.get(best);
+                if(best>i) {
+                    double length=distance(from.pos,end.next.pos);
+                    steps.add(new SearchEngine.Edge<>(end.next,new Action("smooth dive",SimplePathfinder.MovementState.DIVING,
+                            List.of(),List.of(),null),Math.max(1,length*snapshot.settings.swimTicks),0));changed=true;
+                } else steps.add(end);
+                from=end.next;i=best+1;
+                continue;
+            }
             for(int j=i;j<plan.steps.size();j++) {
                 var edge=plan.steps.get(j);Action a=edge.action;
                 if(a.movement!=SimplePathfinder.MovementState.WALKING || !a.breaks.isEmpty() || a.material!=null || edge.penalty!=0

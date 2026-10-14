@@ -22,6 +22,8 @@ public final class StuckDump {
         out.put("availability","LOADED");var state=world.getBlockState(p);out.put("block_state",state.toString());
         out.put("water",state.getFluidState().isIn(FluidTags.WATER));
         out.put("lava",state.getFluidState().isIn(FluidTags.LAVA));
+        var flow=state.getFluidState().getVelocity(world,p);
+        out.put("fluid_velocity",List.of(flow.x,flow.y,flow.z));
         out.put("replaceable",state.getMaterial().isReplaceable());
         List<Object> local=new ArrayList<>(),absolute=new ArrayList<>();
         for(Box b:state.getCollisionShape(world,p).getBoundingBoxes()) {
@@ -56,10 +58,24 @@ public final class StuckDump {
             var n=path.get(i);Map<String,Object> node=new LinkedHashMap<>();node.put("index",i);node.put("pos",pos(n.pos));
             node.put("state",n.state.name());node.put("parent",n.parent==null?null:pos(n.parent.pos));
             node.put("reach_box",box(PathReachBoxes.node(path,i,priorStuckCount>=2)));
+            if(PathReachBoxes.plannedWater(n)) {
+                node.put("requires_water_feet_position",true);
+                node.put("water_position_reached",PathReachBoxes.waterPositionReached(player.getX(),player.getY(),player.getZ(),n));
+                node.put("water_horizontal_limit_squared",.12);node.put("water_vertical_lower_limit",-.25);
+                node.put("water_vertical_upper_limit",PathReachBoxes.waterUpperLimit(n));
+            }
             node.put("is_final",i==path.size()-1);
+            if(n.plannedAction!=null && n.state==SimplePathfinder.MovementState.WALKING && i+1<path.size()) {
+                var next=path.get(i+1);
+                if(next.state==SimplePathfinder.MovementState.JUMPING_UP && next.plannedAction!=null && !next.plannedAction.isShoreExit()) {
+                    node.put("approach_horizontal_squared_limit",.06);node.put("approach_vertical_limit",.3);
+                    node.put("approach_max_horizontal_speed",.1);
+                    node.put("approach_requires_grounded",true);
+                }
+            }
             if(i==path.size()-1) {
                 node.put("final_horizontal_squared_limit",PathReachBoxes.finalHorizontalLimit(n,priorStuckCount>=2));
-                node.put("final_vertical_limit",.5);
+                node.put("final_vertical_limit",PathReachBoxes.plannedWater(n)?PathReachBoxes.waterUpperLimit(n):.5);
             }
             node.put("action_ticks",n.actionTicks);node.put("material_penalty",n.materialPenalty);
             if(n.plannedAction!=null) {

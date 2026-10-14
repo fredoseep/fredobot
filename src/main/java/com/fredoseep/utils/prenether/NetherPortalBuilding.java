@@ -114,7 +114,7 @@ public class NetherPortalBuilding {
         switch (currentTBOState) {
             case IDLE:
                 if (PreNether.alignedMagmaPos == null) {
-                    globalExecutor.resetWorld();
+                    globalExecutor.resetWorld("地狱门施工：相邻 magma 坐标丢失");
                     System.out.println("Fredodebug: reset because alignedMagmaPos is null somehow");
                 } else System.out.println("Fredodebug: alignedMagmaPos : " + PreNether.alignedMagmaPos.toShortString());
                 magmaSideMiddleFragmentPos = PreNether.magmaPos.offset(PreNether.fromMagmaToAligned.getOpposite());
@@ -162,7 +162,7 @@ public class NetherPortalBuilding {
                     if (!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock && client.player.inventory.getStack(8).getCount() >= 2)) {
                         System.out.println("Fredodebug: slot 8 is : " + client.player.inventory.getStack(8).getItem().toString());
                         System.out.println("Fredodebug: reset because the doors are not enough");
-                        globalExecutor.resetWorld();
+                        globalExecutor.resetWorld("地狱门施工：第一扇门材料不足");
                         return;
                     }
                     tryPlaceDoor(client.player, PreNether.magmaPos, PreNether.fromMagmaToAligned.getOpposite(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned.getOpposite()));
@@ -173,7 +173,7 @@ public class NetherPortalBuilding {
                     if (!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock && client.player.inventory.getStack(8).getCount() >= 1)) {
                         System.out.println("Fredodebug: slot 8 is : " + client.player.inventory.getStack(8).getItem().toString());
                         System.out.println("Fredodebug: reset because the doors are not enough");
-                        globalExecutor.resetWorld();
+                        globalExecutor.resetWorld("地狱门施工：第二扇门材料不足");
                         return;
                     }
                     tryPlaceDoor(client.player, secondDoorBasePos, PreNether.fromMagmaToAligned.getOpposite(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned.getOpposite()));
@@ -407,7 +407,7 @@ public class NetherPortalBuilding {
                 }
                 if(InventoryHelper.findItemSlot(client.player,Items.GRAVEL)==-1){
                     System.out.println("Fredodebug: don't have gravel somehow");
-                    globalExecutor.resetWorld();
+                    globalExecutor.resetWorld("地狱门施工：缺少沙砾");
                     return;
                 }
                 if(client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock()==Blocks.GRAVEL){
@@ -432,7 +432,7 @@ public class NetherPortalBuilding {
                 if (flintNSteelCrafter.isFailed()) {
                     System.out.println("Fredodebug: reset because fail to craft flint&steel");
                     flintNSteelCrafter.resetStatus();
-                    globalExecutor.resetWorld();
+                    globalExecutor.resetWorld("地狱门施工：打火石合成失败");
                     return;
                 }
                 if(flintNSteelCrafter.isDone()){

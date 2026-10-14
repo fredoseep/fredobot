@@ -1,6 +1,10 @@
 package com.fredoseep.utils.prenether;
 
 import com.fredoseep.behave.MiscController;
+import com.fredoseep.preflight.EarlyResetPreflight;
+import com.fredoseep.preflight.RavineFinder;
+import com.fredoseep.preflight.PreflightGeometry;
+import com.fredoseep.behave.CraftingController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
@@ -26,22 +30,68 @@ public class PreNether {
     public static BlockPos alignedMagmaPos = null;
     public static Direction fromMagmaToAligned = null;
     private static BlockPos gravelPos = null;
+    private static MagmaDescent magmaDescent;
+    private static BlockPos requestedMagma;
+    private static World requestWorld;
+    private static int pendingRavineTicks;
+    public static String magmaFallbackStatus(){return magmaDescent==null?null:magmaDescent.hudStatus();}
+    public static void requestMagmaRoute(PlayerEntity player,PathExecutor path) {
+        if(magmaPos==null || magmaDescent!=null)return;
+        requestedMagma=magmaPos.toImmutable();requestWorld=MinecraftClient.getInstance().world;
+        magmaDescent=new MagmaDescent(MinecraftClient.getInstance(),requestedMagma);
+    }
 
     public static void reset() {
+        pendingRavineTicks = 0;
         magmaPos = null;
         alignedMagmaPos = null;
         gravelPos = null;
         fromMagmaToAligned = null;
+        if(magmaDescent!=null)MagmaDescent.release(MinecraftClient.getInstance());
+        magmaDescent=null;requestedMagma=null;requestWorld=null;
     }
 
     public static void preNetherStuff(PlayerEntity player) {
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(requestedMagma!=null && (client.world!=requestWorld || !requestedMagma.equals(magmaPos))) {
+            if(magmaDescent!=null)MagmaDescent.release(client);
+            magmaDescent=null;requestedMagma=null;requestWorld=null;
+        }
+        if(magmaDescent!=null) {
+            if(BotEngine.getInstance().getModule(MiscController.class).isBusy()
+                    || BotEngine.getInstance().getModule(CraftingController.class).isBusy())return;
+            if (magmaDescent.descending() && PlayerHelper.isDrivingBoat(player)) {
+                MagmaDescent.release(client);
+                BotEngine.getInstance().getModule(MiscController.class).startBoatRecoveryForDescent(magmaPos.up());
+                return;
+            }
+            magmaDescent.tick(client,player,pathExecutor);
+            if(magmaDescent.failed()) {BotEngine.getInstance().stop();return;}
+            if(!magmaDescent.done())return;
+            magmaDescent=null;requestedMagma=null;requestWorld=null;
+            globalExecutor.currentState=GlobalExecutor.GlobalState.BUILDING_TWO_BY_ONE_NETHER_PORTAL;return;
+        }
 
         if (magmaPos == null) {
-            magmaPos = findOceanRavine(player, MinecraftClient.getInstance().world, 100);
+            var saved = EarlyResetPreflight.plan(client);
+            if (saved != null) {
+                if (!client.world.getChunkManager().isChunkLoaded(saved.ravine().magma().getX() >> 4,
+                        saved.ravine().magma().getZ() >> 4)) {
+                    if (!pathExecutor.isBusy()) pathExecutor.setGoal(saved.workspace().stand(), "return to preflight workbench");
+                    return;
+                }
+                if (saved.ravine().pendingTicks() && !RavineFinder.validNow(client.world, saved.ravine())) {
+                    if (++pendingRavineTicks <= 40) return; // allow the scheduled bubble/mixing ticks after resume
+                    magmaPos = findOceanRavine(player, client.world, 100);
+                } else {
+                    magmaPos = saved.ravine().magma(); alignedMagmaPos = saved.ravine().aligned();
+                    fromMagmaToAligned = saved.ravine().direction();
+                }
+            } else magmaPos = findOceanRavine(player, client.world, 100);
             if (magmaPos == null) {
-                globalExecutor.resetWorld();
+                globalExecutor.resetWorld("找不到可进入的 magma 裂谷");
                 System.out.println("Fredodebug: reset because no enterable ravine found");
                 return;
             } else {
@@ -53,7 +103,7 @@ public class PreNether {
                 }
                 if (MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.WARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_WARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.LUKEWARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_LUKEWARM_OCEAN) {
                     System.out.println("Fredodebug: magmaPos is in warm ocean . get lighter now");
-                    MiningHelper.mineAndCollect(player, Map.of(Blocks.GRAVEL, 4), 50);
+                    MiningHelper.mineAndCollect(BtStuff.workbenchAnchor != null ? BtStuff.workbenchAnchor : player.getBlockPos(), Map.of(Blocks.GRAVEL, 4), 50);
                     return;
                 }
             }
@@ -63,7 +113,7 @@ public class PreNether {
                     p -> exposedGravelApproach(world,p));
             if(exposed.isEmpty()) {
                 System.out.println("FredoBot: no exposed gravel with a clear approach near the ravine; reset instead of pathing into buried sand");
-                globalExecutor.resetWorld();return;
+                globalExecutor.resetWorld("裂谷附近无可挖沙砾");return;
             }
             gravelPos=exposed.getFirst();
             System.out.println("Fredodebug: ocean floor gravel: " + gravelPos.toShortString());
@@ -73,7 +123,7 @@ public class PreNether {
         if (!PlayerHelper.isNear(player, magmaPos.up(), 1)) {
             if (InventoryHelper.countItem(player, Items.GRAVEL) >= 4 || InventoryHelper.countItem(player, Items.FLINT) >= 1 || InventoryHelper.countItem(player, Items.FLINT_AND_STEEL) == 1) {
                 System.out.println("Fredodebug: already have lighter goto magma spot");
-                pathExecutor.setGoal(magmaPos.up(), "the magmaPos");
+                requestMagmaRoute(player,pathExecutor);
                 return;
             } else {
                 if (gravelPos != null) {
@@ -94,13 +144,9 @@ public class PreNether {
         }
     }
 
-    private static boolean exposedGravelApproach(World world,BlockPos gravel) {
-        BlockPos feet=gravel.up(),head=gravel.up(2);
-        return world.getChunkManager().isChunkLoaded(gravel.getX()>>4,gravel.getZ()>>4)
-                && world.getBlockState(feet).getCollisionShape(world,feet).isEmpty()
-                && world.getBlockState(head).getCollisionShape(world,head).isEmpty()
-                && !world.getBlockState(feet).getFluidState().isIn(net.minecraft.tag.FluidTags.LAVA)
-                && !world.getBlockState(head).getFluidState().isIn(net.minecraft.tag.FluidTags.LAVA);
+    private static boolean exposedGravelApproach(World world, BlockPos gravel) {
+        return world.getChunkManager().isChunkLoaded(gravel.getX() >> 4, gravel.getZ() >> 4)
+                && PreflightGeometry.exposedGravel(world, gravel);
     }
 
     /**
@@ -112,79 +158,10 @@ public class PreNether {
      * @return 距离玩家最近的海底峡谷峡谷底坐标 (Y=10 的岩浆块)，如果没找到则返回 null
      */
     public static BlockPos findOceanRavine(PlayerEntity player, World world, int radius) {
-        BlockPos playerPos = player.getBlockPos();
-        int px = playerPos.getX();
-        int pz = playerPos.getZ();
-
-        BlockPos closestRavine = null;
-        double minDistanceSq = Double.MAX_VALUE;
-        BlockPos.Mutable mutable = new BlockPos.Mutable();
-        BlockPos.Mutable probeMutable = new BlockPos.Mutable();
-        Direction currentRelevantDirection;
-
-        for (int x = -radius; x <= radius; x++) {
-            for (int z = -radius; z <= radius; z++) {
-
-                mutable.set(px + x, 10, pz + z);
-
-                if (world.getBlockState(mutable).getBlock() == Blocks.MAGMA_BLOCK) {
-                    boolean isTwoByOne = false;
-
-                    // 传入当前中心岩浆块的绝对坐标
-                    if (strictCheck(world, probeMutable, px + x, pz + z)) continue;
-
-                    BlockPos offsetPos = null;
-                    for (Direction offset : new Direction[]{Direction.EAST, Direction.SOUTH, Direction.WEST, Direction.NORTH}) {
-                        offsetPos = mutable.offset(offset);
-
-                        // 传入偏移后岩浆块的绝对坐标，彻底告别强转崩溃和错位
-                        if (strictCheck(world, probeMutable, offsetPos.getX(), offsetPos.getZ())) continue;
-
-                        if (world.getBlockState(offsetPos).getBlock() == Blocks.MAGMA_BLOCK && world.getBlockState(offsetPos.down()).getBlock() == Blocks.LAVA) {
-                            currentRelevantDirection = RelevantDirectionHelper.getDirectionBetween(mutable, offsetPos);
-                            if (world.getBlockState(offsetPos.offset(currentRelevantDirection)).getBlock() == Blocks.OBSIDIAN && world.getBlockState(mutable.offset(currentRelevantDirection.getOpposite())).getBlock() == Blocks.OBSIDIAN) {
-                                isTwoByOne = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (isTwoByOne) {
-                        double distSq = playerPos.getSquaredDistance(mutable);
-                        if (distSq < minDistanceSq) {
-                            minDistanceSq = distSq;
-                            closestRavine = mutable.toImmutable();
-                            alignedMagmaPos = offsetPos;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 确保找到了峡谷再计算方向，并且必须使用 closestRavine 而不是已经跑偏的 mutable
-        if (closestRavine != null && alignedMagmaPos != null) {
-            fromMagmaToAligned = RelevantDirectionHelper.getDirectionBetween(closestRavine, alignedMagmaPos);
-        }
-
-        return closestRavine;
-    }
-
-    // 重构的 strictCheck：只关心要检查的具体 X 和 Z 的绝对坐标
-    private static boolean strictCheck(World world, BlockPos.Mutable probeMutable, int absX, int absZ) {
-        probeMutable.set(absX, 9, absZ);
-        BlockState stateBelow1 = world.getBlockState(probeMutable);
-        probeMutable.set(absX, 8, absZ);
-        BlockState stateBelow2 = world.getBlockState(probeMutable);
-        probeMutable.set(absX, 11, absZ);
-        BlockState stateAbove1 = world.getBlockState(probeMutable);
-        probeMutable.set(absX, 12, absZ);
-        BlockState stateAbove2 = world.getBlockState(probeMutable);
-        probeMutable.set(absX, 13, absZ);
-        BlockState stateAbove3 = world.getBlockState(probeMutable);
-
-        return !(stateBelow1.getBlock() == Blocks.LAVA &&
-                stateAbove1.getBlock() == Blocks.BUBBLE_COLUMN &&
-                stateAbove2.getBlock() == Blocks.BUBBLE_COLUMN &&
-                stateAbove3.getBlock() == Blocks.BUBBLE_COLUMN &&
-                stateBelow2.getBlock() == Blocks.LAVA);
+        BlockPos origin = BtStuff.workbenchAnchor != null ? BtStuff.workbenchAnchor : player.getBlockPos();
+        var found = RavineFinder.find(world, origin, radius, () -> {});
+        if (found == null) return null;
+        alignedMagmaPos = found.aligned(); fromMagmaToAligned = found.direction();
+        return found.magma();
     }
 }

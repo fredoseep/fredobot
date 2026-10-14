@@ -6,6 +6,9 @@ import java.util.function.Predicate;
 /** Tests the item's whole contact footprint, including items straddling a leaf edge. */
 public final class LeafLootSupport {
     private LeafLootSupport() {}
+    public static boolean shouldRelease(boolean logItem,boolean leafItem,boolean leafSupport) {
+        return leafSupport && (logItem || leafItem);
+    }
     public static BlockPos find(double minX,double maxX,double minY,double minZ,double maxZ,Predicate<BlockPos> leaves) {
         int y=(int)Math.floor(minY-.01);
         for(int x=(int)Math.floor(minX);x<=(int)Math.floor(maxX-1e-7);x++)

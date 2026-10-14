@@ -5,6 +5,8 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import org.apache.logging.log4j.LogManager;
 import net.minecraft.world.World;
 import java.util.*;
 import java.util.concurrent.*;
@@ -47,13 +49,20 @@ public final class AsyncPlanner {
         terrain=new TerrainReadiness(start.getX(),start.getZ(),destination.getX(),destination.getZ(),this.settings.margin,now,
                 this.settings.terrainWaitSeconds*1000L,this.settings.terrainStableMillis);
         PlannerDiagnostics diagnostics=this.settings.diagnosticsEnabled?new PlannerDiagnostics(client.runDirectory.toPath(),generation,Thread.currentThread(),
-                error -> org.apache.logging.log4j.LogManager.getLogger("FredoBotPathfinder").error("Diagnostic file error",error),this.settings.keepSuccessfulDiagnostics):null;
+                error -> LogManager.getLogger("FredoBotPathfinder").error("Diagnostic file error",error),this.settings.keepSuccessfulDiagnostics):null;
         debug=new PlannerDebug(generation,diagnostics);
         if(diagnostics!=null)diagnostics.runtimeContext(() -> Map.of("requested_job",jobId,"active_worker_job",activeWorkerJob,"pipeline_stage",stage.name()));
         debug.phase("WAITING_TERRAIN","start="+start.toShortString()+" goal="+destination.toShortString());
         heartbeat=STATUS.scheduleAtFixedRate(debug::heartbeat,0,2,TimeUnit.SECONDS);
     }
     private boolean isCancelled() { return cancelled.get() || Thread.currentThread().isInterrupted(); }
+    private void faceDestination() {
+        Vec3d target=Vec3d.ofCenter(destination);
+        double dx=target.x-player.getX(),dy=target.y-player.getEyeY(),dz=target.z-player.getZ();
+        double horizontal=Math.hypot(dx,dz);
+        if(horizontal>1e-6)player.yaw=(float)Math.toDegrees(Math.atan2(-dx,dz));
+        if(horizontal>1e-6 || Math.abs(dy)>1e-6)player.pitch=(float)-Math.toDegrees(Math.atan2(dy,horizontal));
+    }
     public void pump(MinecraftClient client) {
         if(stage==Stage.CANCELLED || stage==Stage.READY || stage==Stage.FAILED) return;
         if(client.world!=world || client.player!=player) { cancel(client,"world/player changed"); return; }
@@ -85,11 +94,17 @@ public final class AsyncPlanner {
                 TerrainReadiness currentTerrain=new TerrainReadiness(player.getBlockPos().getX(),player.getBlockPos().getZ(),destination.getX(),destination.getZ(),
                         settings.margin,now,settings.terrainWaitSeconds*1000L,0);
                 if(!currentTerrain.check(now,(x,z) -> world.getChunkManager().isChunkLoaded(x,z)).ready)return;
+                faceDestination();
                 stage=Stage.WAITING_PAUSE; pauseStarted=now;
-                debug.phase("WAITING_PAUSE","request vanilla F3+Esc pause");
+                debug.phase("FACING_TARGET","yaw="+player.yaw+" pitch="+player.pitch+" goal="+destination.toShortString());
+                return; // Render the target-facing view before opening vanilla pause on the next frame.
             }
             if(stage==Stage.WAITING_PAUSE) {
-                if(client.currentScreen==null) { ownedPause=new GameMenuScreen(false); client.openScreen(ownedPause); return; }
+                if(client.currentScreen==null) {
+                    faceDestination();
+                    debug.phase("WAITING_PAUSE","request vanilla F3+Esc pause");
+                    ownedPause=new GameMenuScreen(false); client.openScreen(ownedPause); return;
+                }
                 if(!client.isPaused()) {
                     if(now-pauseStarted>5000) throw new IllegalStateException("Vanilla pause not active; close other GUI / check LAN mode");
                     return;
@@ -144,7 +159,7 @@ public final class AsyncPlanner {
             if(isCancelled()) return;
             debug.phase("SEARCHING","worker="+Thread.currentThread().getName());
             var plan=ActionPathfinder.search(snapshot,this::isCancelled,debug::search,
-                    pass -> debug.phase(pass,"budget="+settings.optimizationMillis+"ms maxKnown="+settings.optimizationMaxKnown+
+                    pass -> debug.phase(pass,"budget="+settings.optimizationMillis+"ms maxKnown="+ActionPathfinder.effectiveStateLimit(snapshot)+" baseMaxKnown="+settings.optimizationMaxKnown+
                             " weight="+(pass.equals("SEARCH_BASELINE") || settings.dijkstra?1:settings.searchWeight)));
             if(isCancelled() || plan.status==SearchEngine.Status.CANCELLED) return;
             debug.phase("SEARCH_DONE",plan.status+" optimal="+plan.optimal+" reason="+plan.termination+" expanded="+plan.expanded+" ticks="+plan.ticks+" price="+plan.penalty+" steps="+plan.steps.size());

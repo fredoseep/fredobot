@@ -20,6 +20,9 @@ import java.util.function.Predicate;
 
 public class MiningHelper {
     public static List<BlockPos> blockToMine = new ArrayList<>();
+    public static boolean harvestResourceExhausted;
+    private static World harvestWorld;
+    public static boolean harvestExhaustedIn(World world){return harvestResourceExhausted && harvestWorld==world;}
     public static final Set<Block> currentTargetBlocks = new HashSet<>();
     // 新增标志位：标记当前是否处于批量挖掘阶段
     public static boolean isBatchMiningPhase = false;
@@ -233,11 +236,15 @@ public class MiningHelper {
     }
 
     public static List<BlockPos> findNearestBlocks(BlockPos blockPos, Set<Block> targetBlocks, int totalCount, int maxRadius) {
+        return findNearestBlocks(blockPos,targetBlocks,totalCount,maxRadius,p -> true);
+    }
+    public static List<BlockPos> findNearestBlocks(BlockPos blockPos,Set<Block> targetBlocks,int totalCount,int maxRadius,Predicate<BlockPos> allowed) {
         List<BlockPos> result = new ArrayList<>();
         if (totalCount <= 0 || targetBlocks == null || targetBlocks.isEmpty()) return result;
 
         // 1. 粗筛：找出范围内所有目标方块
         List<BlockPos> rawBlocks = scanBlocksInRadius(blockPos, maxRadius, targetBlocks::contains);
+        rawBlocks.removeIf(p -> !allowed.test(p));
         var client=MinecraftClient.getInstance();var misc=BotEngine.getInstance().getModule(MiscController.class);
         if(client.player!=null && misc!=null) {
             Predicate<BlockPos> eligible=misc.leafTargetFilter(client,client.player);
@@ -289,10 +296,21 @@ public class MiningHelper {
     /**
      * 寻找距离当前坐标最近的方块
      */
-    private static BlockPos getClosestBlock(BlockPos currentPos, List<BlockPos> blocks) {
-        return blocks.stream()
-                .min(Comparator.comparingDouble(p -> p.getSquaredDistance(currentPos)))
-                .orElse(null);
+    private static boolean directlyMineable(PlayerEntity player,BlockPos p) {
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        if(eye.squaredDistanceTo(Vec3d.ofCenter(p))>20)return false;
+        var hit=MinecraftClient.getInstance().world.rayTrace(new RayTraceContext(eye,Vec3d.ofCenter(p),
+                RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
+        return hit.getType()==HitResult.Type.BLOCK && hit.getBlockPos().equals(p);
+    }
+    private static BlockPos getClosestBlock(BlockPos currentPos,List<BlockPos> blocks) {
+        var client=MinecraftClient.getInstance();
+        return com.fredoseep.algorithm.planning.CollectionPriority.nearest(blocks,
+                p -> client.player!=null && client.world.getBlockState(p).getBlock()==net.minecraft.block.Blocks.STONE
+                        && directlyMineable(client.player,p),
+                p -> client.player!=null && client.world.getBlockState(p).getBlock()==net.minecraft.block.Blocks.STONE
+                        ? new Vec3d(client.player.getX(),client.player.getEyeY(),client.player.getZ()).squaredDistanceTo(Vec3d.ofCenter(p))
+                        : p.getSquaredDistance(currentPos));
     }
 
     // =================================================================
@@ -300,13 +318,33 @@ public class MiningHelper {
     // =================================================================
 
     public static void mineAndCollect(PlayerEntity player, Set<Block> targetBlocks, int totalCount, int maxRadius) {
+        if(totalCount<=0)return;
+        harvestResourceExhausted=false;
+        boolean harvestLogs=!targetBlocks.isEmpty() && targetBlocks.stream().allMatch(b -> b.isIn(net.minecraft.tag.BlockTags.LOGS));
+        boolean harvestLeaves=!targetBlocks.isEmpty() && targetBlocks.stream().allMatch(b -> b.isIn(net.minecraft.tag.BlockTags.LEAVES));
+        if((harvestLogs || harvestLeaves)
+                && InventoryHelper.findItemSlot(player,net.minecraft.item.Items.SHEARS)>=0) {
+            blockToMine.clear();currentTargetBlocks.clear();currentTargetBlocks.addAll(targetBlocks);
+            blockToMine.add(player.getBlockPos()); // Queue ownership marker while the combined task is running.
+            TreeHarvestSession session=harvestLogs?new TreeHarvestSession(player,totalCount,maxRadius)
+                    :new TreeHarvestSession(player,0,totalCount,maxRadius);
+            harvestWorld=MinecraftClient.getInstance().world;
+            BotEngine.getInstance().getModule(MiscController.class).startTreeHarvest(session);
+            return;
+        }
         List<BlockPos> path = findNearestBlocks(player, targetBlocks, totalCount, maxRadius);
         setupAndDispatchTask(targetBlocks, path, "混合方块");
     }
 
     public static void mineAndCollect(PlayerEntity player, Map<Block, Integer> targetCounts, int maxRadius) {
+        if(targetCounts==null || targetCounts.values().stream().mapToInt(Integer::intValue).sum()<=0)return;
         List<BlockPos> path = findNearestBlocks(player, targetCounts, maxRadius);
         setupAndDispatchTask(targetCounts.keySet(), path, "精确配额");
+    }
+
+    public static void mineAndCollect(BlockPos origin, Map<Block, Integer> targetCounts, int maxRadius) {
+        if (targetCounts == null || targetCounts.values().stream().mapToInt(Integer::intValue).sum() <= 0) return;
+        setupAndDispatchTask(targetCounts.keySet(), findNearestBlocks(origin, targetCounts, maxRadius), "作业点配额");
     }
 
     public static void dispatchNextMineAndCollectTask() {
@@ -343,7 +381,7 @@ public class MiningHelper {
             }
             System.out.println("Fredobot: reset because cant find enough blocks. Detail: " + targetTypes.toString());
             MiningHelper.currentTargetBlocks.clear();
-            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld();
+            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("普通采集无目标：" + targetTypes);
             return;
         }
         dispatchNextMineAndCollectTask();
