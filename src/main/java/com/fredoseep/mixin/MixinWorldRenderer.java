@@ -2,6 +2,10 @@ package com.fredoseep.mixin;
 
 
 import com.fredoseep.render.PathRenderer;
+import com.fredoseep.render.MotionPathRenderer;
+import com.fredoseep.motion.sim.GroundMotionExperiments;
+import com.fredoseep.motion.sim.RuntimeGroundMotion;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.GameRenderer;
 import net.minecraft.client.render.LightmapTextureManager;
@@ -20,6 +24,9 @@ public class MixinWorldRenderer {
     @Inject(method = "render", at = @At("RETURN"))
     private void onRender(MatrixStack matrices, float tickDelta, long limitTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightmapTextureManager lightmapTextureManager, Matrix4f matrix4f, CallbackInfo ci) {
         // 直接调用我们的渲染方法，把矩阵和相机传进去
+        GroundMotionExperiments.pump(MinecraftClient.getInstance());
+        RuntimeGroundMotion.pump(MinecraftClient.getInstance());
         PathRenderer.renderPath(matrices, camera);
+        MotionPathRenderer.render(matrices, camera);
     }
 }

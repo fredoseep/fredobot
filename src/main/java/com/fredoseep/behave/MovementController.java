@@ -22,6 +22,7 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.options.KeyBinding;
 import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.tag.FluidTags;
@@ -66,6 +67,10 @@ public class MovementController implements IBotModule {
     public boolean boatLaunching(){return boatLaunch.active();}
     public boolean swimStarting(){return surfaceSwim.starting();}
     private final BoatLaunch boatLaunch=new BoatLaunch();
+    private BoatLaunch.Input boatInput=new BoatLaunch.Input(false,false,false);
+    public void prepareBoatLaunch(MinecraftClient client,PlayerEntity player,PathExecutor path) {
+        boatInput=boatLaunch.tick(client,player,path);
+    }
     private int horizontalCollisionTicks = 0;
     private int boatHorizontalCollisionTicks = 0;
     private SimplePathfinder.MovementState nextState = SimplePathfinder.MovementState.WALKING;
@@ -89,6 +94,7 @@ public class MovementController implements IBotModule {
         this.swimStateStabilizationTicks = 0;
         surfaceSwim.reset();
         boatLaunch.reset();
+        boatInput=new BoatLaunch.Input(false,false,false);
         this.horizontalCollisionTicks = 0;
         this.boatHorizontalCollisionTicks = 0;
 
@@ -142,6 +148,27 @@ public class MovementController implements IBotModule {
         applyKeys(client);
     }
 
+    /** Keep the same held inputs when the module reapplies them later in this client tick. */
+    public void floatAtUnderwaterEntry(MinecraftClient client,PlayerEntity player){
+        resetKeys();player.setSprinting(false);
+        pressJump=player.isTouchingWater();
+        applyKeys(client);
+    }
+
+    public void controlUnderwaterBoatRecovery(MinecraftClient client,PlayerEntity player,boolean dismount,ItemEntity drop){
+        resetKeys();player.setSprinting(false);
+        pressSneak=dismount;
+        if(!dismount){
+            pressJump=player.isTouchingWater();
+            if(drop!=null){
+                double dx=drop.getX()-player.getX(),dz=drop.getZ()-player.getZ();
+                setLookDirection(player,(float)Math.toDegrees(Math.atan2(-dx,dz)),0);
+                pressForward=dx*dx+dz*dz>.16;
+            }
+        }
+        applyKeys(client);
+    }
+
     public void alignNewBoatRoute(PathExecutor path,PlayerEntity player) {
         if(boatLaunch.boarded(player)) {path.enterBoatSurfaceRoute();boatLaunch.reset();}
     }
@@ -151,10 +178,10 @@ public class MovementController implements IBotModule {
         targetNode.plannedAction = originalNode.plannedAction;
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
         if (!player.hasVehicle()) {
-            BoatLaunch.Input launch=boatLaunch.tick(client,player,pathExecutor);
+            BoatLaunch.Input launch=boatInput;
             if(launch.active()) {
                 pressBack=pressRight=pressLeft=pressUse=pressSneak=pressAttack=pressSprint=false;
-                pressForward=launch.forward();pressJump=launch.jump();player.setSprinting(false);return;
+                pressForward=launch.forward();pressJump=launch.jump();pressSneak=launch.sneak();player.setSprinting(false);return;
             }
         }
         if (PlayerHelper.isDrivingBoat(player) && originalNode.state != SimplePathfinder.MovementState.SWIMMING) {
@@ -169,11 +196,12 @@ public class MovementController implements IBotModule {
             BlockPos to=originalNode.pos;
             Box body=player.getBoundingBox();
             boolean safe=DiveClearance.clear(player.getX(),player.getY(),player.getZ(),to.getX()+.5,to.getY(),to.getZ()+.5,body.maxY-body.minY,
+                    Math.max(body.maxX-body.minX,body.maxZ-body.minZ)*.5,
                     p -> client.world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
                             && client.world.getBlockState(p).getCollisionShape(client.world,p).isEmpty()
                             && client.world.getBlockState(p).getFluidState().isIn(FluidTags.WATER)
                             && !(client.world.getBlockState(p).getBlock() instanceof DoorBlock),() -> false);
-            if(!safe){resetKeys();BotEngine.getInstance().getModule(PathExecutor.class).replanFromPlayer();return;}
+            if(!safe){resetKeys();pathExecutor.rejectSmoothedRoute("DIVE_BODY_CLEARANCE");return;}
         }
         if(originalNode.plannedAction!=null && originalNode.plannedAction.isSmoothWalk()
                 && (smoothCheckNode!=originalNode || ++smoothCheckTicks>=10)) {
@@ -186,7 +214,7 @@ public class MovementController implements IBotModule {
                             && b.getBlock()!=Blocks.SWEET_BERRY_BUSH;},
                     p -> {BlockState b=client.world.getBlockState(p);return b.getBlock()!=Blocks.MAGMA_BLOCK
                             && Block.isShapeFullCube(b.getCollisionShape(client.world,p));},() -> false);
-            if(!safe){resetKeys();pathExecutor.replanFromPlayer();return;}
+            if(!safe){resetKeys();pathExecutor.rejectSmoothedRoute("WALK_BODY_CLEARANCE");return;}
         }
         List<SimplePathfinder.Node> nodeList = pathExecutor.getCurrentPath();
         int currentIndex = pathExecutor.getCurrentPathIndex();
@@ -216,6 +244,17 @@ public class MovementController implements IBotModule {
 
         double targetX = targetNode.pos.getX() + 0.5D;
         double targetZ = targetNode.pos.getZ() + 0.5D;
+        if(pathExecutor.isBreathingDoorGoal() && pathExecutor.isFinalNode()){
+            var doorState=client.world.getBlockState(targetNode.pos);
+            if(doorState.getBlock() instanceof DoorBlock){
+                var shape=doorState.getCollisionShape(client.world,targetNode.pos);
+                if(!shape.isEmpty()){
+                    var slab=shape.getBoundingBox();
+                    targetX=targetNode.pos.getX()+DoorArrivalControl.freeCenter(slab.minX,slab.maxX);
+                    targetZ=targetNode.pos.getZ()+DoorArrivalControl.freeCenter(slab.minZ,slab.maxZ);
+                }
+            }
+        }
         double distSq = (player.getX() - targetX) * (player.getX() - targetX) + (player.getZ() - targetZ) * (player.getZ() - targetZ);
 
        if (targetNode.state == SimplePathfinder.MovementState.BUILDING_PILLAR && distSq <= 0.05) {
@@ -278,7 +317,8 @@ public class MovementController implements IBotModule {
             DoorArrivalControl.Keys settle=DoorArrivalControl.settle(targetX-player.getX(),
                     player.getY()-targetNode.pos.getY(),targetZ-player.getZ(),player.isOnGround());
             pressForward=settle.forward();pressSneak=settle.sneak();pressJump=settle.jump();
-            setLookDirection(player,targetYaw,0);lastState=targetNode.state;return;
+            // Close-range entry needs the same heading as the applied forward key immediately.
+            player.yaw=targetYaw;player.pitch=0;lastState=targetNode.state;return;
         }
 
         if(targetNode.plannedAction!=null && targetNode.plannedAction.isSurfaceRise() && !player.hasVehicle()) {
@@ -294,7 +334,7 @@ public class MovementController implements IBotModule {
         }
 
         boolean boatingSurface = SurfaceBoatRoute.allowed(client.world,targetNode)
-                && isBoatingNeeded(player) && (InventoryHelper.hasBoat(player) || boatLaunch.active());
+                && !boatLaunch.abandoned() && isBoatingNeeded(player) && (InventoryHelper.hasBoat(player) || boatLaunch.active());
         if(PathReachBoxes.plannedWater(targetNode) && !player.hasVehicle() && !boatingSurface) {
             double verticalError=targetNode.pos.getY()-player.getY();
             if(targetNode.state==SimplePathfinder.MovementState.SWIMMING) {
@@ -467,7 +507,7 @@ public class MovementController implements IBotModule {
                 break;
 
             case MINING:
-                List<BlockPos> obstacles = getObstaclesInTunnel(player, client.world, targetNode.pos);
+                List<BlockPos> obstacles = getObstaclesInTunnel(player, client.world, targetNode.pos,!pathExecutor.isManualPath());
 
                 if (!obstacles.isEmpty()) {
                     pressForward = false;
@@ -684,7 +724,7 @@ public class MovementController implements IBotModule {
             setLookDirection(player, angle[0], angle[1]);
             // Respect actual ray visibility; never attack a different block hidden in front of the plan.
             Vec3d eye = new Vec3d(player.getX(), player.getEyeY(), player.getZ());
-            BlockHitResult hit = client.world.rayTrace(new RayTraceContext(eye, Vec3d.ofCenter(p),
+            BlockHitResult hit = client.world.rayTrace(new RayTraceContext(eye, eye.add(player.getRotationVec(1.0F).multiply(5)),
                     RayTraceContext.ShapeType.OUTLINE, RayTraceContext.FluidHandling.NONE, player));
             if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(p)) {
                 client.interactionManager.updateBlockBreakingProgress(p, hit.getSide());
@@ -730,6 +770,15 @@ public class MovementController implements IBotModule {
      * 动态获取阻挡玩家前往目标位置的方块 (基于碰撞箱隧道检测)
      */
     public static List<BlockPos> getObstaclesInTunnel(PlayerEntity player, World world, BlockPos targetPos) {
+        return getObstaclesInTunnel(player,world,targetPos,true);
+    }
+    public static List<BlockPos> getObstaclesInTunnel(PlayerEntity player, World world, BlockPos targetPos,boolean automaticBodyClearance) {
+        if(!automaticBodyClearance){
+            BlockState state=world.getBlockState(targetPos);
+            if(targetPos.equals(BtStuff.craftingTablePos) || state.getBlock() instanceof DoorBlock
+                    || state.getCollisionShape(world,targetPos).isEmpty())return List.of();
+            return List.of(targetPos);
+        }
         List<BlockPos> obstacles = new ArrayList<>();
         BlockPos playerPos = player.getBlockPos();
 
@@ -752,7 +801,7 @@ public class MovementController implements IBotModule {
                 // 【免死金牌 1】：垂直下挖时，绝对不把门当成障碍物
                 if (state.getBlock() instanceof DoorBlock) continue;
 
-                if (!state.isAir() && state.getMaterial().isSolid()) {
+                if (!state.isAir() && !state.getCollisionShape(world,p).isEmpty()) {
                     obstacles.add(p);
                 }
             }
@@ -809,7 +858,7 @@ public class MovementController implements IBotModule {
                     BlockState state = world.getBlockState(mutable);
                     if (state.getBlock() instanceof DoorBlock) continue;
 
-                    if (!state.isAir() && !state.getMaterial().isLiquid() && state.getMaterial().isSolid()) {
+                    if (!state.isAir() && !state.getMaterial().isLiquid()) {
                         VoxelShape shape = state.getCollisionShape(world, mutable);
 
                         if (!shape.isEmpty()) {

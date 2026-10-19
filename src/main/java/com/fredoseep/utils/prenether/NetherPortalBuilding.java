@@ -1,6 +1,11 @@
 package com.fredoseep.utils.prenether;
 
 import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.algorithm.planning.DoorPlacementGuard;
+import com.fredoseep.algorithm.planning.PortalPositioningGeometry;
+import net.minecraft.block.enums.DoubleBlockHalf;
+import com.fredoseep.logging.GlobalStateLogger;
+import java.util.Map;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.behave.MovementController;
@@ -50,6 +55,8 @@ public class NetherPortalBuilding {
     private static Direction activePlaceDirection = null;
     private static boolean initGestureAdjusted = false;
     private static boolean againstTheDoor = false;
+    private static final DoorPlacementGuard doorPlacementGuard=new DoorPlacementGuard();
+    private static int positioningBackTicks,positioningStillTicks,positioningSideStableTicks;
 
     public static int lavaGrabStep = 0;
     private static Vec3d grabStoredRealPos = null;
@@ -73,6 +80,7 @@ public class NetherPortalBuilding {
         activeGrabPos = null;
         initGestureAdjusted = false;
         againstTheDoor = false;
+        doorPlacementGuard.clear();positioningBackTicks=positioningStillTicks=positioningSideStableTicks=0;
         KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyLeft.getDefaultKey(), false);
         KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyForward.getDefaultKey(), false);
 
@@ -84,10 +92,22 @@ public class NetherPortalBuilding {
 
     public static TwoByOneBuildState currentTBOState = TwoByOneBuildState.IDLE;
 
+    private static void stopPositioning(MinecraftClient client){
+        KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),false);
+        KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(),false);
+        KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(),false);
+        KeyBinding.setKeyPressed(client.options.keyRight.getDefaultKey(),false);
+        KeyBinding.setKeyPressed(client.options.keyJump.getDefaultKey(),false);
+        KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(),false);
+        client.player.setSprinting(false);
+    }
+
     public static void twoByOneBuild() {
         MinecraftClient client = MinecraftClient.getInstance();
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
-        boolean sneak = client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK;
+        if(currentTBOState!=TwoByOneBuildState.ADJUSTING_STANDING_POINT)stopPositioning(client);
+        boolean sneak = currentTBOState==TwoByOneBuildState.ADJUSTING_STANDING_POINT
+                || client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK;
         if (client.player.isSwimming()) {
             MovementController.setLookDirection(client.player, client.player.yaw, -90);
             initGestureAdjusted = false;
@@ -157,44 +177,59 @@ public class NetherPortalBuilding {
                 }
                 break;
             case SETTING_UP_DOOR:
-
-                if (!(client.world.getBlockState(PreNether.magmaPos.up()).getBlock() instanceof DoorBlock)) {
-                    if (!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock && client.player.inventory.getStack(8).getCount() >= 2)) {
-                        System.out.println("Fredodebug: slot 8 is : " + client.player.inventory.getStack(8).getItem().toString());
-                        System.out.println("Fredodebug: reset because the doors are not enough");
-                        globalExecutor.resetWorld("地狱门施工：第一扇门材料不足");
-                        return;
-                    }
-                    tryPlaceDoor(client.player, PreNether.magmaPos, PreNether.fromMagmaToAligned.getOpposite(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned.getOpposite()));
-                    return;
-                }
-                BlockPos secondDoorBasePos = PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite());
-                if (!(client.world.getBlockState(secondDoorBasePos.up()).getBlock() instanceof DoorBlock)) {
-                    if (!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock && client.player.inventory.getStack(8).getCount() >= 1)) {
-                        System.out.println("Fredodebug: slot 8 is : " + client.player.inventory.getStack(8).getItem().toString());
-                        System.out.println("Fredodebug: reset because the doors are not enough");
-                        globalExecutor.resetWorld("地狱门施工：第二扇门材料不足");
-                        return;
-                    }
-                    tryPlaceDoor(client.player, secondDoorBasePos, PreNether.fromMagmaToAligned.getOpposite(), RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned.getOpposite()));
-                    return;
-                }
-                System.out.println("Fredodebug: two doors are all set");
-                currentTBOState = TwoByOneBuildState.ADJUSTING_STANDING_POINT;
+                if(!ensurePortalDoor(client,PreNether.magmaPos,2))return;
+                BlockPos secondDoorBasePos=secondDoorBase();
+                if(!ensurePortalDoor(client,secondDoorBasePos,1))return;
+                // The second door is placed while facing backwards; restore the approach direction.
+                facePortalApproach(client);
+                againstTheDoor=false;positioningBackTicks=positioningStillTicks=positioningSideStableTicks=0;
+                GlobalStateLogger.logCustomEvent("portal_doors_confirmed",Map.of("first",PreNether.magmaPos.up().toShortString(),
+                        "second",secondDoorBasePos.up().toShortString(),
+                        "first_facing",portalDoorFacing(PreNether.magmaPos).toString(),"second_facing",portalDoorFacing(secondDoorBasePos).toString(),
+                        "first_state",client.world.getBlockState(PreNether.magmaPos.up()).toString(),
+                        "second_state",client.world.getBlockState(secondDoorBasePos.up()).toString()));
+                currentTBOState=TwoByOneBuildState.ADJUSTING_STANDING_POINT;
                 break;
             case ADJUSTING_STANDING_POINT:
-                KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(), !againstTheDoor);
-                System.out.println("Fredodebug: player speed: " + client.player.getVelocity().getComponentAlongAxis(PreNether.fromMagmaToAligned.getAxis()));
-                if (Math.abs(client.player.getVelocity().getComponentAlongAxis(PreNether.fromMagmaToAligned.getAxis())) < 0.001f && !againstTheDoor) {
-                    againstTheDoor = true;
+                // A server correction can arrive after the initial client-side placement prediction.
+                if(!portalDoorMatches(client,PreNether.magmaPos) || !portalDoorMatches(client,secondDoorBase())){
+                    stopPositioning(client);doorPlacementGuard.clear();
+                    currentTBOState=TwoByOneBuildState.SETTING_UP_DOOR;
+                    GlobalStateLogger.logCustomEvent("portal_door_correction",Map.of("pos",client.player.getPos().toString()));
                     return;
                 }
-                if (client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK)
-                    KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(), true);
-                else {
-                    KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(), false);
-                    currentTBOState = TwoByOneBuildState.BREAKING_FIRST_MAGMA_BLOCK;
+                // Own all movement inputs here: calibrate backwards, then shift left in a fixed view frame.
+                stopPositioning(client);
+                facePortalApproach(client);
+                if(!againstTheDoor){
+                    positioningBackTicks++;
+                    KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(),true);
+                    double backSpeed=Math.abs(client.player.getVelocity().getComponentAlongAxis(PreNether.fromMagmaToAligned.getAxis()));
+                    positioningStillTicks=backSpeed<.001?positioningStillTicks+1:0;
+                    boolean rearContact=PortalPositioningGeometry.touchesRearDoor(client.player.getBoundingBox(),PreNether.magmaPos.up(),
+                            client.world.getBlockState(PreNether.magmaPos.up()).getCollisionShape(client.world,PreNether.magmaPos.up()).getBoundingBoxes(),
+                            PreNether.fromMagmaToAligned.getOffsetX(),PreNether.fromMagmaToAligned.getOffsetZ());
+                    if(positioningBackTicks>=6 && positioningStillTicks>=3 && rearContact){
+                        againstTheDoor=true;
+                        KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(),false);
+                        GlobalStateLogger.logCustomEvent("portal_rear_calibrated",Map.of("pos",client.player.getPos().toString(),
+                                "facing",PreNether.fromMagmaToAligned.toString(),"ticks",positioningBackTicks));
+                    }
+                    return;
                 }
+                double overlap=PortalPositioningGeometry.overlap(client.player.getBoundingBox(),secondDoorBase().up());
+                if(overlap<.5){
+                    positioningSideStableTicks=0;
+                    KeyBinding.setKeyPressed(client.options.keyLeft.getDefaultKey(),true);
+                    return;
+                }
+                // Release lateral input before construction; wait for remaining motion to decay.
+                double speed=Math.hypot(client.player.getVelocity().x,client.player.getVelocity().z);
+                positioningSideStableTicks=speed<=.015?positioningSideStableTicks+1:0;
+                if(positioningSideStableTicks<3)return;
+                GlobalStateLogger.logCustomEvent("portal_positioning_finished",Map.of("pos",client.player.getPos().toString(),
+                        "velocity",client.player.getVelocity().toString(),"magma",PreNether.magmaPos.toShortString(),"second_door_overlap",overlap));
+                currentTBOState=TwoByOneBuildState.BREAKING_FIRST_MAGMA_BLOCK;
                 break;
             case BREAKING_FIRST_MAGMA_BLOCK:
                 client.player.inventory.selectedSlot = 1;
@@ -470,6 +505,49 @@ public class NetherPortalBuilding {
         return result;
     }
 
+    private static void facePortalApproach(MinecraftClient client){
+        client.player.yaw=RelevantDirectionHelper.getYawFromDirection(PreNether.fromMagmaToAligned);
+        client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(client.player.yaw,client.player.pitch,client.player.isOnGround()));
+    }
+    private static BlockPos secondDoorBase(){
+        return PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite());
+    }
+    // DoorBlock.FACING follows the placing player's direction; the door's outside faces opposite.
+    private static Direction portalDoorFacing(BlockPos base){
+        return base.equals(PreNether.magmaPos)?PreNether.fromMagmaToAligned:PreNether.fromMagmaToAligned.getOpposite();
+    }
+    private static boolean portalDoorMatches(MinecraftClient client,BlockPos base){
+        BlockState lower=client.world.getBlockState(base.up()),upper=client.world.getBlockState(base.up(2));
+        return lower.getBlock() instanceof DoorBlock && upper.getBlock()==lower.getBlock()
+                && lower.get(DoorBlock.HALF)==DoubleBlockHalf.LOWER && upper.get(DoorBlock.HALF)==DoubleBlockHalf.UPPER
+                && lower.get(DoorBlock.FACING)==portalDoorFacing(base)
+                && upper.get(DoorBlock.FACING)==portalDoorFacing(base)
+                && !lower.get(DoorBlock.OPEN) && !upper.get(DoorBlock.OPEN);
+    }
+    private static boolean ensurePortalDoor(MinecraftClient client,BlockPos base,int requiredDoors){
+        BlockPos door=base.up();int tick=client.player.age;
+        if(doorPlacementGuard.observe(door,tick,portalDoorMatches(client,base)))return true;
+        if(portalDoorMatches(client,base))return false; // Wait through the server-update window.
+        BlockState lower=client.world.getBlockState(door),upper=client.world.getBlockState(door.up());
+        if(lower.getBlock() instanceof DoorBlock || upper.getBlock() instanceof DoorBlock){
+            BlockPos repair=lower.getBlock() instanceof DoorBlock?door:door.up();
+            ToolsHelper.equipBestTool(client.player,repair,false);
+            client.interactionManager.updateBlockBreakingProgress(repair,Direction.UP);
+            if(doorPlacementGuard.tryIssue(door,tick))GlobalStateLogger.logCustomEvent("portal_door_repair",Map.of(
+                    "target",door.toShortString(),"lower",lower.toString(),"upper",upper.toString()));
+            return false;
+        }
+        if(!doorPlacementGuard.tryIssue(door,tick))return false;
+        if(!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock)
+                || client.player.inventory.getStack(8).getCount()<requiredDoors){
+            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("地狱门施工：门材料不足（等待放置同步后检查）");
+            return false;
+        }
+        Direction outside=portalDoorFacing(base).getOpposite();
+        tryPlaceDoor(client.player,base,outside,RelevantDirectionHelper.getRightDirection(outside));
+        return false;
+    }
+
         private static void tryPlaceDoor(PlayerEntity player, BlockPos basePos, Direction doorOutFacingDirection, Direction hingeOffsetDirection) {
         System.out.println("Fredodebug: hOffset: X: " + hingeOffsetDirection.getOffsetX() + " Z: " + hingeOffsetDirection.getOffsetZ() + " dOffset: X: " + doorOutFacingDirection.getOffsetX() + " Z: " + doorOutFacingDirection.getOffsetZ());
         double hitX = basePos.getX() + 0.5 + hingeOffsetDirection.getOffsetX() * 0.25;
@@ -486,6 +564,11 @@ public class NetherPortalBuilding {
         player.inventory.selectedSlot = 8;
         player.yaw = RelevantDirectionHelper.getYawFromDirection(doorOutFacingDirection.getOpposite());
         MinecraftClient client = MinecraftClient.getInstance();
+        // TCP packet order: the server must receive the intended facing before the placement packet.
+        client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(player.yaw,player.pitch,player.isOnGround()));
+        GlobalStateLogger.logCustomEvent("portal_door_attempt",Map.of("target",basePos.up().toShortString(),
+                "pos",player.getPos().toString(),"yaw",player.yaw,"pitch",player.pitch,
+                "outside",doorOutFacingDirection.toString(),"expected_facing",doorOutFacingDirection.getOpposite().toString()));
         System.out.println("Fredodebug: trying to placing the door, Door pos: " + basePos.up().toShortString() + " result: " + client.interactionManager.interactBlock((ClientPlayerEntity) player, client.world, Hand.MAIN_HAND, hitResult));
     }
 

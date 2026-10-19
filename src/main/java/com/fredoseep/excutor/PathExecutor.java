@@ -1,5 +1,23 @@
 package com.fredoseep.excutor;
 
+import com.fredoseep.motion.sim.FusionBoatRouting;
+import com.fredoseep.motion.sim.FusionBoatRuntime;
+import com.fredoseep.algorithm.planning.UnderwaterApproach;
+import com.fredoseep.algorithm.planning.UnderwaterBoatRecovery;
+import net.minecraft.entity.vehicle.BoatEntity;
+import net.minecraft.client.network.ClientPlayerEntity;
+import com.fredoseep.algorithm.planning.UnderwaterApproachPlanner;
+
+import com.fredoseep.motion.MotionCoordinator;
+import com.fredoseep.motion.MotionDebug;
+import com.fredoseep.motion.GroundFirstRouting;
+import com.fredoseep.motion.GroundSegmentPolicy;
+import com.fredoseep.motion.GroundRouteSearch;
+import com.fredoseep.motion.sim.RuntimeGroundMotion;
+import com.fredoseep.motion.sim.FusionRuntime;
+import com.fredoseep.motion.sim.FusionSafety;
+import com.fredoseep.motion.sim.GroundSafety;
+import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.algorithm.planning.AsyncPlanner;
 import com.fredoseep.algorithm.planning.PlannerDebug;
@@ -27,24 +45,116 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
 import java.util.Collections;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.Set;
 import java.util.Stack;
 import java.util.concurrent.CompletableFuture;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 public class PathExecutor implements IBotModule {
 
     public enum State {IDLE, CALCULATING, EXECUTING}
 
     public static boolean USE_ACTION_PLANNER = true;
+    private GroundFirstRouting primaryRouting;
+    private UnderwaterApproach.Session underwaterApproach;
+    private World underwaterWorld;
+    private UnderwaterBoatRecovery underwaterBoatRecovery;
+    private String underwaterTargetType;
+    private boolean advancingUnderwater;
+    private int underwaterRefillAge;
+    private void clearUnderwaterApproach(){underwaterBoatRecovery=null;underwaterApproach=null;underwaterWorld=null;underwaterTargetType=null;}
+    public String underwaterApproachStatus(){
+        if(underwaterApproach==null)return null;
+        if(underwaterBoatRecovery!=null)return "深水目标 1/2："+underwaterBoatRecovery.status();
+        return switch(underwaterApproach.phase()){
+            case SURFACE -> "深水目标 1/2：前往水面接近点 "+underwaterApproach.plan.surface().toShortString();
+            case REFILL -> "深水目标 1/2：水面补满氧气";
+            case DESCENT -> "深水目标 2/2：下潜至 "+underwaterApproach.plan.goal().toShortString();
+        };
+    }
+    /** Shared by Fusion completion and the legacy/boat executor completion. */
+    private boolean advanceUnderwaterApproach(){
+        if(underwaterApproach==null)return false;
+        if(underwaterApproach.phase()==UnderwaterApproach.Phase.REFILL)return true;
+        if(!underwaterApproach.reachedSurface()){clearUnderwaterApproach();return false;}
+        MinecraftClient client=MinecraftClient.getInstance();
+        underwaterRefillAge=client.player.age;currentState=State.CALCULATING;
+        currentPath=null;currentPathIndex=0;resetMovementKeys();
+        GlobalStateLogger.logCustomEvent("underwater_surface_arrived",Map.of("surface",underwaterApproach.plan.surface().toShortString(),
+                "goal",underwaterApproach.plan.goal().toShortString(),"air",client.player.getAir(),"pos",client.player.getPos().toString()));
+        return true;
+    }
+    private boolean tickUnderwaterRefill(MinecraftClient client,PlayerEntity player){
+        if(underwaterApproach==null || underwaterApproach.phase()!=UnderwaterApproach.Phase.REFILL)return false;
+        if(client.world!=underwaterWorld){stop();return true;}
+        resetMovementKeys();player.setSprinting(false);
+        MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
+        if(underwaterBoatRecovery==null){
+            BoatEntity boat=player.getVehicle() instanceof BoatEntity mounted?mounted:
+                    player instanceof ClientPlayerEntity local?FusionBoatRuntime.takeRecoveryBoat(local):null;
+            if(boat!=null)underwaterBoatRecovery=new UnderwaterBoatRecovery(boat,underwaterApproach.plan.goal(),player.age);
+        }
+        if(underwaterBoatRecovery!=null){
+            var result=underwaterBoatRecovery.tick(client,player,movement);
+            if(result==UnderwaterBoatRecovery.Result.ACTIVE)return true;
+            if(result==UnderwaterBoatRecovery.Result.FAILED){reportFailure(client);stop();return true;}
+            underwaterBoatRecovery=null;underwaterRefillAge=player.age;
+        }
+        // Full air while seated in a vehicle is not readiness to swim.
+        if(player.hasVehicle()){reportFailure(client);stop();return true;}
+        if(underwaterApproach.startDescent(player.isSubmergedIn(FluidTags.WATER),player.getAir(),player.getMaxAir())){
+            BlockPos goal=underwaterApproach.plan.goal();String type=underwaterTargetType;
+            GlobalStateLogger.logCustomEvent("underwater_descent_started",Map.of("goal",goal.toShortString(),"air",player.getAir(),
+                    "pos",player.getPos().toString()));
+            advancingUnderwater=true;
+            try{startNewPath(goal,type);}finally{advancingUnderwater=false;}
+            return true;
+        }
+        if(player.age-underwaterRefillAge>200){
+            GlobalStateLogger.logCustomEvent("underwater_refill_failed",Map.of("goal",underwaterApproach.plan.goal().toShortString(),"air",player.getAir()));
+            reportFailure(client);stop();return true;
+        }
+        // Do not pause simulation while waiting for oxygen. Float upright, never sneak downward.
+        if(movement!=null)movement.floatAtUnderwaterEntry(client,player);
+        return true;
+    }
+    private final Deque<FusionBoatRouting.Leg> crossingLegs=new ArrayDeque<>();
+    private boolean boatOnlyLeg,advancingCrossing;
+    private BlockPos crossingFinalGoal;
+    private boolean advanceCrossing(){
+        if(crossingLegs.isEmpty())return false;
+        MinecraftClient client=MinecraftClient.getInstance();
+        FusionBoatRouting.Leg next=crossingLegs.removeFirst();
+        if(!requestAllowed(next.goal(),currentBlacklist)){stop();return true;}
+        boatOnlyLeg=next.boat();advancingCrossing=true;
+        GlobalStateLogger.logCustomEvent("route_crossing_handoff",Map.of("backend",boatOnlyLeg?"FUSION_BOAT_SIMULATION":"FUSION_SIMULATION",
+                "segment_goal",next.goal().toShortString(),"final_goal",crossingFinalGoal.toShortString(),"remaining",crossingLegs.size()));
+        try{startNewPath(next.goal(),"crossing segment");}finally{advancingCrossing=false;}
+        return true;
+    }
+    private GroundSegmentPolicy.Ticket mixedGroundLease;
+    private boolean mixedGroundEnabled=true;
+    private BlockPos primaryFailedGoal;
+    private long groundAttemptGeneration=-1,groundRetryAfterMillis;
+    private int groundFallbackThrough=-1;
+    private String lastGroundSkip="",lastGroundBoundary="";
+    private long groundSettingsRevision=-1;
+    private World groundCooldownWorld;
+    private boolean resumePrimaryRouting;
+    private boolean rejectSmoothingForGoal;
     private volatile long calculationGeneration = 0;
     private AsyncPlanner plannerJob;
     private PlannerDebug plannerDebug;
     private record RequestKey(World world,BlockPos start,BlockPos goal,Set<BlockPos> blacklist) {}
     private final RetryBackoff<RequestKey> retryBackoff=new RetryBackoff<>();
-    private boolean breathingDoorGoal;
+    private boolean breathingDoorGoal,shortLogRoute;
     private long searchFailureSerial;
     private World lastSearchFailureWorld;
     private BlockPos lastSearchFailureGoal;
@@ -89,8 +199,9 @@ public class PathExecutor implements IBotModule {
     private boolean reportFailure(MinecraftClient client) {
         searchFailureSerial++;
         lastSearchFailureWorld=client.world;
-        lastSearchFailureGoal=finalDestination==null?null:finalDestination.toImmutable();
-        return client.player==null || finalDestination==null || retryBackoff.fail(requestKey(client,finalDestination,currentBlacklist),System.nanoTime()/1_000_000)==1;
+        BlockPos taskGoal=getFinalDestination();
+        lastSearchFailureGoal=taskGoal==null?null:taskGoal.toImmutable();
+        return client.player==null || taskGoal==null || retryBackoff.fail(requestKey(client,taskGoal,currentBlacklist),System.nanoTime()/1_000_000)==1;
     }
     public PlannerDebug.View getSearchView() {
         return currentState == State.CALCULATING && plannerDebug != null ? plannerDebug.view() : null;
@@ -125,6 +236,8 @@ public class PathExecutor implements IBotModule {
     private TempMissionType tempMissionType = TempMissionType.IDLE;
     private List<SimplePathfinder.Node> currentPath = null;
     private boolean currentPathUsesActionPlanner;
+    private boolean manualPath;
+    public boolean isManualPath(){return manualPath;}
     private int currentPathIndex = 0;
     private BlockPos finalDestination = null;
     public Stack<BlockPos> suspendedDestinations = new Stack<>();
@@ -190,7 +303,7 @@ public class PathExecutor implements IBotModule {
     }
 
     public BlockPos getFinalDestination() {
-        return this.finalDestination;
+        return underwaterApproach==null?this.finalDestination:underwaterApproach.plan.goal();
     }
 
     public boolean isUsingActionPlanner() {
@@ -206,6 +319,10 @@ public class PathExecutor implements IBotModule {
     }
 
     public void pause() {
+        if(isPaused)return;
+        resumePrimaryRouting=primaryRouting!=null;
+        invalidatePrimaryRouting();
+        MotionCoordinator.cancel("PATH_PAUSED");
         if (this.currentState == State.EXECUTING || this.currentState == State.CALCULATING) {
             this.isPaused = true;
             resetMovementKeys();
@@ -216,7 +333,13 @@ public class PathExecutor implements IBotModule {
     public void resume() {
         if (this.isPaused) {
             this.isPaused = false;
-            MinecraftClient.getInstance().player.sendMessage(new LiteralText("§a[Bot] 寻路已继续。"), false);
+            MinecraftClient client=MinecraftClient.getInstance();
+            client.player.sendMessage(new LiteralText("§a[Bot] 寻路已继续。"), false);
+            if(underwaterApproach!=null && underwaterApproach.phase()==UnderwaterApproach.Phase.REFILL)underwaterRefillAge=client.player.age;
+            if(resumePrimaryRouting && finalDestination!=null){
+                resumePrimaryRouting=false;
+                startRoutedPath(new BlockPos(client.player.getX(),client.player.getY()+.2,client.player.getZ()));
+            }
         }
     }
 
@@ -244,6 +367,9 @@ public class PathExecutor implements IBotModule {
             Set<BlockPos> copy=blacklist==null?Collections.emptySet():Set.copyOf(blacklist);
             client.execute(() -> setGoal(immutable,copy,targetType)); return;
         }
+        if(!requestAllowed(destination,blacklist==null?Collections.emptySet():blacklist))return;
+        invalidatePrimaryRouting();resumePrimaryRouting=false;
+        MotionCoordinator.cancel("PATH_GOAL_CHANGED");
         this.suspendedDestinations.clear();
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
         startNewPath(destination, targetType);
@@ -263,7 +389,7 @@ public class PathExecutor implements IBotModule {
         if(!requestAllowed(tempDestination,blacklist==null?Collections.emptySet():blacklist))return;
         tempMissionType = type;
         if (this.finalDestination != null) {
-            this.suspendedDestinations.push(this.finalDestination);
+            this.suspendedDestinations.push(underwaterApproach!=null?underwaterApproach.plan.goal():crossingFinalGoal!=null?crossingFinalGoal:this.finalDestination);
             System.out.println("FredoBot: 挂起原目标 -> " + this.finalDestination.toShortString() + "，前往临时目标 -> " + tempDestination.toShortString());
         }
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
@@ -281,11 +407,39 @@ public class PathExecutor implements IBotModule {
         }
     }
 
-    private void startNewPath(BlockPos dest, String targetType) {
+    private void startNewPath(BlockPos requestedDest, String targetType) {
         MinecraftClient dispatchClient=MinecraftClient.getInstance();
-        if(!dispatchClient.isOnThread()) { dispatchClient.execute(() -> startNewPath(dest,targetType)); return; }
-        if(!requestAllowed(dest,currentBlacklist))return;
+        if(!dispatchClient.isOnThread()) { dispatchClient.execute(() -> startNewPath(requestedDest,targetType)); return; }
+        if(!requestAllowed(requestedDest,currentBlacklist))return;
+        BlockPos dest=requestedDest;
+        if(!advancingCrossing && !advancingUnderwater){
+            clearUnderwaterApproach();
+            if(!"breathing door".equals(targetType)){
+                var plan=UnderwaterApproachPlanner.plan(dispatchClient,requestedDest,currentBlacklist);
+                if(plan!=null){
+                    underwaterApproach=new UnderwaterApproach.Session(plan);underwaterWorld=dispatchClient.world;
+                    underwaterTargetType=targetType;dest=plan.surface();
+                    GlobalStateLogger.logCustomEvent("underwater_approach_planned",Map.of("surface",dest.toShortString(),
+                            "goal",requestedDest.toShortString(),"target_type",String.valueOf(targetType),"pos",dispatchClient.player.getPos().toString()));
+                }
+            }
+        }
+        if(!advancingCrossing){
+            crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
+            if(FusionRuntime.enabled() && !"breathing door".equals(targetType) && !"tree trunk approach".equals(targetType)
+                    && !"log mining approach".equals(targetType) && dispatchClient.player!=null){
+                crossingLegs.addAll(FusionBoatRouting.split(dispatchClient.player,dest));
+                if(!crossingLegs.isEmpty()){
+                    crossingFinalGoal=dest.toImmutable();
+                    advanceCrossing();return;
+                }
+            }
+        }
+        this.rejectSmoothingForGoal=false;
+        this.mixedGroundEnabled=true;
+        this.primaryFailedGoal=null;
         this.breathingDoorGoal="breathing door".equals(targetType);
+        this.shortLogRoute="tree trunk approach".equals(targetType) || "log mining approach".equals(targetType);
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -300,7 +454,7 @@ public class PathExecutor implements IBotModule {
                 client.player.sendMessage(new LiteralText("§e[Bot] 发起寻路计算... -> " + dest.toShortString()), false);
             System.out.println("Fredodebug: setGoalType: " + targetType);
             BlockPos startPos = new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ());
-            recalculatePath(startPos);
+            startRoutedPath(startPos);
         }
     }
 
@@ -311,6 +465,11 @@ public class PathExecutor implements IBotModule {
     public void stop() {
         MinecraftClient client=MinecraftClient.getInstance();
         if(!client.isOnThread()) { client.execute(this::stop); return; }
+        clearUnderwaterApproach();
+        crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
+        shortLogRoute=false;manualPath=false;
+        invalidatePrimaryRouting();resumePrimaryRouting=false;
+        MotionCoordinator.cancel("PATH_STOPPED");
         calculationGeneration++;
         if(plannerJob!=null) { plannerJob.cancel(client,"executor stopped"); plannerJob=null; }
         this.currentState = State.IDLE;
@@ -329,9 +488,122 @@ public class PathExecutor implements IBotModule {
             recalculatePath(new BlockPos(client.player.getX(), client.player.getY() + 0.2, client.player.getZ()));
     }
 
+    private void invalidatePrimaryRouting(){
+        mixedGroundLease=null;
+        GroundFirstRouting previous=primaryRouting;primaryRouting=null;
+        if(previous!=null)previous.cancel();
+    }
+    /** Select before ActionPlanner: supported dry goals have no preceding legacy search. */
+    private void startRoutedPath(BlockPos startPos){
+        manualPath=false;
+        MinecraftClient client=MinecraftClient.getInstance();
+        invalidatePrimaryRouting();
+        MotionCoordinator.cancel("ROUTE_BACKEND_CHANGED");
+        if(plannerJob!=null){plannerJob.cancel(client,"new routed goal");plannerJob=null;}
+        MotionDebug.begin(client.world,null);
+        plannerDebug=null;currentPath=null;currentPathIndex=0;currentPathUsesActionPlanner=false;
+        currentState=State.CALCULATING;resetMovementKeys();
+        final long generation=++calculationGeneration;
+        final World requestWorld=client.world;
+        final BlockPos destination=finalDestination.toImmutable();
+        String unsupported="";
+        if(!USE_ACTION_PLANNER || !RuntimeGroundMotion.enabled())unsupported="GROUND_BACKEND_DISABLED";
+        else if(breathingDoorGoal)unsupported="BREATHING_DOOR";
+
+        else if(client.player==null || client.world==null)unsupported="WORLD_OR_PLAYER_MISSING";
+        else try {
+            if(boatOnlyLeg && FusionRuntime.enabled()){
+                // Boat runtime owns launch and mounted-state validation.
+            }else if(FusionRuntime.enabled()){
+                FusionSafety.start(client.player);
+                FusionSafety.goal(client.player,new GroundRouteSearch.Cell(destination.getX(),destination.getY(),destination.getZ()).goal());
+            }else{
+                GroundSafety.requireStart(client.player);
+                GroundSafety.requireGoal(client.player,new GroundRouteSearch.Cell(destination.getX(),destination.getY(),destination.getZ()).goal());
+            }
+        } catch(FusionSafety.TransientCollision falling){
+            // Keep the primary request. FusionRuntime will wait unpaused for falling blocks to settle.
+        } catch(IllegalArgumentException rejected){unsupported=rejected.getMessage();}
+        Set<GroundRouteSearch.Cell> forbidden=new HashSet<>();
+        for(BlockPos p:currentBlacklist)forbidden.add(new GroundRouteSearch.Cell(p.getX(),p.getY(),p.getZ()));
+        GroundFirstRouting[] request=new GroundFirstRouting[1];
+        String[] failureReason={""};
+        BooleanSupplier current=()->primaryRouting==request[0] && calculationGeneration==generation
+                && client.world==requestWorld && destination.equals(finalDestination) && !isPaused;
+        request[0]=new GroundFirstRouting(completed->{
+            Consumer<RuntimeGroundMotion.Outcome> outcomeHandler=outcome->{
+                        if(!current.getAsBoolean()){
+                            if(primaryRouting==request[0] && generation==calculationGeneration && client.world!=requestWorld){
+                                invalidatePrimaryRouting();currentState=State.IDLE;resetMovementKeys();
+                            }
+                            return;
+                        }
+                        failureReason[0]=outcome.reason();
+                        completed.accept(outcome.status()==RuntimeGroundMotion.Status.COMPLETE?GroundFirstRouting.Result.COMPLETE:
+                                outcome.status()==RuntimeGroundMotion.Status.FAILED || "GROUND_AUTO_DISABLED".equals(outcome.reason())?
+                                        GroundFirstRouting.Result.FAILED:GroundFirstRouting.Result.CANCELLED);
+                    };
+            var goal=new GroundRouteSearch.Cell(destination.getX(),destination.getY(),destination.getZ()).goal();
+            boolean started=boatOnlyLeg && FusionRuntime.enabled()?FusionBoatRuntime.begin(goal,current,outcomeHandler):
+                    FusionRuntime.enabled() && shortLogRoute?FusionRuntime.begin(goal,forbidden,current,outcomeHandler,true):
+                    RuntimeGroundMotion.begin(goal,forbidden,current,outcomeHandler);
+            if(started)logRouteBackend(boatOnlyLeg?"FUSION_BOAT_SIMULATION":FusionRuntime.enabled()?"FUSION_SIMULATION":"GROUND_SIMULATION","DIRECT_GOAL",destination);
+            return started;
+        },()->{
+            if(!current.getAsBoolean())return;
+            primaryRouting=null;retryBackoff.clear();currentState=State.IDLE;resetMovementKeys();
+            if(advanceCrossing())return;
+            if(advanceUnderwaterApproach())return;
+            boatOnlyLeg=false;crossingFinalGoal=null;
+            GlobalStateLogger.logCustomEvent("route_goal_completed",Map.of("backend",FusionRuntime.enabled()?"FUSION_SIMULATION":"GROUND_SIMULATION","goal",destination.toShortString()));
+            client.player.sendMessage(new LiteralText("§b[Bot] 已到达最终目的地！"),false);
+        },reason->{
+            if(!current.getAsBoolean())return;
+            primaryRouting=null;
+            if(boatOnlyLeg && FusionRuntime.enabled()){
+                GlobalStateLogger.logCustomEvent("fusion_boat_route_failed",Map.of("goal",destination.toShortString(),"reason",reason+": "+failureReason[0]));
+                reportFailure(client);stop();return;
+            }
+            if(shortLogRoute && FusionRuntime.enabled()){
+                GlobalStateLogger.logCustomEvent("log_approach_failed",Map.of("goal",destination.toShortString(),"reason",reason+": "+failureReason[0]));
+                reportFailure(client);stop();return;
+            }
+            // Retain supported prefixes after a failed whole-goal attempt, but do not repeat its endpoint.
+            primaryFailedGoal="PRIMARY_FAILED".equals(reason)?destination:null;
+            logRouteBackend(mixedGroundEnabled && RuntimeGroundMotion.enabled() && !FusionRuntime.enabled()?"HYBRID_CONNECTION_PLAN":"ACTION_PLANNER",reason+(failureReason[0].isEmpty()?"":": "+failureReason[0]),destination);
+            // Fallback runs once, with no subsequent ground-segment search on its result.
+            recalculatePath(new BlockPos(client.player.getX(),client.player.getY()+.2,client.player.getZ()));
+        },()->{
+            if(!current.getAsBoolean())return;
+            primaryRouting=null;currentState=State.IDLE;resetMovementKeys();
+        });
+        primaryRouting=request[0];
+        request[0].start(unsupported.isEmpty(),unsupported);
+    }
+    private void logRouteBackend(String backend,String reason,BlockPos goal){
+        GlobalStateLogger.logCustomEvent("route_backend_selected",Map.of("backend",backend,"reason",reason,
+                "goal",goal.toShortString(),"generation",calculationGeneration));
+    }
+
+    /** A live clearance rejection cannot immediately regenerate the same unsafe shortcut. */
+    public void rejectSmoothedRoute(String reason) {
+        MinecraftClient c=MinecraftClient.getInstance();
+        if(c.player==null || finalDestination==null)return;
+        String kind=currentPath!=null && currentPathIndex<currentPath.size()
+                && currentPath.get(currentPathIndex).plannedAction!=null?currentPath.get(currentPathIndex).plannedAction.kind:"none";
+        GlobalStateLogger.logCustomEvent("path_smoothing_rejected",Map.of("reason",reason,"action",kind,
+                "node_index",currentPathIndex,"goal",finalDestination.toShortString(),"pos",c.player.getPos().toString(),
+                "pose",c.player.getPose().name(),"smoothing_disabled_for_goal",true));
+        rejectSmoothingForGoal=true;
+        replanFromPlayer();
+    }
+
     private void recalculatePath(BlockPos startPos) {
+        manualPath=false;
         MinecraftClient client=MinecraftClient.getInstance();
         if(!client.isOnThread()) { client.execute(() -> recalculatePath(startPos)); return; }
+        invalidatePrimaryRouting();resumePrimaryRouting=false;
+        MotionCoordinator.cancel("PATH_RECALCULATED");
         if(finalDestination==null || client.world==null || client.player==null) return;
         if(!requestAllowed(finalDestination,currentBlacklist)){stop();return;}
         if(plannerJob!=null) { plannerJob.cancel(client,"superseded by new goal/replan"); plannerJob=null; }
@@ -342,6 +614,7 @@ public class PathExecutor implements IBotModule {
         if(USE_ACTION_PLANNER) {
             try {
                 PlannerSettings settings=PlannerSettings.DEFAULT.copy();
+                if(rejectSmoothingForGoal)settings.smoothPaths=false;
                 if(breathingDoorGoal) {
                     settings.preferVerticalSurfacing=false;settings.allowWorldEdits=false;
                     settings.minimumRouteY=Math.min(startPos.getY(),destination.getY());
@@ -455,7 +728,9 @@ public class PathExecutor implements IBotModule {
 
     @Override
     public void onTick(MinecraftClient client, PlayerEntity player) {
-        if (isPaused) return;
+        if(isPaused)return;
+        if(tickUnderwaterRefill(client,player))return;
+        if(MotionCoordinator.blocksBot())return;
         if (currentState != State.EXECUTING || currentPath == null) return;
         boolean isMining = false;
         if (lastStuckCheckPos == null) {
@@ -465,7 +740,7 @@ public class PathExecutor implements IBotModule {
             if (currentPathIndex < currentPath.size()) {
                 SimplePathfinder.Node stuckNode = currentPath.get(currentPathIndex);
                 if ((stuckNode.plannedAction == null && stuckNode.state == SimplePathfinder.MovementState.MINING
-                            && !MovementController.getObstaclesInTunnel(player,client.world,stuckNode.pos).isEmpty())
+                            && !MovementController.getObstaclesInTunnel(player,client.world,stuckNode.pos,!manualPath).isEmpty())
                         || (stuckNode.plannedAction != null && stuckNode.plannedAction.breaks.stream().anyMatch(
                                 p -> !client.world.getBlockState(p).getCollisionShape(client.world, p).isEmpty()))) {
                     isMining = true;
@@ -473,7 +748,13 @@ public class PathExecutor implements IBotModule {
             }
         }
         MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
-        if(movement!=null)movement.alignNewBoatRoute(this,player);
+        if(movement!=null) {
+            // Decide launch ownership before reach boxes can consume the water nodes.
+            movement.alignNewBoatRoute(this,player);
+            movement.prepareBoatLaunch(client,player,this);
+            movement.alignNewBoatRoute(this,player);
+        }
+        if(movement!=null && !movement.boatLaunching() && !movement.swimStarting() && tryGroundHandoff(client))return;
         boolean turningJump=movement!=null && currentPathIndex<currentPath.size()
                 && movement.jumpTurningProgress(currentPath.get(currentPathIndex));
         boolean startingSwim=movement!=null && movement.swimStarting();
@@ -516,13 +797,13 @@ public class PathExecutor implements IBotModule {
                 stuckCheckTicks = 0;
             }
         }
-        updateProgress(player);
+        if (!startingBoat || player.hasVehicle()) updateProgress(player);
         if (currentPathIndex > 500) {
             currentPath.subList(0, currentPathIndex - 1).clear();
             currentPathIndex = 1;
         }
 
-        if (currentPathIndex < currentPath.size() && isOffThePath(player)) {
+        if (!startingBoat && currentPathIndex < currentPath.size() && isOffThePath(player)) {
             player.sendMessage(new LiteralText("§c[Bot] 偏离路线，正在重新计算..."), false);
             resetMovementKeys();
             recalculatePath(new BlockPos(player.getX(), player.getY() + 0.2, player.getZ()));
@@ -536,6 +817,9 @@ public class PathExecutor implements IBotModule {
             double distanceSq = distX * distX + distY * distY + distZ * distZ;
 
             if (distanceSq <= 2.0) {
+                resetMovementKeys();
+                if(advanceCrossing())return;
+                if(advanceUnderwaterApproach())return;
                 player.sendMessage(new LiteralText("§b[Bot] 已到达最终目的地！"), false);
                 stop();
             } else {
@@ -559,6 +843,115 @@ public class PathExecutor implements IBotModule {
         if (mc != null) {
             mc.executeMovementNode(client, player, targetNode);
         }
+    }
+
+    private static boolean pureGroundNode(SimplePathfinder.Node node){
+        if(node==null || node.pos==null)return false;
+        if(node.state!=SimplePathfinder.MovementState.WALKING && node.state!=SimplePathfinder.MovementState.JUMPING_UP
+                && node.state!=SimplePathfinder.MovementState.JUMPING_AIR && node.state!=SimplePathfinder.MovementState.FALLING)return false;
+        var action=node.plannedAction;
+        return action==null || GroundSegmentPolicy.pureAction(true,!action.breaks.isEmpty(),action.material!=null,
+                action.isShoreExit() || action.isSurfaceRise(),"swim/mine".equals(action.kind));
+    }
+    private boolean tryGroundHandoff(MinecraftClient client){
+        // Experimental fallback is one legacy plan, never another round of segment searches.
+        if(FusionRuntime.enabled())return false;
+        if(!mixedGroundEnabled || !RuntimeGroundMotion.enabled() || !currentPathUsesActionPlanner || breathingDoorGoal
+                || MotionCoordinator.blocksBot() || !BotEngine.getInstance().isRunning()
+                || BotEngine.getInstance().highPriorityIsBusy(getPriority()) || currentPathIndex>=currentPath.size())return false;
+        if(groundSettingsRevision!=RuntimeGroundMotion.settingsRevision()){
+            groundSettingsRevision=RuntimeGroundMotion.settingsRevision();groundAttemptGeneration=-1;groundRetryAfterMillis=0;
+        }
+        if(groundCooldownWorld!=client.world){groundCooldownWorld=client.world;groundRetryAfterMillis=0;}
+        if(groundAttemptGeneration!=calculationGeneration){groundAttemptGeneration=calculationGeneration;groundFallbackThrough=-1;}
+        if(currentPathIndex<=groundFallbackThrough || System.currentTimeMillis()<groundRetryAfterMillis)return false;
+        if(!pureGroundNode(currentPath.get(currentPathIndex))){
+            var node=currentPath.get(currentPathIndex);if(node==null)return false;var action=node.plannedAction;
+            String detail="state="+node.state+" action="+(action==null?"custom":action.kind)
+                    +" breaks="+(action==null?0:action.breaks.size())+" placement="+(action!=null && action.material!=null);
+            String key=calculationGeneration+":"+detail;
+            if(!key.equals(lastGroundBoundary)){
+                lastGroundBoundary=key;logGroundSkip("LEGACY_PREREQUISITE",detail,currentPathIndex,0);
+            }
+            return false;
+        }
+        lastGroundBoundary="";
+        try {GroundSafety.requireStart(client.player);}
+        catch(IllegalArgumentException unsupported){
+            logGroundSkip("START_UNSUPPORTED",unsupported.getMessage(),currentPathIndex,0);
+            return false;
+        }
+        List<GroundSegmentPolicy.Step> steps=new ArrayList<>();
+        // Prefix placeholders keep policy indices equal to executor indices without reading old nodes.
+        for(int i=0;i<currentPathIndex;i++)steps.add(null);
+        for(int i=currentPathIndex;i<Math.min(currentPath.size(),currentPathIndex+128);i++){
+            var node=currentPath.get(i);boolean pure=pureGroundNode(node);
+            if(!pure){steps.add(new GroundSegmentPolicy.Step(new GroundRouteSearch.Cell(0,0,0),false));break;}
+            steps.add(new GroundSegmentPolicy.Step(new GroundRouteSearch.Cell(node.pos.getX(),node.pos.getY(),node.pos.getZ()),true));
+        }
+        String[] rejected={""};int[] rejectedCount={0};
+        int end=GroundSegmentPolicy.select(steps,currentPathIndex,MotionCoordinator.capture(client.player),64,128,index->{
+            try {
+                if(currentPath.get(index).pos.equals(primaryFailedGoal))throw new IllegalArgumentException("跳过本任务已失败的整段终点，尝试更近陆地段");
+                GroundSafety.requireGoal(client.player,steps.get(index).cell().goal());return true;
+            }
+            catch(IllegalArgumentException unsupported){
+                rejectedCount[0]++;
+                if(rejected[0].isEmpty())rejected[0]="node="+index+" goal="+currentPath.get(index).pos.toShortString()+": "+unsupported.getMessage();
+                return false;
+            }
+        });
+        if(rejectedCount[0]>0)logGroundSkip(end<0?"NO_SUPPORTED_GOAL":"USING_NEARER_GOAL",rejected[0],end,rejectedCount[0]);
+        if(end<0){groundRetryAfterMillis=System.currentTimeMillis()+500;return false;}
+        var endpoint=currentPath.get(end);
+        var ticket=new GroundSegmentPolicy.Ticket(calculationGeneration,currentPath,currentPathIndex,end,endpoint);
+        mixedGroundLease=ticket;
+        World requestWorld=client.world;
+        Set<GroundRouteSearch.Cell> forbidden=new HashSet<>();
+        for(BlockPos p:currentBlacklist)forbidden.add(new GroundRouteSearch.Cell(p.getX(),p.getY(),p.getZ()));
+        boolean started=RuntimeGroundMotion.begin(new GroundRouteSearch.Cell(endpoint.pos.getX(),endpoint.pos.getY(),endpoint.pos.getZ()).goal(),forbidden,
+                ()->mixedGroundLease==ticket && RuntimeGroundMotion.enabled() && client.world==requestWorld && currentState==State.EXECUTING && !isPaused
+                        && currentPath!=null && end<currentPath.size()
+                        && ticket.matches(calculationGeneration,currentPath,currentPathIndex,currentPath.get(end)),
+                outcome->{
+                    if(mixedGroundLease!=ticket || client.world!=requestWorld || currentPath==null || end>=currentPath.size()
+                            || !ticket.matches(calculationGeneration,currentPath,currentPathIndex,currentPath.get(end)))return;
+                    mixedGroundLease=null;
+                    if(outcome.status()==RuntimeGroundMotion.Status.COMPLETE){
+                        currentPathIndex=end+1;stuckCheckTicks=0;lastStuckCheckPos=null;consecutiveStuckCount=0;
+                    }else if(outcome.status()==RuntimeGroundMotion.Status.FAILED){
+                        groundFallbackThrough=end;
+                        groundRetryAfterMillis=System.currentTimeMillis()+10_000;
+                    }
+                    resetMovementKeys();
+                    GlobalStateLogger.logCustomEvent("ground_path_handoff",Map.of("first",ticket.first(),"last",end,
+                            "next_index",currentPathIndex,"status",outcome.status().name(),"reason",outcome.reason(),"frames",outcome.frames()));
+                });
+        if(started){
+            GlobalStateLogger.logCustomEvent("mixed_ground_owner_acquired",Map.of("owner","GROUND_SIMULATION",
+                    "first",ticket.first(),"last",end,"segment_goal",endpoint.pos.toShortString(),"task_goal",finalDestination.toShortString()));
+            resetMovementKeys();stuckCheckTicks=0;lastStuckCheckPos=null;return true;
+        }
+        mixedGroundLease=null;
+        // A transient pose/lease rejection says nothing about the remaining dry route.
+        logGroundSkip("BEGIN_REJECTED","runtime guard changed or another task owns control",end,0);
+        groundRetryAfterMillis=System.currentTimeMillis()+500;return false;
+    }
+
+    private void logGroundSkip(String reason,String detail,int end,int rejectedGoals){
+        String key=calculationGeneration+":"+currentPathIndex+":"+reason+":"+end+":"+detail;
+        if(key.equals(lastGroundSkip))return;
+        lastGroundSkip=key;
+        GlobalStateLogger.logCustomEvent("ground_handoff_selection",Map.of("reason",reason,"detail",detail,
+                "first",currentPathIndex,"selected_end",end,"rejected_goals",rejectedGoals));
+    }
+
+    /** User-facing ownership, separate from the module's task planning state. */
+    public String movementOwner(){
+        if(primaryRouting!=null || mixedGroundLease!=null)return FusionRuntime.enabled()?"融合实验（运动模拟）":"Tungsten（陆地模拟）";
+        if(!isBusy())return "无移动任务";
+        if(currentState==State.CALCULATING)return mixedGroundEnabled?"混合路线连接规划":"FredoBot（兼容规划）";
+        return "FredoBot（特殊动作/兼容）";
     }
 
     private boolean isOffThePath(PlayerEntity player) {
@@ -641,7 +1034,7 @@ public class PathExecutor implements IBotModule {
 
         int lookAheadLimit = Math.min(currentPathIndex + 5, currentPath.size());
         if (player.hasVehicle() && SurfaceBoatRoute.allowed(world,currentPath.get(currentPathIndex)))
-            lookAheadLimit=Math.min(currentPathIndex+32,currentPath.size());
+            lookAheadLimit=Math.min(currentPathIndex+128,currentPath.size());
         else if (currentPathUsesActionPlanner) lookAheadLimit = Math.min(currentPathIndex + 1, currentPath.size());
         int furthestReachedIndex = -1;
 
@@ -797,6 +1190,11 @@ public class PathExecutor implements IBotModule {
      * * @param customPath 你手动组装的 Node 列表
      */
     public void executeCustomPath(List<SimplePathfinder.Node> customPath) {
+        clearUnderwaterApproach();
+        crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
+        shortLogRoute=false;manualPath=true;
+        invalidatePrimaryRouting();resumePrimaryRouting=false;
+        MotionCoordinator.cancel("CUSTOM_PATH_TAKES_OVER");
         if (customPath == null || customPath.isEmpty()) {
             stop();
             return;

@@ -2,6 +2,12 @@ package com.fredoseep.algorithm.planning;
 
 /** Door-work quota/loot policy. World and inventory observations stay on the client. */
 public final class UnderwaterGravelWork {
+    /** Count real player ticks, including time spent following a pickup route; paused searches cost none. */
+    public static boolean finalRecoveryExpired(int startAge,int age,int air,int maxAir) {
+        return startAge>=0 && (age-startAge>=200 || (maxAir>0 && air<=Math.min(40,maxAir/5)));
+    }
+    /** Short spawn grace initially; after observing/picking up loot, only wait for delayed neighbours. */
+    public static int finalRecoveryQuietTicks(boolean sawDrop){return sawDrop?6:12;}
     private int broken;
     private boolean flint;
     private int removedObservations;

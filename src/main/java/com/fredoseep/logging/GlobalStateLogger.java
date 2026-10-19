@@ -69,7 +69,8 @@ public final class GlobalStateLogger {
 
     private static volatile boolean pendingNewSave = true;
     private static volatile String pendingServerWorldName = null;
-    private static World activeClientWorld = null;
+    private static final SaveLogSession SESSION=new SaveLogSession();
+    private static String activeDimension="unknown";
     private static String activeWorldLabel = "unknown";
     private static String lastStateSignature = null;
 
@@ -104,6 +105,7 @@ public final class GlobalStateLogger {
         entry.put("time", LocalTime.now().format(TIME_FMT));
         entry.put("event", "world_reset");
         entry.put("world", activeWorldLabel);
+        entry.put("dimension",activeDimension);
         entry.put("global_state", stage == null ? "UNKNOWN" : stage.name());
         entry.put("reason", reason);
         enqueue(false, PlannerDiagnostics.json(entry));
@@ -120,6 +122,7 @@ public final class GlobalStateLogger {
         entry.put("time", LocalTime.now().format(TIME_FMT));
         entry.put("event", eventType);
         entry.put("world", activeWorldLabel);
+        entry.put("dimension",activeDimension);
         if (payload != null) {
             entry.putAll(payload);
         }
@@ -132,18 +135,21 @@ public final class GlobalStateLogger {
         ensureWriterStarted(client.runDirectory.toPath());
 
         if (client.world == null || client.player == null) {
-            activeClientWorld = null;
             lastStateSignature = null;
             return;
         }
 
         String currentWorldName = resolveWorldName(client);
-        if (pendingNewSave || activeClientWorld != client.world) {
-            pendingNewSave = false;
-            activeClientWorld = client.world;
-            activeWorldLabel = currentWorldName;
-            lastStateSignature = null;
-            startNewSaveLog(client, currentWorldName);
+        String dimension=client.world.getRegistryKey().getValue().toString();
+        boolean fresh=SESSION.startsNew(pendingNewSave,client.getServer(),currentWorldName);
+        pendingNewSave=false;
+        if(fresh){
+            activeWorldLabel=currentWorldName;activeDimension=dimension;
+            lastStateSignature=null;
+            startNewSaveLog(client,currentWorldName);
+        }else if(!dimension.equals(activeDimension)){
+            String previous=activeDimension;activeDimension=dimension;lastStateSignature=null;
+            logCustomEvent("dimension_changed",Map.of("from",previous,"to",dimension,"player_age",client.player.age));
         }
 
         captureAndLogIfChanged(client, client.world, client.player);
@@ -185,6 +191,7 @@ public final class GlobalStateLogger {
         header.put("time", LocalDateTime.now().format(DATE_TIME_FMT));
         header.put("event", "save_session_start");
         header.put("world", worldName);
+        header.put("dimension",activeDimension);
         header.put("player_age", client.player.age);
         header.put("spawn_pos", posList(client.player.getBlockPos()));
         enqueue(true, PlannerDiagnostics.json(header));
@@ -239,6 +246,7 @@ public final class GlobalStateLogger {
         record.put("time", LocalTime.now().format(TIME_FMT));
         record.put("player_age", player.age);
         record.put("world", activeWorldLabel);
+        record.put("dimension",activeDimension);
         record.put("bot_running", engine.isRunning());
         record.put("global_state", globalStateName);
         record.put("task_state", taskSummary);

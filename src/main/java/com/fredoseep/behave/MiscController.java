@@ -1,6 +1,12 @@
 package com.fredoseep.behave;
 
+import com.fredoseep.utils.player.DropCollectionOrder;
+
 import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.algorithm.planning.BuriedMiningAccess;
+import com.fredoseep.algorithm.planning.TreeBreathingPolicy;
+import com.fredoseep.logging.GlobalStateLogger;
+import java.util.Map;
 import com.fredoseep.algorithm.planning.LeafLootSupport;
 import com.fredoseep.utils.ItemCategory;
 import com.fredoseep.excutor.BotEngine;
@@ -46,6 +52,22 @@ import net.minecraft.tag.FluidTags;
 public class MiscController implements IBotModule {
 
     private TreeHarvestSession treeHarvest;
+    private UnderwaterGravelWork dryGravelWork;
+    private BlockPos dryGravelExitSurface;
+    private BlockPos dryIssuedGravel;
+    private BuriedMiningAccess.Plan localStoneAccess;
+    private BlockPos localStoneCover,failedLocalStone;
+    private int localStoneCoverAge;
+    private void resetLocalStoneAccess(){localStoneAccess=null;localStoneCover=null;}
+
+    private int dryRequiredGravel;
+    private BuriedMiningAccess.Plan buriedGravel;
+    private BlockPos buriedCover;
+    private boolean buriedEntryRequested,buriedDescending;
+    private int buriedCoverAge,buriedCenterTicks,buriedProgressAge;
+    private void resetBuriedGravel(){buriedGravel=null;buriedCover=null;buriedEntryRequested=false;buriedDescending=false;buriedCenterTicks=0;}
+    private int finalRecoveryStartAge=-1;
+    private boolean finalRecoverySawDrop;
     private boolean pressForward = false;
     private boolean pressLeft = false;
     private boolean pressBack = false;
@@ -102,11 +124,15 @@ public class MiscController implements IBotModule {
     public BlockPos doorPos = null;
     public int uwWaitTicks = 0;
 
+    private final DropCollectionOrder pickupOrder=new DropCollectionOrder();
     private MiscType currentTask = null;
     private BlockPos targetPos = null;
     public Entity targetEntity = null;
 
     public void startTask(MiscType type, BlockPos pos) {
+        resetBuriedGravel();resetLocalStoneAccess();failedLocalStone=null;
+        dryGravelWork=null;dryIssuedGravel=null;dryGravelExitSurface=null;
+        pickupOrder.reset();
         if(type==MiscType.BACK_FROM_SWIMMING) {
             resetKeys();
             MinecraftClient client=MinecraftClient.getInstance();
@@ -135,6 +161,20 @@ public class MiscController implements IBotModule {
         boatRecoveryForDescent = true;
     }
 
+    public void interruptTreeApproach(MinecraftClient client) {
+        if(currentTask==MiscType.HARVEST_TREE && treeHarvest!=null)
+            treeHarvest.interruptApproach(client,client.player,BotEngine.getInstance().getModule(PathExecutor.class),this);
+    }
+    /** Live emergency movement, before any land-tree search or oxygen-starved retry. */
+    public void floatForTreeBreathing(MinecraftClient client,PlayerEntity player){
+        resetKeys();
+        boolean submerged=player.isSubmergedIn(FluidTags.WATER);
+        boolean roof=submerged && !client.world.doesNotCollide(player,player.getBoundingBox().offset(0,.4,0));
+        var control=TreeBreathingPolicy.control(submerged,player.isTouchingWater(),roof,player.horizontalCollision,player.age,player.yaw);
+        if(submerged)MovementController.setLookDirection(player,control.yaw(),control.pitch());
+        pressForward=control.forward();pressJump=control.jump();pressSprint=control.sprint();player.setSprinting(pressSprint);
+        applyKeys(client);
+    }
     public void startTreeHarvest(TreeHarvestSession session) {
         stopTask();treeHarvest=session;currentTask=MiscType.HARVEST_TREE;
     }
@@ -186,6 +226,7 @@ public class MiscController implements IBotModule {
             case COLLECT_FINAL_DROPS -> "水下：回收门和地基掉落物";
             default -> "水下作业";
         };
+        if(buriedGravel!=null)return "沙砾："+(buriedCover==null?"前往顶部／等待落地":"挖覆盖层 "+buriedCover.toShortString());
         if(leafLogDrop!=null)return "收集：剪掉掉落物下方的树叶";
         if(treeHarvest!=null)return treeHarvest.hudStatus();
         if(targetEntity!=null || pickupCoolDownTick>0)return "收集掉落物";
@@ -198,6 +239,7 @@ public class MiscController implements IBotModule {
         return action+(targetPos==null?"":"："+targetPos.toShortString());
     }
     private void resetMiningApproachFailures() {
+        resetBuriedGravel();resetLocalStoneAccess();failedLocalStone=null;
         miningSearchFailures=0;lastMiningApproach=null;failedMiningApproaches.clear();
         PathExecutor executor=BotEngine.getInstance().getModule(PathExecutor.class);
         observedSearchFailureSerial=executor==null?0:executor.getSearchFailureSerial();
@@ -256,7 +298,7 @@ public class MiscController implements IBotModule {
 
     public void stopTask() {
         if(treeHarvest!=null){MiningHelper.blockToMine.clear();MiningHelper.currentTargetBlocks.clear();}
-        treeHarvest=null;
+        treeHarvest=null;resetBuriedGravel();resetLocalStoneAccess();failedLocalStone=null;dryGravelWork=null;dryIssuedGravel=null;dryGravelExitSurface=null;
         leafLogDrop=null;lastLeafApproach=null;failedLeafApproaches.clear();leafSettleTicks=0;
         if(currentTask==MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP)MiningHelper.currentTargetBlocks.clear();
         this.currentTask = null;
@@ -270,6 +312,7 @@ public class MiscController implements IBotModule {
         uwGravelMission=false;uwGravelWork=null;uwIssuedTarget=null;uwDoorAdjustedTarget=null;
         doorPos = null;
         uwWaitTicks = 0;
+        finalRecoveryStartAge=-1;
         validDrops.clear();
         unreachableEntities.clear();
         resetKeys();
@@ -669,6 +712,13 @@ public class MiscController implements IBotModule {
                             return;
 
                         case COLLECT_FINAL_DROPS:
+                            if(targetEntity instanceof ItemEntity drop && (!drop.isAlive() || drop.getStack().isEmpty())) {
+                                pathExecutor.stop();targetEntity=null;pickupCoolDownTick=0;finalRecoverySawDrop=true;
+                                GlobalStateLogger.logCustomEvent("underwater_pickup_target_gone",Map.of("entity",drop.getEntityId(),"pos",player.getPos().toString()));
+                            }
+                            if(UnderwaterGravelWork.finalRecoveryExpired(finalRecoveryStartAge,player.age,player.getAir(),player.getMaxAir())) {
+                                finishFinalRecovery(player,pathExecutor,"TIME_OR_AIR_LIMIT");return;
+                            }
                             if (pathExecutor.isBusy()) return; // 防止疯狂发包
                             pickupCoolDownTick++;
 
@@ -683,6 +733,7 @@ public class MiscController implements IBotModule {
                             );
 
                             if (!drops.isEmpty()) {
+                                finalRecoverySawDrop=true;
                                 ItemEntity nearestDrop = drops.get(0);
                                 double minDist = player.squaredDistanceTo(nearestDrop);
                                 for (ItemEntity drop : drops) {
@@ -703,20 +754,10 @@ public class MiscController implements IBotModule {
                                 walkTowardsEntity(player, nearestDrop);
                                 pickupCoolDownTick = 0;
                             } else {
-                                if (pickupCoolDownTick < 40) {
-                                    if (pickupCoolDownTick % 10 == 0) System.out.println("FredoBot [调试]: 门/地基已破坏，等待最终掉落物... (" + pickupCoolDownTick + "/40)");
+                                if (pickupCoolDownTick < UnderwaterGravelWork.finalRecoveryQuietTicks(finalRecoverySawDrop)) {
                                     return;
                                 } else {
-                                    System.out.println("FredoBot: 水下地基和门已完全回收(或超时)，完美恢复正常状态！");
-                                    uwPhase = UwDoorPhase.NONE;
-                                    doorPos = null;
-                                    pickupCoolDownTick = 0;
-                                    pathingFailTicks = 0;
-                                    targetEntity = null;
-                                    BlockPos returnMagma=PreNether.magmaPos;
-                                    stopTask();
-                                    if(returnMagma!=null)PreNether.requestMagmaRoute(player,pathExecutor);
-                                    else pathExecutor.resumeSuspendedGoal();
+                                    finishFinalRecovery(player,pathExecutor,"NO_MORE_ELIGIBLE_DROPS");
                                 }
                             }
                             return;
@@ -727,7 +768,26 @@ public class MiscController implements IBotModule {
                 // =================================================================
                 // 3. 陆地普通挖掘逻辑 (严格的 挖掘->清扫->拾取->下一地点 强状态机)
                 // =================================================================
-                boolean isBlockMined = client.world.getBlockState(targetPos).isAir() ||
+                if(pickupCoolDownTick==0 && targetEntity==null && !pathExecutor.isBusy() && player.isOnGround()
+                        && localStoneAccess==null && Math.abs(player.getVelocity().y)<=.1 && client.world.getBlockState(targetPos).getBlock()==Blocks.STONE){
+                    BlockPos nearby=MiningHelper.findNearbyStone(player);
+                    if(nearby!=null && nearby.getY()>=Math.min(targetPos.getY(),player.getBlockPos().getY()) && !nearby.equals(targetPos)){
+                        BlockPos previous=targetPos;
+                        if(MiningHelper.blockToMine.remove(nearby) && !MiningHelper.blockToMine.contains(previous))
+                            MiningHelper.blockToMine.add(previous.toImmutable());
+                        targetPos=nearby;resetMiningApproachFailures();pathingFailTicks=0;resetKeys();
+                        client.interactionManager.cancelBlockBreaking();
+                        GlobalStateLogger.logCustomEvent("stone_local_target",Map.of("previous",previous.toShortString(),
+                                "target",nearby.toShortString(),"pos",player.getBlockPos().toShortString(),
+                                "remaining_targets",MiningHelper.blockToMine.size()+1));
+                    }
+                }
+                if(pickupCoolDownTick==0 && targetEntity==null
+                        && handleNearbyBuriedStone(client,player,pathExecutor))return;
+                if(uwGravelMission && handleDryGravel(client,player,pathExecutor))return;
+                if(client.world.getBlockState(targetPos).getBlock()==Blocks.GRAVEL && pickupCoolDownTick==0 && targetEntity==null
+                        && handleBuriedGravel(client,player,pathExecutor))return;
+                boolean isBlockMined = !MiningHelper.gravelTargetAllowed(targetPos) || !MiningHelper.logTargetAllowed(targetPos) || client.world.getBlockState(targetPos).isAir() ||
                         client.world.getBlockState(targetPos).getMaterial().isLiquid();
 
                 // 核心状态控制：只要正在收集掉落物（pickupCoolDownTick > 0），就绝对不准被新进入范围的方块打断！
@@ -739,15 +799,23 @@ public class MiscController implements IBotModule {
                     Vec3d eyePos = new Vec3d(player.getX(), player.getEyeY(), player.getZ());
                     double distSq = eyePos.squaredDistanceTo(Vec3d.ofCenter(targetPos));
 
-                    if (distSq > 20.0 || (client.world.getBlockState(targetPos).getBlock()==Blocks.STONE
+                    if (distSq > 20.0 || ((client.world.getBlockState(targetPos).getBlock()==Blocks.STONE
+                            || client.world.getBlockState(targetPos).getBlock()==Blocks.GRAVEL
+                            || client.world.getBlockState(targetPos).isIn(BlockTags.LOGS))
                             && !miningVisible(client,player,eyePos,targetPos))) {
                         long failureSerial=pathExecutor.getSearchFailureSerial();
                         if(failureSerial!=observedSearchFailureSerial) {
                             observedSearchFailureSerial=failureSerial;miningSearchFailures++;
                             if(lastMiningApproach!=null)failedMiningApproaches.add(lastMiningApproach);
                         }
+                        boolean failedLog=client.world.getBlockState(targetPos).isIn(BlockTags.LOGS)
+                                && lastMiningApproach!=null && !pathExecutor.isBusy();
+                        if(failedLog) {
+                            MiningHelper.blacklistLogTarget(targetPos);
+                            pathingFailTicks=301;
+                        }
                         // 阶段 1：距离太远，寻路靠近
-                        if (!pathExecutor.isBusy() && player.isOnGround() && miningSearchFailures<=6) {
+                        if (!pathExecutor.isBusy() && player.isOnGround() && miningSearchFailures<=6 && !failedLog) {
                             BlockPos topPos = new BlockPos(targetPos.getX(), BtStuff.groundYNoLeavesOrTrees(targetPos)+1, targetPos.getZ());
                             double horizDistSq = Math.pow(player.getX() - (targetPos.getX() + 0.5), 2) + Math.pow(player.getZ() - (targetPos.getZ() + 0.5), 2);
 
@@ -763,7 +831,7 @@ public class MiscController implements IBotModule {
                             if(approach==null) {
                                 System.out.println("FredoBot: 没有可直接挖掘的站位，跳过当前采集目标。");
                                 pathingFailTicks=301;
-                            } else if(pathExecutor.trySetGoal(approach,"mining approach")) {
+                            } else if(pathExecutor.trySetGoal(approach,client.world.getBlockState(targetPos).isIn(BlockTags.LOGS)?"log mining approach":"mining approach")) {
                                 lastMiningApproach=approach;
                                 pathExecutor.recordMiningTarget(targetPos,approach);
                                 System.out.println("FredoBot: 寻路至挖掘站位 "+approach.toShortString()+"，方块目标 "+targetPos.toShortString());
@@ -797,6 +865,8 @@ public class MiscController implements IBotModule {
                     MovementController.setLookDirection(player, yaw, pitch);
                     ToolsHelper.equipBestTool(player, targetPos, false);
 
+                    if(dryGravelWork!=null && client.world.getBlockState(targetPos).getBlock()==Blocks.GRAVEL
+                            && !targetPos.equals(dryIssuedGravel)){dryIssuedGravel=targetPos.toImmutable();dryGravelWork.issued();}
                     client.interactionManager.updateBlockBreakingProgress(targetPos, Direction.UP);
                     if (!player.handSwinging) {
                         player.swingHand(Hand.MAIN_HAND);
@@ -888,15 +958,7 @@ public class MiscController implements IBotModule {
                     );
 
                     if (!drops.isEmpty()) {
-                        ItemEntity nearestDrop = null;
-                        double minDist = Double.MAX_VALUE;
-                        for (ItemEntity drop : drops) {
-                            double d = player.squaredDistanceTo(drop);
-                            if (d < minDist) {
-                                minDist = d;
-                                nearestDrop = drop;
-                            }
-                        }
+                        ItemEntity nearestDrop=pickupOrder.next(player,drops);
 
                         if (nearestDrop != null) {
                             Item loot=nearestDrop.getStack().getItem();
@@ -943,11 +1005,15 @@ public class MiscController implements IBotModule {
                                 return;
                             } else {
                                 // 队列彻底空了
-                                System.out.println("FredoBot: 挖掘数量已达标，区域内方块及掉落物全部收集完毕！任务圆满结束！");
+                                System.out.println("FredoBot: 挖掘队列与掉落物处理完毕；材料是否达标由后续任务复核。");
+                                if(dryGravelWork!=null)GlobalStateLogger.logCustomEvent("dry_gravel_finished",Map.of(
+                                        "confirmed_mined",dryGravelWork.count(),"inventory_gravel",InventoryHelper.countItem(player,Items.GRAVEL),
+                                        "inventory_flint",InventoryHelper.countItem(player,Items.FLINT)));
                                 pickupCoolDownTick = 0;
                                 pathingFailTicks = 0;
                                 targetEntity = null;
-                                pathExecutor.resumeSuspendedGoal();
+                                boolean exiting=dryGravelWork!=null && PreNether.startWarmGravelExit(player,dryGravelExitSurface);
+                                if(!exiting)pathExecutor.resumeSuspendedGoal();
                                 stopTask();
                             }
                         }
@@ -957,6 +1023,200 @@ public class MiscController implements IBotModule {
         }
 
         applyKeys(client);
+    }
+
+    /** Continue the exposed vein from the real shaft, instead of insisting on four preselected columns. */
+    private boolean handleDryGravel(MinecraftClient client,PlayerEntity player,PathExecutor path){
+        if(dryGravelWork==null){
+            dryGravelWork=new UnderwaterGravelWork();dryRequiredGravel=Math.max(0,4-InventoryHelper.countItem(player,Items.GRAVEL));
+        }
+        double surfaceDx=player.getX()-Vec3d.ofCenter(targetPos).x,surfaceDz=player.getZ()-Vec3d.ofCenter(targetPos).z;
+        if(dryGravelExitSurface==null && player.isOnGround() && surfaceDx*surfaceDx+surfaceDz*surfaceDz<=4)
+            dryGravelExitSurface=player.getBlockPos().toImmutable();
+        if(dryIssuedGravel!=null && client.world.getBlockState(dryIssuedGravel).getBlock()!=Blocks.GRAVEL){
+            resetKeys();client.interactionManager.cancelBlockBreaking();
+            if(!dryGravelWork.confirmRemoval(true))return true;
+            dryGravelWork.broken();
+            GlobalStateLogger.logCustomEvent("dry_gravel_mined",Map.of("block",dryIssuedGravel.toShortString(),
+                    "confirmed_mined",dryGravelWork.count(),"pos",player.getBlockPos().toShortString()));
+            dryIssuedGravel=null;
+        } else if(dryIssuedGravel!=null)dryGravelWork.confirmRemoval(false);
+        boolean flint=InventoryHelper.countItem(player,Items.FLINT)>0 || InventoryHelper.countItem(player,Items.FLINT_AND_STEEL)>0
+                || !client.world.getEntities(ItemEntity.class,new Box(player.getBlockPos()).expand(6),
+                    e->e.isAlive() && e.getStack().getItem()==Items.FLINT).isEmpty();
+        dryGravelWork.observeFlint(flint);
+        if(dryGravelWork.hasFlint() || dryGravelWork.count()>=dryRequiredGravel || InventoryHelper.countItem(player,Items.GRAVEL)>=4){
+            MiningHelper.blockToMine.clear();
+            if(dryGravelWork.hasFlint()){validDrops.clear();validDrops.add(Items.FLINT);}
+            if(pickupCoolDownTick==0 && targetEntity==null){
+                path.stop();resetKeys();pickupCoolDownTick=1;
+                GlobalStateLogger.logCustomEvent("dry_gravel_collect",Map.of("confirmed_mined",dryGravelWork.count(),"flint",flint));
+            }
+            return false;
+        }
+        if(pickupCoolDownTick>0 || targetEntity!=null || path.isBusy() || buriedGravel!=null)return false;
+        // Underfoot digging must finish falling before selecting another block or rejecting its access.
+        if(!player.isOnGround() || Math.abs(player.getVelocity().y)>.1){resetKeys();return true;}
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        BlockPos nearest=null;double best=Double.POSITIVE_INFINITY;
+        for(BlockPos p:BlockPos.iterate(player.getBlockPos().add(-4,-4,-4),player.getBlockPos().add(4,3,4))){
+            if(!MiningHelper.gravelTargetAllowed(p) || client.world.getBlockState(p).getBlock()!=Blocks.GRAVEL)continue;
+            double d=eye.squaredDistanceTo(Vec3d.ofCenter(p));
+            if(d<=20 && d<best && miningVisible(client,player,eye,p)){nearest=p.toImmutable();best=d;}
+        }
+        if(nearest!=null && !nearest.equals(targetPos)){
+            BlockPos previous=targetPos;
+            if(client.world.getBlockState(previous).getBlock()==Blocks.GRAVEL && MiningHelper.gravelTargetAllowed(previous)
+                    && !MiningHelper.blockToMine.contains(previous))MiningHelper.blockToMine.add(previous.toImmutable());
+            MiningHelper.blockToMine.remove(nearest);targetPos=nearest;resetMiningApproachFailures();pathingFailTicks=0;
+            GlobalStateLogger.logCustomEvent("dry_gravel_local_target",Map.of("previous",previous.toShortString(),
+                    "target",nearest.toShortString(),"confirmed_mined",dryGravelWork.count()));
+        }
+        return false;
+    }
+
+    private boolean dryClear(MinecraftClient client,BlockPos p){
+        return client.world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
+                && client.world.getBlockState(p).getFluidState().isEmpty()
+                && client.world.getBlockState(p).getCollisionShape(client.world,p).isEmpty();
+    }
+    private boolean safeGravelCover(MinecraftClient client,BlockPos p){
+        if(!client.world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4))return false;
+        BlockState s=client.world.getBlockState(p);
+        if(s.getHardness(client.world,p)<0 || client.world.getBlockEntity(p)!=null || !s.getFluidState().isEmpty()
+                || s.getBlock()==Blocks.CRAFTING_TABLE || s.getBlock() instanceof FallingBlock || s.getBlock() instanceof IceBlock || s.getBlock()==Blocks.MAGMA_BLOCK || s.isIn(BlockTags.LOGS) || s.isIn(BlockTags.LEAVES)
+                || !Block.isShapeFullCube(s.getCollisionShape(client.world,p)))return false;
+        for(Direction d:Direction.values()){
+            BlockPos n=p.offset(d);
+            if(!client.world.getChunkManager().isChunkLoaded(n.getX()>>4,n.getZ()>>4)
+                    || !client.world.getBlockState(n).getFluidState().isEmpty())return false;
+        }
+        return true;
+    }
+    private void failBuriedGravel(MinecraftClient client,PathExecutor path,String reason){
+        GlobalStateLogger.logCustomEvent("buried_gravel_access_failed",Map.of("target",targetPos.toShortString(),"reason",reason));
+        MiningHelper.blacklistGravelTarget(targetPos);path.stop();resetKeys();resetBuriedGravel();pickupCoolDownTick=1;
+    }
+    /** Dry covered gravel is reached through an actual confirmed shaft, never a feet goal inside gravel. */
+    private boolean handleBuriedGravel(MinecraftClient client,PlayerEntity player,PathExecutor path){
+        if(!MiningHelper.gravelTargetAllowed(targetPos))return false;
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        if(eye.squaredDistanceTo(Vec3d.ofCenter(targetPos))<=20 && miningVisible(client,player,eye,targetPos)){
+            if(buriedGravel!=null){
+                resetKeys();if(!player.isOnGround() || Math.abs(player.getVelocity().y)>.1)return true;
+                if(buriedCover!=null && dryClear(client,buriedCover))GlobalStateLogger.logCustomEvent("buried_gravel_cover_confirmed",
+                        Map.of("block",buriedCover.toShortString(),"target",targetPos.toShortString()));
+                path.stop();resetBuriedGravel();
+            }
+            return false;
+        }
+        if(buriedGravel==null){
+            if(dryClear(client,targetPos.up()) || !client.world.getBlockState(targetPos.up()).getFluidState().isEmpty())return false;
+            if(findMiningApproach(client,player,targetPos,failedMiningApproaches)!=null)return false;
+            buriedGravel=BuriedMiningAccess.find(targetPos,16,p->dryClear(client,p),p->safeGravelCover(client,p));
+            if(buriedGravel==null){failBuriedGravel(client,path,"NO_SAFE_DRY_COVER_COLUMN");return true;}
+            dryGravelExitSurface=buriedGravel.entry().toImmutable();
+            resetKeys();buriedProgressAge=player.age;
+            GlobalStateLogger.logCustomEvent("buried_gravel_access_planned",Map.of("target",targetPos.toShortString(),
+                    "entry",buriedGravel.entry().toShortString(),"cover_blocks",buriedGravel.entry().getY()-targetPos.getY()-1));
+        }
+        if(path.isBusy())return true;
+        double dx=player.getX()-buriedGravel.entry().getX()-.5,dz=player.getZ()-buriedGravel.entry().getZ()-.5;
+        if(!buriedDescending){
+            if(dx*dx+dz*dz<=.25 && Math.abs(player.getY()-buriedGravel.entry().getY())<.5 && player.isOnGround()){buriedDescending=true;buriedProgressAge=player.age;}
+            else{
+                if(buriedEntryRequested){failBuriedGravel(client,path,"ENTRY_ROUTE_DID_NOT_ARRIVE");return true;}
+                if(path.trySetGoal(buriedGravel.entry(),"buried gravel entry"))buriedEntryRequested=true;
+                return true;
+            }
+        }
+        if(player.isTouchingWater() || player.age-buriedProgressAge>600){
+            failBuriedGravel(client,path,player.isTouchingWater()?"ACCESS_FLOODED":"DESCENT_NO_PROGRESS");return true;
+        }
+        if(dx*dx+dz*dz>1 || player.getY()<targetPos.getY()){
+            failBuriedGravel(client,path,"LEFT_ACCESS_COLUMN");return true;
+        }
+        resetKeys();player.setSprinting(false);
+        if(!player.isOnGround() || player.isTouchingWater() || Math.abs(player.getVelocity().y)>.1)return true;
+        if(dx*dx+dz*dz>.0225){
+            if(++buriedCenterTicks>100){failBuriedGravel(client,path,"COLUMN_CENTER_TIMEOUT");return true;}
+            yaw=BuriedMiningAccess.centerYaw(dx,dz);pitch=70;
+            MovementController.setLookDirection(player,yaw,pitch);pressForward=Math.abs(MathHelper.wrapDegrees(player.yaw-yaw))<8;pressSneak=true;applyKeys(client);return true;
+        }
+        buriedCenterTicks=0;
+        if(Math.hypot(player.getVelocity().x,player.getVelocity().z)>.035)return true;
+        if(buriedCover!=null && dryClear(client,buriedCover)){
+            GlobalStateLogger.logCustomEvent("buried_gravel_cover_confirmed",Map.of("block",buriedCover.toShortString(),"target",targetPos.toShortString()));
+            buriedCover=null;buriedProgressAge=player.age;client.interactionManager.cancelBlockBreaking();
+        }
+        BlockPos cover=BuriedMiningAccess.nextCover(buriedGravel,p->dryClear(client,p));
+        if(cover==null){failBuriedGravel(client,path,"TARGET_NOT_VISIBLE_AFTER_OPENING_COLUMN");return true;}
+        // Removing one floor may not be followed by digging a second floor before actually landing.
+        if(!BuriedMiningAccess.readyForCover(cover,player.getBlockPos(),player.isOnGround(),player.getVelocity().y))return true;
+        if(!safeGravelCover(client,cover)){failBuriedGravel(client,path,"COVER_CHANGED_OR_UNSAFE");return true;}
+        BlockHitResult hit=MiningAim.visibleFace(client.world,player,cover);
+        if(hit==null){failBuriedGravel(client,path,"COVER_NOT_REACHABLE");return true;}
+        if(!cover.equals(buriedCover)){
+            buriedCover=cover;buriedCoverAge=player.age;
+            GlobalStateLogger.logCustomEvent("buried_gravel_cover_started",Map.of("block",cover.toShortString(),"target",targetPos.toShortString()));
+        }
+        if(player.age-buriedCoverAge>400){failBuriedGravel(client,path,"COVER_BREAK_TIMEOUT");return true;}
+        float[] aim=MiningHelper.getValidMiningAngle(player,cover);
+        MovementController.setLookDirection(player,aim[0],aim[1]);ToolsHelper.equipBestTool(player,cover,false);
+        client.interactionManager.updateBlockBreakingProgress(cover,hit.getSide());
+        if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
+        return true;
+    }
+
+    /** Open a shallow dry cover directly below the player instead of searching for a remote exposed face. */
+    private boolean handleNearbyBuriedStone(MinecraftClient client,PlayerEntity player,PathExecutor path){
+        if(localStoneAccess!=null && !localStoneAccess.target().equals(targetPos))resetLocalStoneAccess();
+        if(client.world.getBlockState(targetPos).getBlock()!=Blocks.STONE){resetLocalStoneAccess();return false;}
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        boolean visible=eye.squaredDistanceTo(Vec3d.ofCenter(targetPos))<=20 && miningVisible(client,player,eye,targetPos);
+        if(localStoneAccess==null){
+            if(visible || path.isBusy() || targetPos.equals(failedLocalStone) || player.isTouchingWater())return false;
+            BlockPos feet=player.getBlockPos();
+            if(feet.getX()!=targetPos.getX() || feet.getZ()!=targetPos.getZ()
+                    || feet.getY()<=targetPos.getY() || feet.getY()-targetPos.getY()>6)return false;
+            localStoneAccess=BuriedMiningAccess.find(targetPos,6,p->dryClear(client,p),p->safeGravelCover(client,p));
+            if(localStoneAccess==null)return false;
+            GlobalStateLogger.logCustomEvent("stone_cover_access",Map.of("target",targetPos.toShortString(),
+                    "entry",localStoneAccess.entry().toShortString(),"pos",player.getPos().toString()));
+        }
+        resetKeys();player.setSprinting(false);
+        if(player.isTouchingWater() || !safeGravelCover(client,targetPos)){
+            failedLocalStone=targetPos.toImmutable();resetLocalStoneAccess();return false;
+        }
+        if(!player.isOnGround() || Math.abs(player.getVelocity().y)>.1)return true;
+        if(dryClear(client,player.getBlockPos().down()))return true;
+        if(visible){
+            if(localStoneCover!=null && dryClear(client,localStoneCover))GlobalStateLogger.logCustomEvent("stone_cover_removed",Map.of("block",localStoneCover.toShortString()));
+            resetLocalStoneAccess();client.interactionManager.cancelBlockBreaking();return false;
+        }
+        double dx=player.getX()-targetPos.getX()-.5,dz=player.getZ()-targetPos.getZ()-.5;
+        if(dx*dx+dz*dz>1){failedLocalStone=targetPos.toImmutable();resetLocalStoneAccess();return false;}
+        if(dx*dx+dz*dz>.0225){
+            yaw=BuriedMiningAccess.centerYaw(dx,dz);pitch=70;
+            MovementController.setLookDirection(player,yaw,pitch);pressForward=true;pressSneak=true;applyKeys(client);return true;
+        }
+        if(Math.hypot(player.getVelocity().x,player.getVelocity().z)>.035)return true;
+        BlockPos cover=BuriedMiningAccess.nextCover(localStoneAccess,p->dryClear(client,p));
+        if(cover==null){failedLocalStone=targetPos.toImmutable();resetLocalStoneAccess();return false;}
+        if(!BuriedMiningAccess.readyForCover(cover,player.getBlockPos(),player.isOnGround(),player.getVelocity().y))return true;
+        BlockHitResult hit=MiningAim.visibleFace(client.world,player,cover);
+        if(!safeGravelCover(client,cover) || hit==null){failedLocalStone=targetPos.toImmutable();resetLocalStoneAccess();return false;}
+        if(!cover.equals(localStoneCover)){
+            if(localStoneCover!=null)GlobalStateLogger.logCustomEvent("stone_cover_removed",Map.of("block",localStoneCover.toShortString()));
+            localStoneCover=cover.toImmutable();localStoneCoverAge=player.age;client.interactionManager.cancelBlockBreaking();
+            GlobalStateLogger.logCustomEvent("stone_cover_mining",Map.of("block",cover.toShortString(),"target",targetPos.toShortString()));
+        }
+        if(player.age-localStoneCoverAge>400){failedLocalStone=targetPos.toImmutable();resetLocalStoneAccess();return false;}
+        float[] aim=MiningHelper.getValidMiningAngle(player,cover);
+        MovementController.setLookDirection(player,aim[0],aim[1]);ToolsHelper.equipBestTool(player,cover,false);
+        client.interactionManager.updateBlockBreakingProgress(cover,hit.getSide());
+        if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
+        return true;
     }
 
     public void prepareMineBlockAboveHead(PlayerEntity player, BlockPos extraPos) {
@@ -1023,8 +1283,21 @@ public class MiscController implements IBotModule {
         PathExecutor path=BotEngine.getInstance().getModule(PathExecutor.class);
         if(path.isBusy())path.stop();
         resetKeys();targetEntity=null;pickupCoolDownTick=0;
+        finalRecoveryStartAge=MinecraftClient.getInstance().player.age;finalRecoverySawDrop=false;
         uwPhase=UwDoorPhase.COLLECT_FINAL_DROPS;
         System.out.println("FredoBot: UW_COLLECT_FINAL_DROPS door="+doorPos.toShortString()+" teardown complete; no return-to-door request");
+    }
+
+    private void finishFinalRecovery(PlayerEntity player,PathExecutor path,String reason) {
+        GlobalStateLogger.logCustomEvent("underwater_final_recovery_finished",Map.of("reason",reason,
+                "pos",player.getPos().toString(),"air",player.getAir(),"elapsed_ticks",Math.max(0,player.age-finalRecoveryStartAge),
+                "gravel",InventoryHelper.countItem(player,Items.GRAVEL),"flint",InventoryHelper.countItem(player,Items.FLINT)));
+        path.stop();
+        BlockPos returnMagma=PreNether.magmaPos;
+        BlockPos departedDoor=doorPos==null?null:doorPos.toImmutable();
+        stopTask();
+        if(returnMagma!=null)PreNether.requestMagmaRoute(player,path,departedDoor);
+        else path.resumeSuspendedGoal();
     }
 
     private boolean insideBreathingDoor(PlayerEntity player) {

@@ -1,5 +1,7 @@
 package com.fredoseep.preflight;
 
+import com.fredoseep.algorithm.planning.OceanGravelTargets;
+
 import com.fredoseep.Fredobot;
 import com.fredoseep.behave.MovementController;
 import com.fredoseep.excutor.BotEngine;
@@ -214,14 +216,21 @@ public final class EarlyResetPreflight {
                 case GRAVEL -> {
                     BlockPos floor = PreflightGeometry.floor(world, ravine.magma());
                     load(floor, 42);
-                    gravel = PreflightGeometry.find(world, floor, 40,
-                            p -> world.getBlockState(p).getBlock() == Blocks.GRAVEL && PreflightGeometry.exposedGravel(world, p), this::check);
-                    if (gravel == null && warmOcean()) {
-                        load(workspace.table(), 50);
-                        gravel = PreflightGeometry.find(world, workspace.table(), 50,
-                                p -> world.getBlockState(p).getBlock() == Blocks.GRAVEL, this::check);
+                    if(warmOcean()){
+                        gravel = PreflightGeometry.find(world, floor, 40,
+                                p -> world.getBlockState(p).getBlock() == Blocks.GRAVEL && PreflightGeometry.exposedGravel(world, p), this::check);
+                        if(gravel==null){
+                            load(workspace.table(),50);
+                            gravel=PreflightGeometry.find(world,workspace.table(),50,
+                                    p->world.getBlockState(p).getBlock()==Blocks.GRAVEL,this::check);
+                        }
+                    }else{
+                        var selection=OceanGravelTargets.find(world,ravine.magma(),workspace.table(),40,1,this::check,p->true);
+                        gravel=selection.targets().isEmpty()?null:selection.targets().get(0);
+                        LOGGER.info("[EarlyReset] SEABED_GRAVEL referenceY={} marineColumns={} rejectedDeep={}",
+                                selection.referenceY(),selection.marineColumns(),selection.rejectedDeepGravel());
                     }
-                    if (gravel == null) { failure = "前置：裂谷附近无可挖沙砾"; return false; }
+                    if (gravel == null) { failure = warmOcean()?"前置：裂谷附近无可挖沙砾":"前置：裂谷附近无海床表层沙砾（排除谷底与覆盖目标）"; return false; }
                 }
                 default -> {}
             }

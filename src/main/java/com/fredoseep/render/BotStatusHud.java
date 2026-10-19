@@ -36,6 +36,7 @@ public final class BotStatusHud {
             if(path.getCurrentState()==PathExecutor.State.EXECUTING && route!=null && index<route.size())
                 movement+=" "+(index+1)+"/"+route.size()+" → "+route.get(index).pos.toShortString();
             lines.add("移动："+movement);
+            lines.add("移动接管："+path.movementOwner());
         }
         return lines;
     }

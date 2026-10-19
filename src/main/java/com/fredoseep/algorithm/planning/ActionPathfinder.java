@@ -593,7 +593,7 @@ public final class ActionPathfinder {
                     out.add(pillar.edge(s.pos.up(),"pillar",SimplePathfinder.MovementState.BUILDING_PILLAR,w.settings.pillarTicks));
             }
             Builder dig=new Builder(w,s);
-            if (w.cell(s,s.pos.down(2)).support && dig.clear(s.pos.down()))
+            if (w.cell(s,s.pos.down(2)).support && dig.body(s.pos.down()))
                 out.add(dig.edge(s.pos.down(),"dig down",SimplePathfinder.MovementState.FALLING,5));
             return allowed(w,s,out);
         }

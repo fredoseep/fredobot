@@ -5,7 +5,6 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.tag.FluidTags;
 import net.minecraft.util.Hand;
-import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -14,14 +13,14 @@ import net.minecraft.world.RayTraceContext;
 
 /** Retains the original 1x1 underwater-shaft roof strategy for the new executors. */
 public final class ShaftRoof {
-    public enum Result { NOT_NEEDED, WAITING, NO_MATERIAL }
+    public enum Result { NOT_NEEDED, WAITING, NO_VISIBLE_SUPPORT, NO_MATERIAL }
     private ShaftRoof() {}
 
     public static Result seal(MinecraftClient client, PlayerEntity player) {
         var world=client.world;
         BlockPos feet=player.getBlockPos();
-        BlockPos roof=new BlockPos(feet.getX(), Math.max(feet.getY()+2,
-                (int)Math.ceil(player.getBoundingBox().maxY)), feet.getZ());
+        BlockPos roof=new BlockPos(feet.getX(), Math.max(feet.getY()+1,
+                (int)Math.ceil(player.getBoundingBox().maxY-1e-7)), feet.getZ());
         if(!world.getBlockState(roof).getFluidState().isIn(FluidTags.WATER)) return Result.NOT_NEEDED;
         for(Direction direction:new Direction[]{Direction.NORTH,Direction.SOUTH,Direction.EAST,Direction.WEST}) {
             if(!world.getBlockState(feet.offset(direction)).getMaterial().isSolid()) return Result.NOT_NEEDED;
@@ -39,19 +38,24 @@ public final class ShaftRoof {
                     support.getY()+.5+face.getOffsetY()*.5,support.getZ()+.5+face.getOffsetZ()*.5);
             Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
             if(eye.squaredDistanceTo(point)>20.25) continue;
-            var hit=world.rayTrace(new RayTraceContext(eye,point,RayTraceContext.ShapeType.OUTLINE,
+            // Trace slightly inside the support: vanilla voxel traversal can exclude a hit
+            // exactly at the ray endpoint. The interaction itself still uses the hit face.
+            Vec3d inside=new Vec3d(point.x-face.getOffsetX()*.01,
+                    point.y-face.getOffsetY()*.01,point.z-face.getOffsetZ()*.01);
+            var hit=world.rayTrace(new RayTraceContext(eye,inside,RayTraceContext.ShapeType.OUTLINE,
                     RayTraceContext.FluidHandling.NONE,player));
-            if(hit.getType()!=HitResult.Type.BLOCK || !hit.getBlockPos().equals(support)) continue;
+            if(hit.getType()!=HitResult.Type.BLOCK || !hit.getBlockPos().equals(support)
+                    || !hit.getBlockPos().offset(hit.getSide()).equals(roof)) continue;
             double dx=point.x-eye.x,dy=point.y-eye.y,dz=point.z-eye.z;
             MovementController.setLookDirection(player,(float)Math.toDegrees(Math.atan2(-dx,dz)),
                     (float)-Math.toDegrees(Math.atan2(dy,Math.hypot(dx,dz))));
             client.interactionManager.interactBlock(client.player,world,Hand.MAIN_HAND,
-                    new BlockHitResult(point,face,support,false));
+                    hit);
             System.out.println("FredoBot: SHAFT_ROOF placing="+roof.toShortString());
             return Result.WAITING;
         }
         // At the first shaft layer the roof may still be in open water with no wall face.
         // Descend until a valid wall exists; do not wait forever for an impossible placement.
-        return supportFound?Result.WAITING:Result.NOT_NEEDED;
+        return supportFound?Result.NO_VISIBLE_SUPPORT:Result.NOT_NEEDED;
     }
 }

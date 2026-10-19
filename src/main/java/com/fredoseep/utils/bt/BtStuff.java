@@ -1,6 +1,11 @@
 package com.fredoseep.utils.bt;
 
 import com.fredoseep.BtPosContext;
+import com.fredoseep.utils.player.DropCollectionOrder;
+import com.fredoseep.algorithm.planning.SquareSpiral;
+import net.minecraft.block.Block;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.world.RayTraceContext;
 import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.preflight.PreflightGeometry;
 import com.fredoseep.preflight.TreasureLootValidation;
@@ -58,6 +63,7 @@ public class BtStuff {
 
     public static BlockPos btPos = null;
     public static BlockPos btStandingPos = null;
+    private static final DropCollectionOrder tntPickupOrder=new DropCollectionOrder();
     public static BlockPos craftingTablePos = null;
     public static BlockPos workbenchAnchor = null;
     public static BlockPos TNTSetupPos = null;
@@ -97,6 +103,7 @@ public class BtStuff {
     public static TNTCraftPhase tntCraftPhase = TNTCraftPhase.EVALUATE;
 
     public static void reset() {
+        tntPickupOrder.reset();
         hasTNT = false;
         ironIngotCount = 0;
         goldIngotCount = 0;
@@ -175,7 +182,20 @@ public class BtStuff {
     }
 
     public static BlockPos findAProperCraftingTablePos(PlayerEntity player) {
-        return PreflightGeometry.table(player.world, player.getBlockPos());
+        World world=player.world;Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        for(var offset:SquareSpiral.offsets(4))for(int dy:new int[]{0,1,-1}){
+            BlockPos pos=player.getBlockPos().add(offset.x(),dy,offset.z());
+            if(!world.getChunkManager().isChunkLoaded(pos.getX()>>4,pos.getZ()>>4))continue;
+            BlockState space=world.getBlockState(pos),support=world.getBlockState(pos.down());
+            if(!space.getMaterial().isReplaceable() || !space.getFluidState().isEmpty()
+                    || !Block.isShapeFullCube(support.getCollisionShape(world,pos.down())) || world.getBlockEntity(pos.down())!=null
+                    || player.getBoundingBox().intersects(new Box(pos)))continue;
+            Vec3d point=new Vec3d(pos.getX()+.5,pos.getY()-.01,pos.getZ()+.5);
+            if(eye.squaredDistanceTo(point)>20.25)continue;
+            BlockHitResult hit=world.rayTrace(new RayTraceContext(eye,point,RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
+            if(hit.getType()==HitResult.Type.BLOCK && hit.getBlockPos().equals(pos.down()) && hit.getSide()==Direction.UP)return pos;
+        }
+        return null;
     }
 
     public static BlockPos findAProperPosThen() {
@@ -528,10 +548,8 @@ public class BtStuff {
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
-                        ItemEntity nearestDrop=TntActions.nearest(drops,drop -> drop.isAlive() && !drop.getStack().isEmpty()
-                                && drop.getStack().getItem()!=Items.STICK && !ItemCategory.isSapling(drop.getStack().getItem())
-                                && drop.getStack().getItem()!=Items.WHEAT_SEEDS,
-                                drop -> player.squaredDistanceTo(drop));
+                        ItemEntity nearestDrop=tntPickupOrder.next(player,drops.stream()
+                                .filter(drop->drop.getStack().getItem()!=Items.STICK).toList());
                         if(nearestDrop==null){tntState=TNTState.DONE;break;}
                         BlockPos safePos = new BlockPos(nearestDrop.getX(), nearestDrop.getY() + 0.5, nearestDrop.getZ());
                         pathExecutor.setGoal(safePos, "drop pos");
@@ -719,12 +737,6 @@ public class BtStuff {
 
                     case PLACE_TABLE:
                         if(pathExecutor.isBusy())return;
-                        var savedPlan = EarlyResetPreflight.plan(minecraftClient);
-                        if (savedPlan != null && player.getPos().squaredDistanceTo(
-                                Vec3d.ofCenter(savedPlan.workspace().stand()).add(0, -0.5, 0)) > 1.0) {
-                            pathExecutor.setGoal(savedPlan.workspace().stand(), "preflight workbench stance");
-                            return;
-                        }
                         if (itemsToCraft.isEmpty()&&InventoryHelper.findItemSlot(player,Items.CRAFTING_TABLE)==-1) {
                             btCraftPhase = BtCraftPhase.BREAK_TABLE;
                             break;
@@ -746,7 +758,7 @@ public class BtStuff {
 
                         player.inventory.selectedSlot = 4;
 
-                        Vec3d tableTopCenter = new Vec3d(craftingTablePos.getX() + 0.5, craftingTablePos.getY() + 1.0, craftingTablePos.getZ() + 0.5);
+                        Vec3d tableTopCenter = new Vec3d(craftingTablePos.getX() + 0.5, craftingTablePos.getY(), craftingTablePos.getZ() + 0.5);
 
                         double eyeY = player.getY() + player.getStandingEyeHeight();
                         double dx = tableTopCenter.x - player.getX();

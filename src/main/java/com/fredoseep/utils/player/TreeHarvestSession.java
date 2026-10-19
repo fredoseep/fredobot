@@ -1,22 +1,26 @@
 package com.fredoseep.utils.player;
 
 import com.fredoseep.algorithm.planning.TrunkPlan;
+import com.fredoseep.algorithm.planning.TreeBreathingPolicy;
+import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.behave.MiscController;
+import com.fredoseep.behave.MovementController;
 import com.fredoseep.excutor.PathExecutor;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Items;
 import net.minecraft.tag.BlockTags;
 import net.minecraft.tag.ItemTags;
+import net.minecraft.tag.FluidTags;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
 import net.minecraft.world.RayTraceContext;
 import java.util.*;
 
-/** One trunk -> stump -> all reachable leaves -> one ordinary collection phase. Client-thread only. */
+/** Tree approach, grounded interruption, quantity-capped local log batch, optional leaves, then collection. */
 public final class TreeHarvestSession {
-    private enum Phase { SELECT,TRUNK,STUMP,LEAVES,COLLECT }
+    private enum Phase { SELECT,TRUNK,BATCH_LOGS,STUMP,LEAVES,COLLECT }
     private Phase phase=Phase.SELECT;
     private final int logsRequired,leavesRequired,radius;
     private final Set<Long> visitedColumns=new HashSet<>();
@@ -26,7 +30,60 @@ public final class TreeHarvestSession {
     private final Set<BlockPos> failedLeaves=new HashSet<>();
     private final List<BlockPos> trunk=new ArrayList<>();
     private BlockPos stump,target;
-    private int requests,breakTicks;
+    private int requests,breakTicks,batchStartLogs,batchBroken;
+    private boolean resumeTrunk;
+    private BlockPos pendingLog;
+    private Vec3d batchFeet;
+    private boolean recoveringBreath;
+    private int recoveryAir,recoveryMaxAir,recoveryStartAge,lastRecoveryWarning,lastRecoveryControlAge=-1;
+    private boolean recoverySubmerged;
+    private boolean recoverBreathing(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc){
+        boolean submerged=player.isSubmergedIn(FluidTags.WATER);
+        if(!recoveringBreath && !TreeBreathingPolicy.start(submerged,player.isTouchingWater(),player.getAir(),player.getMaxAir(),path.isBusy()))return false;
+        if(!recoveringBreath){
+            recoveringBreath=true;recoveryStartAge=player.age;lastRecoveryWarning=player.age;lastRecoveryControlAge=-1;requests=0;
+            path.stop();misc.resetKeys();
+            GlobalStateLogger.logCustomEvent("tree_breathing_started",Map.of("air",player.getAir(),"pos",player.getPos().toString(),
+                    "phase",phase.name(),"reason","PREPARE_LAND_COLLECTION"));
+        }
+        recoveryAir=player.getAir();recoveryMaxAir=player.getMaxAir();recoverySubmerged=submerged;
+        if(TreeBreathingPolicy.complete(submerged,player.getAir(),player.getMaxAir())){
+            recoveringBreath=false;misc.resetKeys();
+            GlobalStateLogger.logCustomEvent("tree_breathing_complete",Map.of("air",player.getAir(),"pos",player.getPos().toString(),
+                    "ticks",player.age-recoveryStartAge));
+            return false;
+        }
+        if(player.age-lastRecoveryWarning>=100){
+            lastRecoveryWarning=player.age;
+            GlobalStateLogger.logCustomEvent("tree_breathing_progress",Map.of("air",player.getAir(),"pos",player.getPos().toString(),"submerged",submerged));
+        }
+        if(lastRecoveryControlAge!=player.age){lastRecoveryControlAge=player.age;misc.floatForTreeBreathing(client,player);}
+        return true;
+    }
+
+    private boolean stable(PlayerEntity player){
+        // Vanilla travel applies gravity after ground collision, leaving vy ~= -0.0784 even at rest.
+        // The physical onGround flag is required; velocity alone must never authorize an airborne cut.
+        return player.isOnGround() && !player.isTouchingWater() && Math.abs(player.getVelocity().y)<=.1;
+    }
+    private void startBatch(PlayerEntity player,PathExecutor path,MiscController misc){
+        path.stop();misc.resetKeys();phase=Phase.BATCH_LOGS;
+        batchFeet=null;batchStartLogs=InventoryHelper.countItem(player,ItemTags.LOGS);batchBroken=0;
+        pendingLog=null;target=null;breakTicks=0;requests=0;resumeTrunk=true;
+    }
+    /** Called before MotionCoordinator's global ownership gate, but never during an airborne reach. */
+    public void interruptApproach(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc){
+        if(recoverBreathing(client,player,path,misc))return;
+        if(phase!=Phase.TRUNK || !path.isBusy() || !stable(player))return;
+        BlockPos reachable=target;
+        if(reachable==null || !client.world.getBlockState(reachable).isIn(BlockTags.LOGS) || !visible(client,player,reachable))
+            reachable=trunk.stream().filter(p -> MiningHelper.logTargetAllowed(p) && visible(client,player,p)).findFirst().orElse(null);
+        if(reachable!=null && visible(client,player,reachable))startBatch(player,path,misc);
+    }
+    private int suppliedLogs(PlayerEntity player){
+        return Math.max(InventoryHelper.countItem(player,ItemTags.LOGS),batchStartLogs+batchBroken);
+    }
+
     public TreeHarvestSession(PlayerEntity player,int requestedLogs,int radius) {
         this(player,requestedLogs,Math.max(0,64-InventoryHelper.countItem(player,ItemTags.LEAVES)),radius);
     }
@@ -35,12 +92,15 @@ public final class TreeHarvestSession {
         leavesRequired=InventoryHelper.countItem(player,ItemTags.LEAVES)+requestedLeaves;this.radius=radius;
     }
     private static long column(BlockPos p){return ((long)p.getX()<<32) ^ (p.getZ()&0xffffffffL);}
-    public void collected(){phase=Phase.SELECT;target=null;requests=0;breakTicks=0;}
+    public void collected(){phase=resumeTrunk && !trunk.isEmpty()?Phase.TRUNK:Phase.SELECT;
+        resumeTrunk=false;target=null;requests=0;breakTicks=0;pendingLog=null;batchFeet=null;}
     public boolean resourceShortage(){return exhausted;}
     public String hudStatus() {
+        if(recoveringBreath)return "采树前："+(recoverySubmerged?"上浮":"恢复")+" 氧气 "+recoveryAir+"/"+recoveryMaxAir;
         return switch(phase) {
             case SELECT -> "采树：选择下一棵树或树叶";
-            case TRUNK -> "采树：砍主干";
+            case TRUNK -> "采树：接近主干";
+            case BATCH_LOGS -> "采树：原地砍可触及的木头";
             case STUMP -> "采树：移动到主干地面";
             case LEAVES -> "采树：剪可触及的树叶";
             case COLLECT -> "采树：集中收集掉落物";
@@ -59,6 +119,7 @@ public final class TreeHarvestSession {
     }
     public boolean tick(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc) {
         if(phase==Phase.COLLECT)return false;
+        if(recoverBreathing(client,player,path,misc))return false;
         if(phase==Phase.SELECT) {
             boolean wood=InventoryHelper.countItem(player,ItemTags.LOGS)<logsRequired;
             boolean leaves=!leafToolsUnavailable && InventoryHelper.findItemSlot(player,Items.SHEARS)>=0 && InventoryHelper.countItem(player,ItemTags.LEAVES)<leavesRequired;
@@ -84,26 +145,59 @@ public final class TreeHarvestSession {
             }
             target=null;requests=0;breakTicks=0;
         }
+        interruptApproach(client,player,path,misc);
         if(path.isBusy())return false;
+        if(phase==Phase.TRUNK && InventoryHelper.countItem(player,ItemTags.LOGS)>=logsRequired){
+            trunk.clear();phase=Phase.SELECT;return false;
+        }
         if(phase==Phase.TRUNK) {
-            trunk.removeIf(p -> !client.world.getBlockState(p).isIn(BlockTags.LOGS));
+            trunk.removeIf(p -> !client.world.getBlockState(p).isIn(BlockTags.LOGS) || !MiningHelper.logTargetAllowed(p));
             if(target!=null && !trunk.contains(target)){target=null;requests=0;breakTicks=0;}
-            if(trunk.isEmpty()){phase=Phase.STUMP;target=null;requests=0;}
+            if(trunk.isEmpty()){phase=Phase.SELECT;target=null;requests=0;return false;}
             else {
                 if(target==null)target=trunk.stream().filter(p -> visible(client,player,p)).findFirst().orElse(trunk.get(0));
                 if(!visible(client,player,target)) {
                     BlockPos stand=misc.findHarvestApproach(client,player,target,false);
-                    if(stand==null || requests>=3) {
+                    if(stand==null || requests>=1) {
+                        MiningHelper.blacklistLogTarget(target);
                         System.out.println("FredoBot: TREE_TRUNK_SKIP inaccessible="+target.toShortString());
                         trunk.remove(target);target=null;requests=0;breakTicks=0;return false;
                     }
                     if(path.trySetGoal(stand,"tree trunk approach"))requests++;
                     return false;
                 }
-                misc.resetKeys();ToolsHelper.equipBestTool(player,target,false);
-                if(++breakTicks>300){trunk.remove(target);target=null;requests=0;breakTicks=0;return false;}
-                mine(client,player,target);return false;
+                if(!stable(player))return false;
+                startBatch(player,path,misc);
+                return false;
             }
+        }
+        if(phase==Phase.BATCH_LOGS){
+            misc.resetKeys();
+            if(pendingLog!=null && !client.world.getBlockState(pendingLog).isIn(BlockTags.LOGS)){
+                batchBroken++;trunk.remove(pendingLog);pendingLog=null;target=null;breakTicks=0;
+            }
+            // Stop naturally before choosing the fixed station; no mid-jump mining or repeated jumping.
+            Vec3d velocity=player.getVelocity();
+            if(!stable(player) || velocity.x*velocity.x+velocity.z*velocity.z>.0049)return false;
+            if(batchFeet==null)batchFeet=player.getPos();
+            if(player.getPos().squaredDistanceTo(batchFeet)>.25){collect(misc);return false;}
+            if(suppliedLogs(player)>=logsRequired){target=null;pendingLog=null;finishLogBatch(player,misc);return false;}
+            if(target==null || !visible(client,player,target)){
+                if(pendingLog!=null){client.interactionManager.cancelBlockBreaking();pendingLog=null;}
+                target=null;double best=Double.POSITIVE_INFINITY;
+                BlockPos feet=player.getBlockPos();
+                for(int x=-4;x<=4;x++)for(int y=-3;y<=5;y++)for(int z=-4;z<=4;z++){
+                    BlockPos p=feet.add(x,y,z);
+                    if(!client.world.getBlockState(p).isIn(BlockTags.LOGS) || !MiningHelper.logTargetAllowed(p) || !visible(client,player,p))continue;
+                    double distance=Vec3d.ofCenter(p).squaredDistanceTo(player.getPos());
+                    if(distance<best){target=p;best=distance;}
+                }
+                breakTicks=0;
+                if(target==null){finishLogBatch(player,misc);return false;}
+            }
+            ToolsHelper.equipBestTool(player,target,false);
+            if(++breakTicks>300){MiningHelper.blacklistLogTarget(target);target=null;pendingLog=null;breakTicks=0;return false;}
+            pendingLog=target;mine(client,player,target);return false;
         }
         if(phase==Phase.STUMP) {
             if(!misc.harvestStandable(client,stump)) {
@@ -124,6 +218,7 @@ public final class TreeHarvestSession {
             MiningHelper.currentTargetBlocks.clear();MiningHelper.currentTargetBlocks.addAll(BlockTags.LEAVES.values());
         }
         if(phase==Phase.LEAVES) {
+            if(!stable(player))return false;
             if(InventoryHelper.findItemSlot(player,Items.SHEARS)<0){collect(misc);return false;}
             if(target!=null && !client.world.getBlockState(target).isIn(BlockTags.LEAVES)){target=null;breakTicks=0;}
             if(target==null) {
@@ -143,9 +238,15 @@ public final class TreeHarvestSession {
         }
         return false;
     }
+    private void finishLogBatch(PlayerEntity player,MiscController misc){
+        stump=player.getBlockPos();target=null;breakTicks=0;
+        if(!leafToolsUnavailable && InventoryHelper.findItemSlot(player,Items.SHEARS)>=0
+                && InventoryHelper.countItem(player,ItemTags.LEAVES)<leavesRequired)phase=Phase.LEAVES;
+        else collect(misc);
+    }
     private void mine(MinecraftClient client,PlayerEntity player,BlockPos p) {
         float[] look=MiningHelper.getValidMiningAngle(player,p);
-        com.fredoseep.behave.MovementController.setLookDirection(player,look[0],look[1]);
+        MovementController.setLookDirection(player,look[0],look[1]);
         client.interactionManager.updateBlockBreakingProgress(p,Direction.UP);
         if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
     }

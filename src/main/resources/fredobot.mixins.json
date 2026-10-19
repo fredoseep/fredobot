@@ -16,10 +16,20 @@
     "MixinGameMenuScreen",
     "MixinTreasureSeedProvider",
     "MixinTestClientPlayer",
+    "MixinMotionClientPlayer",
+    "MotionLivingAccess",
+    "MotionEntityAccess",
+    "MotionClientAccess",
+    "MotionPlayerAccess",
+    "MotionBoatAccess",
+    "MixinFusionBoatCollision",
+    "MixinMotionMinecraftClient",
     "MixinTestChatHud",
     "MixinTestInventory",
     "MixinTestTitleScreen",
     "MixinPreflightWorldCreation",
-    "MixinPreflightPauseState"
+    "MixinPreflightPauseState",
+    "MixinFusionWorld",
+    "MixinFusionChunk"
   ]
 }

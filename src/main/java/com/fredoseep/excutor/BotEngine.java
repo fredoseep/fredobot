@@ -2,6 +2,7 @@ package com.fredoseep.excutor;
 
 import com.fredoseep.Fredobot;
 import com.fredoseep.Test;
+import com.fredoseep.motion.MotionCoordinator;
 import com.fredoseep.testing.CreativeWorldTestRunner;
 import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.behave.CraftingController;
@@ -39,6 +40,7 @@ public class BotEngine {
         modules.sort(Comparator.comparingInt(IBotModule::getPriority));
 
         // 挂载到 Fabric 的客户端 Tick 事件上
+        ClientTickEvents.START_CLIENT_TICK.register(MotionCoordinator::watchdog);
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
     }
 
@@ -67,6 +69,7 @@ public class BotEngine {
     public void start() {
         if (CreativeWorldTestRunner.isActive()) return;
         if (isRunning) return;
+        MotionCoordinator.cancel("BOT_STARTED");
         isRunning = true;
         for (IBotModule module : modules) {
             module.onEnable();
@@ -75,6 +78,7 @@ public class BotEngine {
     public boolean isRunning() { return isRunning; }
 
     public void stop() {
+        MotionCoordinator.cancel("BOT_STOPPED");
         if (!isRunning) return;
         isRunning = false;
         for (IBotModule module : modules) {
@@ -86,13 +90,19 @@ public class BotEngine {
     private void onClientTick(MinecraftClient client) {
         EarlyResetPreflight.pump(client);
         if (EarlyResetPreflight.blocking(client)) return;
+        if(isRunning && client.player!=null && client.world!=null && !client.isPaused()){
+            MiscController misc=getModule(MiscController.class);
+            if(misc!=null)misc.interruptTreeApproach(client);
+        }
+        if (MotionCoordinator.blocksBot()) return;
         Test.tick();
-        if (!isRunning || client.player == null || client.world == null) return;
+        if (!isRunning || client.player == null || client.world == null || client.isPaused()) return;
 
         // 严格按照优先级，让每个模块执行自己的逻辑
         for (IBotModule module : modules) {
             if(Fredobot.isTesting&&module.getName().equals("GlobalController"))continue;
             module.onTick(client, client.player);
+            if(MotionCoordinator.blocksBot())break;
         }
     }
 }

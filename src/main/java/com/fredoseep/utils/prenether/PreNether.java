@@ -3,7 +3,8 @@ package com.fredoseep.utils.prenether;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.preflight.RavineFinder;
-import com.fredoseep.preflight.PreflightGeometry;
+import com.fredoseep.algorithm.planning.OceanGravelTargets;
+import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
@@ -30,23 +31,39 @@ public class PreNether {
     public static BlockPos alignedMagmaPos = null;
     public static Direction fromMagmaToAligned = null;
     private static BlockPos gravelPos = null;
+    private static int gravelReferenceY=OceanGravelTargets.MIN_SEABED_Y;
     private static MagmaDescent magmaDescent;
+    private static WarmGravelExit warmGravelExit;
     private static BlockPos requestedMagma;
     private static World requestWorld;
     private static int pendingRavineTicks;
-    public static String magmaFallbackStatus(){return magmaDescent==null?null:magmaDescent.hudStatus();}
+    public static String magmaFallbackStatus(){return warmGravelExit!=null?warmGravelExit.hudStatus():magmaDescent==null?null:magmaDescent.hudStatus();}
     public static BlockPos getGravelPos() { return gravelPos; }
     public static void requestMagmaRoute(PlayerEntity player,PathExecutor path) {
-        if(magmaPos==null || magmaDescent!=null)return;
+        requestMagmaRoute(player,path,null);
+    }
+    public static void requestMagmaRoute(PlayerEntity player,PathExecutor path,BlockPos departedDoor) {
+        if(magmaPos==null || magmaDescent!=null || warmGravelExit!=null)return;
         requestedMagma=magmaPos.toImmutable();requestWorld=MinecraftClient.getInstance().world;
-        magmaDescent=new MagmaDescent(MinecraftClient.getInstance(),requestedMagma);
+        magmaDescent=new MagmaDescent(MinecraftClient.getInstance(),requestedMagma,departedDoor);
+    }
+
+    /** Run before resuming any suspended route; the remembered access height survives shaft mining. */
+    public static boolean startWarmGravelExit(PlayerEntity player,BlockPos entry){
+        MinecraftClient c=MinecraftClient.getInstance();
+        if(entry==null || magmaPos==null || c.world==null || !warmOcean(c.world,magmaPos)
+                || player.getY()>=entry.getY()-.1 || player.isTouchingWater())return false;
+        BotEngine.getInstance().getModule(PathExecutor.class).stop();
+        warmGravelExit=new WarmGravelExit(c.world,player,entry.getY());return true;
     }
 
     public static void reset() {
+        if(warmGravelExit!=null)WarmGravelExit.release(MinecraftClient.getInstance());
+        warmGravelExit=null;
         pendingRavineTicks = 0;
         magmaPos = null;
         alignedMagmaPos = null;
-        gravelPos = null;
+        gravelPos = null;gravelReferenceY=OceanGravelTargets.MIN_SEABED_Y;
         fromMagmaToAligned = null;
         if(magmaDescent!=null)MagmaDescent.release(MinecraftClient.getInstance());
         magmaDescent=null;requestedMagma=null;requestWorld=null;
@@ -56,6 +73,13 @@ public class PreNether {
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
         MinecraftClient client=MinecraftClient.getInstance();
+        if(warmGravelExit!=null){
+            warmGravelExit.tick(client,player,pathExecutor);
+            if(warmGravelExit.failed()){BotEngine.getInstance().stop();return;}
+            if(!warmGravelExit.done())return;
+            warmGravelExit=null;
+            return; // Resume PRE_NETHER decisions from the confirmed surface next tick.
+        }
         if(requestedMagma!=null && (client.world!=requestWorld || !requestedMagma.equals(magmaPos))) {
             if(magmaDescent!=null)MagmaDescent.release(client);
             magmaDescent=null;requestedMagma=null;requestWorld=null;
@@ -102,7 +126,7 @@ public class PreNether {
                     System.out.println("Fredodebug: already have lighter");
                     return;
                 }
-                if (MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.WARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_WARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.LUKEWARM_OCEAN || MinecraftClient.getInstance().world.getBiome(magmaPos) == Biomes.DEEP_LUKEWARM_OCEAN) {
+                if (warmOcean(client.world,magmaPos)) {
                     System.out.println("Fredodebug: magmaPos is in warm ocean . get lighter now");
                     MiningHelper.mineAndCollect(BtStuff.workbenchAnchor != null ? BtStuff.workbenchAnchor : player.getBlockPos(), Map.of(Blocks.GRAVEL, 4), 50);
                     return;
@@ -110,13 +134,15 @@ public class PreNether {
             }
             if (magmaPos == null) return;
             World world=MinecraftClient.getInstance().world;
-            var exposed=MiningHelper.findNearestBlocks(BtStuff.oceanFloorNoKelp(magmaPos),Map.of(Blocks.GRAVEL,4),40,
-                    p -> exposedGravelApproach(world,p));
-            if(exposed.isEmpty()) {
-                System.out.println("FredoBot: no exposed gravel with a clear approach near the ravine; reset instead of pathing into buried sand");
-                globalExecutor.resetWorld("裂谷附近无可挖沙砾");return;
+            var selection=OceanGravelTargets.find(world,magmaPos,player.getBlockPos(),40,4,()->{},MiningHelper::gravelTargetAllowed);
+            gravelReferenceY=selection.referenceY();
+            GlobalStateLogger.logCustomEvent("ocean_gravel_selection",Map.of("reference_y",gravelReferenceY,
+                    "marine_columns",selection.marineColumns(),"rejected_deep_gravel",selection.rejectedDeepGravel(),
+                    "targets",selection.targets().stream().map(BlockPos::toShortString).toList()));
+            if(selection.targets().isEmpty()){
+                globalExecutor.resetWorld("裂谷附近无海床表层沙砾（排除谷底与覆盖目标）");return;
             }
-            gravelPos=exposed.getFirst();
+            gravelPos=selection.targets().get(0);
             System.out.println("Fredodebug: ocean floor gravel: " + gravelPos.toShortString());
 
         }
@@ -127,13 +153,22 @@ public class PreNether {
                 requestMagmaRoute(player,pathExecutor);
                 return;
             } else {
+                if (gravelPos == null) {
+                    if(!warmOcean(client.world,magmaPos)){magmaPos=null;return;}
+                    // Warm-ocean collection can exhaust its candidate queue without satisfying the quota.
+                    // Rescan from the actual opened shaft, rather than leaving PRE_NETHER idle forever.
+                    int missing=4-InventoryHelper.countItem(player,Items.GRAVEL);
+                    MiningHelper.mineAndCollect(player,Map.of(Blocks.GRAVEL,missing),50);
+                    return;
+                }
                 if (gravelPos != null) {
-                    if(!exposedGravelApproach(MinecraftClient.getInstance().world,gravelPos)) {magmaPos=null;gravelPos=null;return;}
+                    if(!OceanGravelTargets.eligible(client.world,gravelPos,gravelReferenceY)) {magmaPos=null;gravelPos=null;return;}
                     if (!PlayerHelper.isNear(player, gravelPos.up(), 1)) {
                         System.out.println("Fredodebug : set goal to the gravel Pos");
                         pathExecutor.setGoal(gravelPos.up(), "the gravel pos");
                     } else {
-                        MiningHelper.mineAndCollect(player, Map.of(Blocks.GRAVEL, 4), 10);
+                        MiningHelper.mineAndCollect(player.getBlockPos(), Map.of(Blocks.GRAVEL, 4), 10,
+                                p->OceanGravelTargets.eligible(client.world,p,gravelReferenceY));
                         System.out.println("Fredobug: already at gravel spot");
 
                     }
@@ -145,9 +180,9 @@ public class PreNether {
         }
     }
 
-    private static boolean exposedGravelApproach(World world, BlockPos gravel) {
-        return world.getChunkManager().isChunkLoaded(gravel.getX() >> 4, gravel.getZ() >> 4)
-                && PreflightGeometry.exposedGravel(world, gravel);
+    private static boolean warmOcean(World world,BlockPos pos){
+        return world.getBiome(pos)==Biomes.WARM_OCEAN || world.getBiome(pos)==Biomes.DEEP_WARM_OCEAN
+                || world.getBiome(pos)==Biomes.LUKEWARM_OCEAN || world.getBiome(pos)==Biomes.DEEP_LUKEWARM_OCEAN;
     }
 
     /**
