@@ -1,5 +1,7 @@
 package com.fredoseep.preflight;
 
+import com.fredoseep.utils.player.NaturalTreeLog;
+
 import com.fredoseep.algorithm.planning.OceanGravelTargets;
 
 import com.fredoseep.Fredobot;
@@ -194,7 +196,7 @@ public final class EarlyResetPreflight {
                 case COLLECTION -> {
                     load(surface, 100);
                     BlockPos log = PreflightGeometry.find(world, surface, 100,
-                            p -> world.getBlockState(p).isIn(BlockTags.LOGS), this::check);
+                            p -> world.getBlockState(p).isIn(BlockTags.LOGS) && NaturalTreeLog.allowed(world,p), this::check);
                     if (log == null) { failure = "前置：普通采集无目标（宝藏附近 100 格无原木）"; return false; }
                     BlockPos center = tnt != null ? tnt : log;
                     load(center, 34);

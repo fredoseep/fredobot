@@ -3,6 +3,8 @@ package com.fredoseep.motion.sim;
 import com.fredoseep.algorithm.planning.MiningTime;
 import com.fredoseep.algorithm.planning.PlannerSettings;
 import com.fredoseep.motion.FusionSearch;
+import com.fredoseep.motion.FusionDivePolicy;
+import com.fredoseep.motion.FusionBreathingSearch;
 import com.fredoseep.motion.FusionEscapeGeometry;
 import com.fredoseep.motion.FusionGuidance;
 import com.fredoseep.motion.LocalGroundSearch;
@@ -90,13 +92,19 @@ public final class FusionAgent implements FusionSearch.Agent {
     public boolean climbing(){return agent.isClimbing();}
     public boolean horizontalCollision(){return agent.horizontalCollision();}
     public boolean submerged(){return agent.isSubmergedInWater();}
+    public int availableAir(){return agent.getAir();}
     public boolean checkpointSafe(){return FusionSafety.checkpoint(agent);}
     public boolean pitExitSafe(double originY,double rimY){return FusionWorld.in(world,edits,()->FusionSafety.pitExit(agent,originY,rimY));}
     public double escapeHeight(){return localEscapeHeight;}
     public Map<String,Integer> interactionDiagnostics(){return Map.copyOf(editSkips);}
     public FusionGuidance.Water waterProfile(){
         if(!water())return null;
-        if(!waterSampled){sampledWater=FusionWorld.in(world,edits,()->waterColumn(agent.getX(),agent.getY(),agent.getZ()));waterSampled=true;}
+        if(!waterSampled){
+            sampledWater=FusionWorld.in(world,edits,()->{
+                FusionGuidance.Water profile=waterColumn(agent.getX(),agent.getY(),agent.getZ());
+                return profile!=null || !agent.isSubmergedInWater()?profile:waterColumn(agent.getX(),agent.getEyeY(),agent.getZ());
+            });waterSampled=true;
+        }
         return sampledWater;
     }
     public boolean underwaterGoal(LocalGroundSearch.Goal goal){
@@ -132,10 +140,17 @@ public final class FusionAgent implements FusionSearch.Agent {
     public Object contextKey(){return List.of(edits,spent,wear,agent.getPose(),agent.isSwimming(),agent.isSubmergedInWater(),
             Math.max(0,agent.getAir()/20),List.of(agent.isSprinting(),agent.isClimbing(),((MotionClientAccess)(Object)agent).fredobot$getSprintWindow(),
                     ((MotionLivingAccess)(Object)agent).fredobot$getJumpCooldown()),agent.input.jumping,agent.input.sneaking);}
-    public MotionState step(MotionInput input){return FusionWorld.in(world,edits,()->{
+    public MotionState step(MotionInput input){return stepWithAirGuard(input,FusionDivePolicy.AIR_RESERVE);}
+    public MotionState stepBreathing(MotionInput input,boolean emergency){
+        if(!emergency)return step(input);
+        if(!FusionBreathingSearch.verticalAscent(input) && agent.isSubmergedInWater())
+            throw new IllegalArgumentException("EMERGENCY_ASCENT_INPUT");
+        return stepWithAirGuard(input,Integer.MIN_VALUE);
+    }
+    private MotionState stepWithAirGuard(MotionInput input,int reserve){return FusionWorld.in(world,edits,()->{
         MotionState s=agent.step(input);waterSampled=false;sampledWater=null;
         if(blacklist.contains(agent.getBlockPos()))throw new IllegalArgumentException("BLACKLISTED_CELL");
-        if(agent.getAir()<40)throw new IllegalArgumentException("AIR_RESERVE");
+        if(agent.getAir()<reserve)throw new IllegalArgumentException("AIR_RESERVE");
         return s;
     });}
     public List<Edit> interactions(){return singleEdits(2);}

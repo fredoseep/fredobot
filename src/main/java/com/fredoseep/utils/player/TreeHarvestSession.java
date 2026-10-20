@@ -1,8 +1,6 @@
 package com.fredoseep.utils.player;
 
 import com.fredoseep.algorithm.planning.TrunkPlan;
-import com.fredoseep.algorithm.planning.TreeBreathingPolicy;
-import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.behave.MovementController;
 import com.fredoseep.excutor.PathExecutor;
@@ -11,7 +9,6 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Items;
 import net.minecraft.tag.BlockTags;
 import net.minecraft.tag.ItemTags;
-import net.minecraft.tag.FluidTags;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
@@ -34,33 +31,6 @@ public final class TreeHarvestSession {
     private boolean resumeTrunk;
     private BlockPos pendingLog;
     private Vec3d batchFeet;
-    private boolean recoveringBreath;
-    private int recoveryAir,recoveryMaxAir,recoveryStartAge,lastRecoveryWarning,lastRecoveryControlAge=-1;
-    private boolean recoverySubmerged;
-    private boolean recoverBreathing(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc){
-        boolean submerged=player.isSubmergedIn(FluidTags.WATER);
-        if(!recoveringBreath && !TreeBreathingPolicy.start(submerged,player.isTouchingWater(),player.getAir(),player.getMaxAir(),path.isBusy()))return false;
-        if(!recoveringBreath){
-            recoveringBreath=true;recoveryStartAge=player.age;lastRecoveryWarning=player.age;lastRecoveryControlAge=-1;requests=0;
-            path.stop();misc.resetKeys();
-            GlobalStateLogger.logCustomEvent("tree_breathing_started",Map.of("air",player.getAir(),"pos",player.getPos().toString(),
-                    "phase",phase.name(),"reason","PREPARE_LAND_COLLECTION"));
-        }
-        recoveryAir=player.getAir();recoveryMaxAir=player.getMaxAir();recoverySubmerged=submerged;
-        if(TreeBreathingPolicy.complete(submerged,player.getAir(),player.getMaxAir())){
-            recoveringBreath=false;misc.resetKeys();
-            GlobalStateLogger.logCustomEvent("tree_breathing_complete",Map.of("air",player.getAir(),"pos",player.getPos().toString(),
-                    "ticks",player.age-recoveryStartAge));
-            return false;
-        }
-        if(player.age-lastRecoveryWarning>=100){
-            lastRecoveryWarning=player.age;
-            GlobalStateLogger.logCustomEvent("tree_breathing_progress",Map.of("air",player.getAir(),"pos",player.getPos().toString(),"submerged",submerged));
-        }
-        if(lastRecoveryControlAge!=player.age){lastRecoveryControlAge=player.age;misc.floatForTreeBreathing(client,player);}
-        return true;
-    }
-
     private boolean stable(PlayerEntity player){
         // Vanilla travel applies gravity after ground collision, leaving vy ~= -0.0784 even at rest.
         // The physical onGround flag is required; velocity alone must never authorize an airborne cut.
@@ -73,7 +43,6 @@ public final class TreeHarvestSession {
     }
     /** Called before MotionCoordinator's global ownership gate, but never during an airborne reach. */
     public void interruptApproach(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc){
-        if(recoverBreathing(client,player,path,misc))return;
         if(phase!=Phase.TRUNK || !path.isBusy() || !stable(player))return;
         BlockPos reachable=target;
         if(reachable==null || !client.world.getBlockState(reachable).isIn(BlockTags.LOGS) || !visible(client,player,reachable))
@@ -96,7 +65,6 @@ public final class TreeHarvestSession {
         resumeTrunk=false;target=null;requests=0;breakTicks=0;pendingLog=null;batchFeet=null;}
     public boolean resourceShortage(){return exhausted;}
     public String hudStatus() {
-        if(recoveringBreath)return "采树前："+(recoverySubmerged?"上浮":"恢复")+" 氧气 "+recoveryAir+"/"+recoveryMaxAir;
         return switch(phase) {
             case SELECT -> "采树：选择下一棵树或树叶";
             case TRUNK -> "采树：接近主干";
@@ -119,7 +87,6 @@ public final class TreeHarvestSession {
     }
     public boolean tick(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc) {
         if(phase==Phase.COLLECT)return false;
-        if(recoverBreathing(client,player,path,misc))return false;
         if(phase==Phase.SELECT) {
             boolean wood=InventoryHelper.countItem(player,ItemTags.LOGS)<logsRequired;
             boolean leaves=!leafToolsUnavailable && InventoryHelper.findItemSlot(player,Items.SHEARS)>=0 && InventoryHelper.countItem(player,ItemTags.LEAVES)<leavesRequired;
@@ -129,7 +96,7 @@ public final class TreeHarvestSession {
                         p -> !visitedColumns.contains(column(p)));
                 if(seeds.isEmpty()){exhausted=true;System.out.println("FredoBot: TREE_ROUND_STOP no remaining trunk in range");return true;}
                 MiningHelper.currentTargetBlocks.clear();MiningHelper.currentTargetBlocks.addAll(InventoryHelper.anyLogs);
-                trunk.clear();trunk.addAll(TrunkPlan.find(seeds.get(0),p -> client.world.getBlockState(p).isIn(BlockTags.LOGS)));
+                trunk.clear();trunk.addAll(TrunkPlan.find(seeds.get(0),p -> client.world.getBlockState(p).isIn(BlockTags.LOGS) && MiningHelper.logTargetAllowed(p)));
                 if(trunk.isEmpty()){visitedColumns.add(column(seeds.get(0)));return false;}
                 stump=trunk.get(0);for(BlockPos p:trunk)visitedColumns.add(column(p));
                 phase=Phase.TRUNK;

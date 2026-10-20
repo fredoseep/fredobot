@@ -3,6 +3,8 @@ package com.fredoseep.utils.player;
 import com.fredoseep.behave.MiscController;
 import com.fredoseep.algorithm.planning.LayeredSpiralSearch;
 import com.fredoseep.algorithm.planning.CollectionPriority;
+import com.fredoseep.algorithm.planning.DryGravelAccess;
+import com.fredoseep.logging.GlobalStateLogger;
 import net.minecraft.block.Blocks;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
@@ -38,7 +40,7 @@ public class MiningHelper {
     public static boolean logTargetAllowed(BlockPos pos) {
         World world=MinecraftClient.getInstance().world;
         if(failedLogWorld!=world){failedLogWorld=world;failedLogTargets.clear();}
-        return !failedLogTargets.contains(pos);
+        return !failedLogTargets.contains(pos) && (world==null || NaturalTreeLog.allowed(world,pos));
     }
     public static void blacklistLogTarget(BlockPos pos) {
         logTargetAllowed(pos);
@@ -247,6 +249,7 @@ public class MiningHelper {
         Predicate<BlockPos> leafEligible=client.player==null || misc==null?p -> true:misc.leafTargetFilter(client,client.player);
         int before=rawBlocks.size();rawBlocks.removeIf(p -> !eligible.test(p) || !leafEligible.test(p) || !logTargetAllowed(p) || !gravelTargetAllowed(p));
         if(before>rawBlocks.size())System.out.println("FredoBot: TARGET_BATCH_FILTER excluded="+(before-rawBlocks.size()));
+        filterDryGravelAccess(rawBlocks);
 
         // 2. 路径优化 (Nearest Neighbor)
         BlockPos currentPos = blockPos;
@@ -282,6 +285,7 @@ public class MiningHelper {
         // 1. 粗筛：找出范围内所有目标方块
         List<BlockPos> rawBlocks = scanBlocksInRadius(blockPos, maxRadius, targetBlocks::contains);
         rawBlocks.removeIf(p -> !allowed.test(p) || !logTargetAllowed(p) || !gravelTargetAllowed(p));
+        filterDryGravelAccess(rawBlocks);
         var client=MinecraftClient.getInstance();var misc=BotEngine.getInstance().getModule(MiscController.class);
         if(client.player!=null && misc!=null) {
             Predicate<BlockPos> eligible=misc.leafTargetFilter(client,client.player);
@@ -420,6 +424,16 @@ public class MiningHelper {
     /**
      * 统一的队列装载与重置判断逻辑
      */
+    private static void filterDryGravelAccess(List<BlockPos> candidates){
+        World world=MinecraftClient.getInstance().world;
+        if(world==null)return;
+        int before=candidates.size();
+        candidates.removeIf(p->!DryGravelAccess.candidate(world,p));
+        if(before!=candidates.size())GlobalStateLogger.logCustomEvent("dry_gravel_access_candidates_filtered",Map.of(
+                "scanned",before,"rejected",before-candidates.size(),"remaining",candidates.size(),
+                "reason","NO_SAFE_DRY_COVER_COLUMN_OR_UNLOADED"));
+    }
+
     private static void setupAndDispatchTask(Set<Block> targetTypes, List<BlockPos> blockPath, String logType) {
         System.out.println("FredoBot: 开始扫描并生成 [" + logType + "] 挖掘拾取队列...");
 

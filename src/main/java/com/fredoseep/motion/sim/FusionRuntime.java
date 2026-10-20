@@ -19,6 +19,7 @@ import com.fredoseep.motion.MotionState;
 import com.fredoseep.motion.MotionDebug;
 import java.util.ArrayList;
 import com.fredoseep.utils.player.InventoryHelper;
+import com.fredoseep.utils.player.WorkbenchApproach;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -142,6 +143,7 @@ public final class FusionRuntime {
         }
     }
     public static void pump(MinecraftClient c){
+        WorkbenchApproach.pump(c);
         Job j=job;if(j==null || j.legs!=null)return;
         try{
             if(j.pause==null && c.currentScreen!=null){cancel("FUSION_SCREEN_CHANGED");return;}

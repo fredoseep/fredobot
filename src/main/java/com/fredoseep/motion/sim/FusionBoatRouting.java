@@ -57,7 +57,8 @@ public final class FusionBoatRouting {
                 boolean beginsInWater=first==0 && player.isTouchingWater();
                 if(entry==null && beginsInWater && !(player.getVehicle() instanceof BoatEntity)
                         && player.getY()<water[first].getY()-1)entry=water[first];
-                boolean endsOnWater=last==samples && Math.abs(destination.getY()-water[last].getY())<=1;
+                boolean deepWaterEnd=last==samples && underwaterDestination(player,destination,water[last]);
+                boolean endsOnWater=last==samples && (Math.abs(destination.getY()-water[last].getY())<=1 || deepWaterEnd);
                 if((entry!=null || beginsInWater) && (exit!=null || endsOnWater)
                         && (entry==null || Math.abs(entry.getY()-water[first].getY())<=1)
                         && (exit==null || Math.abs(exit.getY()-water[last].getY())<=1)){
@@ -65,6 +66,9 @@ public final class FusionBoatRouting {
                             "entry",entry.toShortString(),"crossing_blocks",(last-first)*distance/samples,"goal",destination.toShortString()));
                     if(entry!=null)legs.add(new Leg(entry,false));
                     legs.add(new Leg(water[last],true));
+                    if(deepWaterEnd)GlobalStateLogger.logCustomEvent("boat_crossing_deep_goal",Map.of(
+                            "surface",water[last].toShortString(),"goal",destination.toShortString(),
+                            "crossing_blocks",(last-first)*distance/samples));
                     if(exit!=null)legs.add(new Leg(exit,false));
                 }
             }
@@ -73,5 +77,16 @@ public final class FusionBoatRouting {
         if(legs.isEmpty())return List.of();
         if(!legs.get(legs.size()-1).goal().equals(destination))legs.add(new Leg(destination,false));
         return List.copyOf(legs);
+    }
+    private static boolean underwaterDestination(ClientPlayerEntity player,BlockPos destination,BlockPos surface){
+        if(destination.getY()>=surface.getY()-1)return false;
+        // Do not send a boat above an underground dry target or through a roof.
+        for(int y=destination.getY();y<=surface.getY();y++){
+            BlockPos p=new BlockPos(destination.getX(),y,destination.getZ());
+            var state=player.world.getBlockState(p);
+            if(!state.getFluidState().isIn(FluidTags.WATER)
+                    || !state.getCollisionShape(player.world,p).isEmpty())return false;
+        }
+        return true;
     }
 }

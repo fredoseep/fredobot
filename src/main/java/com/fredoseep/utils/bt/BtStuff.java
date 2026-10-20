@@ -12,10 +12,13 @@ import com.fredoseep.preflight.TreasureLootValidation;
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.MiscController;
+import com.fredoseep.behave.MovementController;
+import com.fredoseep.utils.player.WorkbenchApproach;
+import net.minecraft.util.Hand;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.excutor.PathExecutor;
-import com.fredoseep.utils.ItemCategory;
+import com.fredoseep.utils.player.TntLootPolicy;
 import com.fredoseep.utils.player.InventoryHelper;
 import com.fredoseep.utils.player.MiningHelper;
 import com.fredoseep.utils.player.PlayerHelper;
@@ -66,6 +69,8 @@ public class BtStuff {
     private static final DropCollectionOrder tntPickupOrder=new DropCollectionOrder();
     public static BlockPos craftingTablePos = null;
     public static BlockPos workbenchAnchor = null;
+    private static WorkbenchApproach.Request workbenchRequest;
+    private static final Set<BlockPos> rejectedWorkbenchStances=new HashSet<>();
     public static BlockPos TNTSetupPos = null;
     public static boolean treeQueueGenerated = false;
     public static boolean tntQueueGenerated = false;
@@ -102,7 +107,13 @@ public class BtStuff {
     public static BtCraftPhase btCraftPhase = BtCraftPhase.CRUSH_LOGS;
     public static TNTCraftPhase tntCraftPhase = TNTCraftPhase.EVALUATE;
 
+    private static final TntLootPolicy tntLootPolicy=new TntLootPolicy();
+
     public static void reset() {
+        WorkbenchApproach.cancel();
+        workbenchRequest=null;
+        rejectedWorkbenchStances.clear();
+        tntLootPolicy.reset();
         tntPickupOrder.reset();
         hasTNT = false;
         ironIngotCount = 0;
@@ -436,6 +447,8 @@ public class BtStuff {
                 }
                 break;
             case PLACE_TNT_AND_TRIGGER:
+                tntLootPolicy.remember(player.world,btPos,32);
+                tntLootPolicy.remember(player.world,TNTSetupPos,16);
                 if (player.isOnGround()) {
                     player.jump();
                     break;
@@ -543,13 +556,11 @@ public class BtStuff {
 
             case COLLECT_LOOT:
                 List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new Box(TNTSetupPos).expand(12.0),
-                        e -> e.isAlive() && !e.getStack().isEmpty() && !ItemCategory.isSapling(e.getStack().getItem())
-                                && e.getStack().getItem()!=Items.WHEAT_SEEDS);
+                        e -> tntLootPolicy.eligible(player.world,e));
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
-                        ItemEntity nearestDrop=tntPickupOrder.next(player,drops.stream()
-                                .filter(drop->drop.getStack().getItem()!=Items.STICK).toList());
+                        ItemEntity nearestDrop=tntPickupOrder.next(player,drops);
                         if(nearestDrop==null){tntState=TNTState.DONE;break;}
                         BlockPos safePos = new BlockPos(nearestDrop.getX(), nearestDrop.getY() + 0.5, nearestDrop.getZ());
                         pathExecutor.setGoal(safePos, "drop pos");
@@ -638,6 +649,7 @@ public class BtStuff {
                         return;
                     }
                 }
+                TntLootPolicy.rememberExcavation(minecraftClient.world,btPos);
                 globalExecutor.currentState = GlobalExecutor.GlobalState.LOOKING_FOR_TREES;
                 break;
 
@@ -751,6 +763,8 @@ public class BtStuff {
                         InventoryHelper.moveItemToHotbar(minecraftClient, player, tableSlot, 4);
                         craftingTablePos = findAProperCraftingTablePos(player);
                         workbenchAnchor = craftingTablePos;
+                        workbenchRequest=null;
+                        rejectedWorkbenchStances.clear();
                         if (craftingTablePos == null) {
                             globalExecutor.resetWorld("无法放置工作台");
                             return;
@@ -962,52 +976,49 @@ public class BtStuff {
                             MiningHelper.blockToMine.remove(craftingTablePos);
                         }
 
-                        double distToTable = player.squaredDistanceTo(Vec3d.ofCenter(craftingTablePos));
-                        if (distToTable > 4.0) {
-                            if (!MiningHelper.blockToMine.isEmpty()) {
+                        BlockHitResult returnHit=WorkbenchApproach.interaction(minecraftClient,craftingTablePos,
+                                new Vec3d(player.getX(),player.getEyeY(),player.getZ()));
+                        if(returnHit==null || !player.isOnGround()){
+                            if(!MiningHelper.blockToMine.isEmpty()){
                                 MiningHelper.dispatchNextMineAndCollectTask();
                                 break;
                             }
-                            if (!pathExecutor.isBusy()) {
-                                pathExecutor.setGoal(craftingTablePos.up(), "crafting table pos");
+                            if(workbenchRequest!=null && !workbenchRequest.finished())return;
+                            if(workbenchRequest!=null && workbenchRequest.cancelled()){
+                                workbenchRequest=null;
+                                return;
                             }
+                            if(workbenchRequest!=null){
+                                BlockPos stand=workbenchRequest.position();
+                                if(stand==null){
+                                    workbenchRequest=null;
+                                    globalExecutor.resetWorld("工作台周围没有可站立且能交互的位置");
+                                    return;
+                                }
+                                // Do not revisit an attempted stance if arrival still cannot interact.
+                                rejectedWorkbenchStances.add(stand);
+                                workbenchRequest=null;
+                                if(WorkbenchApproach.standable(minecraftClient,stand))
+                                    pathExecutor.setGoal(stand,Collections.singleton(craftingTablePos),"crafting table interaction stance");
+                                return;
+                            }
+                            MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
+                            if(movement!=null)movement.resetKeys();
+                            BlockPos requestedTable=craftingTablePos;
+                            workbenchRequest=WorkbenchApproach.begin(minecraftClient,requestedTable,rejectedWorkbenchStances,
+                                    ()->btCraftPhase==BtCraftPhase.RETURN_TO_TABLE && requestedTable.equals(craftingTablePos));
                             return;
                         }
-                        if (!MiningHelper.blockToMine.isEmpty()) MiningHelper.blockToMine.clear();
-                        if (pathExecutor.isBusy()) pathExecutor.stop();
-
-                        com.fredoseep.behave.MovementController mc = BotEngine.getInstance().getModule(com.fredoseep.behave.MovementController.class);
-                        if (mc != null) mc.resetKeys();
-
-                        System.out.println("FredoBot [调试]: 已到达工作台前，准备右键打开...");
-
-                        Vec3d tableTopCenterReturn = new Vec3d(craftingTablePos.getX() + 0.5, craftingTablePos.getY() + 1.0, craftingTablePos.getZ() + 0.5);
-
-                        double eyeYRet = player.getY() + player.getStandingEyeHeight();
-                        double dxRet = tableTopCenterReturn.x - player.getX();
-                        double dyRet = tableTopCenterReturn.y - eyeYRet;
-                        double dzRet = tableTopCenterReturn.z - player.getZ();
-                        player.yaw = (float) Math.toDegrees(Math.atan2(dzRet, dxRet)) - 90.0F;
-                        player.pitch = (float) -Math.toDegrees(Math.atan2(dyRet, Math.sqrt(dxRet * dxRet + dzRet * dzRet)));
-
-                        Direction openFaceRet = Direction.UP;
-                        if (!minecraftClient.world.getBlockState(craftingTablePos.up()).isAir()) {
-                            for (Direction d : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
-                                if (minecraftClient.world.getBlockState(craftingTablePos.offset(d)).isAir()) {
-                                    openFaceRet = d;
-                                    break;
-                                }
-                            }
-                        }
-
-                        Vec3d clickPosRet = new Vec3d(
-                                craftingTablePos.getX() + 0.5 + openFaceRet.getOffsetX() * 0.5,
-                                craftingTablePos.getY() + 0.5 + openFaceRet.getOffsetY() * 0.5,
-                                craftingTablePos.getZ() + 0.5 + openFaceRet.getOffsetZ() * 0.5
-                        );
-
-                        BlockHitResult returnHit = new BlockHitResult(clickPosRet, openFaceRet, craftingTablePos, false);
-                        minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, returnHit);
+                        WorkbenchApproach.cancel();
+                        workbenchRequest=null;
+                        rejectedWorkbenchStances.clear();
+                        if(!MiningHelper.blockToMine.isEmpty())MiningHelper.blockToMine.clear();
+                        if(pathExecutor.isBusy())pathExecutor.stop();
+                        MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
+                        if(movement!=null)movement.resetKeys();
+                        WorkbenchApproach.face(player,returnHit.getPos());
+                        System.out.println("FredoBot: 已到达工作台交互站位，准备打开...");
+                        minecraftClient.interactionManager.interactBlock(player,minecraftClient.world,Hand.MAIN_HAND,returnHit);
 
                         craftingWaitTicks = 10;
                         btCraftPhase = BtCraftPhase.OPEN_TABLE_RETURN;

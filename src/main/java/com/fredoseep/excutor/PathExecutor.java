@@ -6,7 +6,7 @@ import com.fredoseep.algorithm.planning.UnderwaterApproach;
 import com.fredoseep.algorithm.planning.UnderwaterBoatRecovery;
 import net.minecraft.entity.vehicle.BoatEntity;
 import net.minecraft.client.network.ClientPlayerEntity;
-import com.fredoseep.algorithm.planning.UnderwaterApproachPlanner;
+import com.fredoseep.algorithm.planning.LogApproachPolicy;
 
 import com.fredoseep.motion.MotionCoordinator;
 import com.fredoseep.motion.MotionDebug;
@@ -154,7 +154,7 @@ public class PathExecutor implements IBotModule {
     private PlannerDebug plannerDebug;
     private record RequestKey(World world,BlockPos start,BlockPos goal,Set<BlockPos> blacklist) {}
     private final RetryBackoff<RequestKey> retryBackoff=new RetryBackoff<>();
-    private boolean breathingDoorGoal,shortLogRoute;
+    private boolean breathingDoorGoal,shortLogRoute,firstTierLogRoute;
     private long searchFailureSerial;
     private World lastSearchFailureWorld;
     private BlockPos lastSearchFailureGoal;
@@ -414,15 +414,8 @@ public class PathExecutor implements IBotModule {
         BlockPos dest=requestedDest;
         if(!advancingCrossing && !advancingUnderwater){
             clearUnderwaterApproach();
-            if(!"breathing door".equals(targetType)){
-                var plan=UnderwaterApproachPlanner.plan(dispatchClient,requestedDest,currentBlacklist);
-                if(plan!=null){
-                    underwaterApproach=new UnderwaterApproach.Session(plan);underwaterWorld=dispatchClient.world;
-                    underwaterTargetType=targetType;dest=plan.surface();
-                    GlobalStateLogger.logCustomEvent("underwater_approach_planned",Map.of("surface",dest.toShortString(),
-                            "goal",requestedDest.toShortString(),"target_type",String.valueOf(targetType),"pos",dispatchClient.player.getPos().toString()));
-                }
-            }
+            // Dispatch the requested goal directly. Surface acquisition belongs to movement search,
+            // not to a task-layer surface/refill/descent detour.
         }
         if(!advancingCrossing){
             crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
@@ -440,6 +433,9 @@ public class PathExecutor implements IBotModule {
         this.primaryFailedGoal=null;
         this.breathingDoorGoal="breathing door".equals(targetType);
         this.shortLogRoute="tree trunk approach".equals(targetType) || "log mining approach".equals(targetType);
+        GlobalExecutor global=BotEngine.getInstance().getModule(GlobalExecutor.class);
+        this.firstTierLogRoute=LogApproachPolicy.firstTierOnly(shortLogRoute,
+                global!=null && global.currentState==GlobalExecutor.GlobalState.LOOKING_FOR_TREES);
         this.finalDestination = dest;
         this.isCalculatingNext = false;
         this.isPaused = false;
@@ -467,7 +463,7 @@ public class PathExecutor implements IBotModule {
         if(!client.isOnThread()) { client.execute(this::stop); return; }
         clearUnderwaterApproach();
         crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
-        shortLogRoute=false;manualPath=false;
+        shortLogRoute=false;firstTierLogRoute=false;manualPath=false;
         invalidatePrimaryRouting();resumePrimaryRouting=false;
         MotionCoordinator.cancel("PATH_STOPPED");
         calculationGeneration++;
@@ -545,7 +541,7 @@ public class PathExecutor implements IBotModule {
                     };
             var goal=new GroundRouteSearch.Cell(destination.getX(),destination.getY(),destination.getZ()).goal();
             boolean started=boatOnlyLeg && FusionRuntime.enabled()?FusionBoatRuntime.begin(goal,current,outcomeHandler):
-                    FusionRuntime.enabled() && shortLogRoute?FusionRuntime.begin(goal,forbidden,current,outcomeHandler,true):
+                    FusionRuntime.enabled() && shortLogRoute?FusionRuntime.begin(goal,forbidden,current,outcomeHandler,firstTierLogRoute):
                     RuntimeGroundMotion.begin(goal,forbidden,current,outcomeHandler);
             if(started)logRouteBackend(boatOnlyLeg?"FUSION_BOAT_SIMULATION":FusionRuntime.enabled()?"FUSION_SIMULATION":"GROUND_SIMULATION","DIRECT_GOAL",destination);
             return started;
@@ -1192,7 +1188,7 @@ public class PathExecutor implements IBotModule {
     public void executeCustomPath(List<SimplePathfinder.Node> customPath) {
         clearUnderwaterApproach();
         crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
-        shortLogRoute=false;manualPath=true;
+        shortLogRoute=false;firstTierLogRoute=false;manualPath=true;
         invalidatePrimaryRouting();resumePrimaryRouting=false;
         MotionCoordinator.cancel("CUSTOM_PATH_TAKES_OVER");
         if (customPath == null || customPath.isEmpty()) {

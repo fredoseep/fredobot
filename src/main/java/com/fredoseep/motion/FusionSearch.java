@@ -24,6 +24,7 @@ public final class FusionSearch {
     /** Client-thread render snapshots: speculative, never executable route results. */
     public List<MotionState> explored(){return List.copyOf(explored);}
     public List<MotionPlan.Frame> preview(){
+        if(breathingSearch!=null)return breathingSearch.preview();
         Result ready=result==null?verifying:result;
         if(ready!=null){
             List<MotionPlan.Frame> frames=new ArrayList<>();
@@ -52,6 +53,7 @@ public final class FusionSearch {
         default boolean climbing(){return false;}
         default boolean horizontalCollision(){return false;}
         default boolean submerged(){return water();}
+        default int availableAir(){return 300;}
         default FusionGuidance.Water waterProfile(){return null;}
         default boolean underwaterGoal(LocalGroundSearch.Goal goal){return false;}
         default double escapeHeight(){return Double.NaN;}
@@ -63,6 +65,7 @@ public final class FusionSearch {
         Object contextKey(); // pose, fluid/input history, edits, inventory, durability
         default MotionInput control(MotionInput proposed,LocalGroundSearch.Goal goal){return proposed;}
         MotionState step(MotionInput input);
+        default MotionState stepBreathing(MotionInput input,boolean emergency){return step(input);}
         List<? extends Interaction> interactions();
         default List<? extends Interaction> interactions(LocalGroundSearch.Goal goal){return interactions();}
         default Interaction prepare(Interaction interaction){return interaction;}
@@ -82,7 +85,20 @@ public final class FusionSearch {
     private static List<Leg> expand(Leg leg){return leg.interaction() instanceof Program p?p.steps():List.of(leg);}
     public record Result(List<Leg> legs,double cost,int expanded,int simulated,boolean complete,MotionState endpoint,boolean pitExit) {}
     private record Key(long x,long y,long z,long vx,long vy,long vz,boolean ground,boolean water,boolean submerged,boolean collision,Object context) {}
-    private record Node(Agent agent,Node parent,Leg leg,double g,double rank) {}
+    private static final class Node {
+        private final Agent agent;
+        private final Node parent;
+        private final Leg leg;
+        private final double g,rank;
+        private double leftRank=Double.NaN,rightRank=Double.NaN;
+        // The three frontiers reference the same node. Expand each version only once.
+        private boolean selected;
+        Node(Agent agent,Node parent,Leg leg,double g,double rank){
+            this.agent=agent;this.parent=parent;this.leg=leg;this.g=g;this.rank=rank;
+        }
+        Agent agent(){return agent;}Node parent(){return parent;}Leg leg(){return leg;}
+        double g(){return g;}double rank(){return rank;}
+    }
     private enum Mode {MOVE,BRAKE,SHORE,RISE,SURFACE,ESCAPE}
     private record Candidate(float offset,boolean jump,int ticks,Mode mode) {
         Candidate(float offset,boolean jump,int ticks,boolean brake){this(offset,jump,ticks,brake?Mode.BRAKE:Mode.MOVE);}
@@ -94,6 +110,12 @@ public final class FusionSearch {
         boolean rise(){return mode==Mode.RISE;}
     }
     private final PriorityQueue<Node> open=new PriorityQueue<>(Comparator.comparingDouble(Node::rank));
+    private final PriorityQueue<Node> leftOpen=new PriorityQueue<>(Comparator.comparingDouble(n->directionRank(n,-1)));
+    private final PriorityQueue<Node> rightOpen=new PriorityQueue<>(Comparator.comparingDouble(n->directionRank(n,1)));
+    private boolean threeWay;
+    private int nextLane,activeLane,middleExpanded,leftExpanded,rightExpanded;
+    private Node[] sideSeeds;
+    private int sideSeedIndex;
     private final Map<Key,Double> best=new HashMap<>();
     private final LocalGroundSearch.Goal goal;
     private final long started=System.currentTimeMillis(),budget;
@@ -120,10 +142,12 @@ public final class FusionSearch {
     private Node expanding;
     private List<Candidate> candidates=List.of();
     private List<? extends Interaction> edits=List.of();
-    private int cursor,expanded,simulated;
+    private int cursor,expanded,simulated,delayedDiveCandidates;
     private boolean finished;
     private String reason="SEARCHING";
     private Result result;
+    private FusionBreathingSearch breathingSearch;
+    private Map<String,Object> breathingMetrics=Map.of();
     public FusionSearch(Agent start,LocalGroundSearch.Goal goal,long budget,int maxKnown){
         this(start,goal,budget,maxKnown,DEFAULT_HEURISTIC_WEIGHT);
     }
@@ -135,7 +159,8 @@ public final class FusionSearch {
         escapeHeight=!start.water() && !deepGoal && goal.y()>start.state().y()+.5
                 && localSurface>start.state().y()+.5?localSurface:Double.NaN;
         root=start.copy();initialDistance=distance(start.state());minProgress=Math.min(8,Math.max(3,initialDistance*.2));
-        offer(new Node(start,null,null,0,priority(start)));
+        if(FusionBreathingSearch.required(start,goal))breathingSearch=new FusionBreathingSearch(root,goal);
+        else offer(new Node(start,null,null,0,priority(start)));
     }
     /** Configure before stepping; escalation retains this exact frontier and in-progress rollout. */
     public FusionSearch staged(int firstLimit,boolean allowGrowth,boolean partialRoutes){
@@ -149,9 +174,16 @@ public final class FusionSearch {
     public String reason(){return reason;}
     public Map<String,Object> metrics(){
         Map<String,Object> data=new LinkedHashMap<>();
+        data.putAll(breathingSearch==null?breathingMetrics:breathingSearch.metrics());
+        data.put("search_phase",breathingSearch==null?"TARGET_ROUTE":"BREATHING_POINT");
         data.put("expanded",expanded);data.put("known",retainedKnown<0?best.size():retainedKnown);
         data.put("open",retainedKnown<0?open.size():retainedOpen);data.put("max_known",maxKnown);
         data.put("optimizing_first_tier",optimizingFirstTier());
+        data.put("search_lanes",threeWay?"MIDDLE_LEFT_RIGHT":optimizingFirstTier()?"MIDDLE_FIRST_TIER":"MIDDLE");
+        data.put("active_lane",activeLane==1?"LEFT":activeLane==2?"RIGHT":"MIDDLE");
+        data.put("middle_expanded",middleExpanded);data.put("left_expanded",leftExpanded);data.put("right_expanded",rightExpanded);
+        data.put("left_open",leftOpen.size());data.put("right_open",rightOpen.size());
+        data.put("side_seed_remaining",sideSeeds==null?0:sideSeeds.length-sideSeedIndex);
         data.put("complete_cost_ticks",incumbent==null?"none":incumbent.g());
         data.put("stage_known_limit",stageKnown);data.put("search_stage",stage);data.put("grow_stages",growStages);
         data.put("heuristic_weight",heuristicWeight);data.put("budget_ms",budget);data.put("simulated_ticks",simulated);data.put("reason",reason);
@@ -166,12 +198,15 @@ public final class FusionSearch {
         data.put("pit_escape_attempts",pitEscapeAttempts);data.put("pit_escape_candidates",pitEscapeCandidates);
         data.put("clearance_attempts",clearanceAttempts);data.put("clearance_candidates",clearanceCandidates);data.put("surface_candidates",surfaceCandidates);data.put("escape_candidates",escapeCandidates);
         data.put("deep_goal",deepGoal);data.put("escape_height",Double.isFinite(escapeHeight)?escapeHeight:"none");
+        data.put("delayed_dive_candidates",delayedDiveCandidates);
+        data.put("best_air",previewNode==null?root.availableAir():previewNode.agent().availableAir());
+        data.put("estimated_dive_ticks",previewNode==null?0:FusionDivePolicy.estimatedTicks(previewNode.agent().state(),goal));
         data.put("best_water",previewNode==null || previewNode.agent().waterProfile()==null?"none":previewNode.agent().waterProfile().toString());
         data.put("edit_skips",Map.copyOf(editSkips));data.put("shore_candidates",shoreCandidates);data.put("water_exit_ticks",waterExitTicks);data.put("landing_jump_ticks",landingJumpTicks);
         data.put("rejections",Map.copyOf(rejected));data.put("break_candidates",breakCandidates);data.put("place_candidates",placeCandidates);
         return data;
     }
-    public void cancel(){finished=true;reason="CANCELLED";result=null;retainCounts();open.clear();best.clear();}
+    public void cancel(){finished=true;reason="CANCELLED";result=null;retainCounts();clearFrontiers();best.clear();}
     public boolean reached(Agent agent){
         return agent.reachedGoal(goal);
     }
@@ -179,12 +214,24 @@ public final class FusionSearch {
     public void step(){
         if(finished)return;
         if(verifying!=null){verify();return;}
+        if(breathingSearch!=null){
+            operation("PLANNING_BREATHING_POINT");
+            if(budget>0 && System.currentTimeMillis()-started>=budget){finish(null,"BREATHING_TIME_LIMIT");return;}
+            int before=breathingSearch.simulated();breathingSearch.step();simulated+=breathingSearch.simulated()-before;
+            if(!breathingSearch.finished())return;
+            breathingMetrics=breathingSearch.metrics();FusionBreathingSearch.Prefix prefix=breathingSearch.result();breathingSearch=null;
+            if(prefix==null){offer(new Node(root.copy(),null,null,0,priority(root)));return;}
+            Node origin=new Node(root,null,null,0,0);double cost=prefix.motion().frames().size();
+            offer(new Node(prefix.agent(),origin,new Leg(prefix.motion(),null),cost,cost+priority(prefix.agent())));
+            return;
+        }
         operation("SELECT_STATE");
         // First tier retains the cheapest complete candidate while spending its optimization budget.
         // Only a search that exceeded that tier commits the next full solution immediately.
         if(incumbent!=null && !optimizingFirstTier()){finish(incumbent,"FIRST_SOLUTION");return;}
         if(incumbent!=null && best.size()>=stageKnown){finish(incumbent,"FIRST_TIER_LIMIT");return;}
         while(best.size()>=stageKnown && stageKnown<maxKnown && growStages){
+            if(stage==1)enableThreeWay();
             stageKnown=(int)Math.min(maxKnown,Math.max((long)stageKnown+1,(long)stageKnown*2));stage++;
         }
         if((budget>0 && System.currentTimeMillis()-started>=budget) || best.size()>=stageKnown){
@@ -195,10 +242,10 @@ public final class FusionSearch {
             if(incumbent==null && pitExitNode!=null)finish(pitExitNode,"PIT_EXIT");
             else finish(incumbent!=null?incumbent:checkpoint,limitReason);return;
         }
+        if(sideSeeds!=null){seedSideFrontiers();return;}
         if(expanding==null){
-            Node n;
-            do {n=open.poll();if(n==null){finish(incumbent,"EXHAUSTED");return;}}
-            while(n.g()>best.getOrDefault(key(n.agent()),Double.POSITIVE_INFINITY)+1e-8);
+            Node n=pollFrontier();
+            if(n==null){finish(incumbent,"EXHAUSTED");return;}
             if(reached(n.agent())){
                 if(!optimizingFirstTier()){finish(n,"COMPLETE");return;}
                 return; // Goal states are retained as incumbents, never expanded into detours.
@@ -207,10 +254,13 @@ public final class FusionSearch {
             explored.addLast(n.agent().state());if(explored.size()>256)explored.removeFirst();
             expandedPreview=n;
             expanding=n;expanded++;cursor=0;
+            if(activeLane==1)leftExpanded++;else if(activeLane==2)rightExpanded++;else middleExpanded++;
             List<Candidate> list=new ArrayList<>();
             list.add(new Candidate(0,false,3,true));
             if(n.agent().water())list.add(new Candidate(0,false,12,true));
-            if(FusionGuidance.surfaceRoute(n.agent().waterProfile(),deepGoal,n.agent().state(),goal))
+            boolean delayDive=FusionDivePolicy.delay(n.agent().waterProfile(),deepGoal,n.agent().state(),goal,n.agent().availableAir());
+            if(delayDive)delayedDiveCandidates+=3;
+            if(delayDive || FusionGuidance.surfaceRoute(n.agent().waterProfile(),deepGoal,n.agent().state(),goal))
                 for(float offset:new float[]{0,-25,25})list.add(new Candidate(offset,false,16,Mode.SURFACE));
             if(Double.isFinite(escapeHeight) && !n.agent().water() && rootRange(n.agent().state())<8
                     && n.agent().state().y()<escapeHeight-.2 && n.agent().state().grounded())
@@ -317,12 +367,66 @@ public final class FusionSearch {
     }
     private double distance(MotionState s){return Math.sqrt(Math.pow(goal.x()-s.x(),2)+Math.pow(goal.y()-s.y(),2)+Math.pow(goal.z()-s.z(),2));}
     private double heuristic(MotionState s){return distance(s)*4;}
+    /** Only entered after a growable first tier failed to produce a complete route. */
+    private void enableThreeWay(){
+        if(threeWay)return;
+        threeWay=true;nextLane=0;
+        // Keep the middle frontier and in-progress rollout; no repeated root search.
+        sideSeeds=open.toArray(Node[]::new);sideSeedIndex=0;
+    }
+    private void seedSideFrontiers(){
+        operation("SEED_SIDE_FRONTIERS");
+        // Keep heap construction inside the existing paused-frame work slices.
+        int end=Math.min(sideSeeds.length,sideSeedIndex+128);
+        while(sideSeedIndex<end){
+            Node n=sideSeeds[sideSeedIndex++];
+            if(!n.selected && n.g()<=best.getOrDefault(key(n.agent()),Double.POSITIVE_INFINITY)+1e-8){
+                leftOpen.add(n);rightOpen.add(n);
+            }
+        }
+        if(sideSeedIndex==sideSeeds.length)sideSeeds=null;
+    }
+    /** Soft initial +/-45 degree guide, fading with travel and proximity to the real goal. */
+    private double directionRank(Node n,int side){
+        double cached=side<0?n.leftRank:n.rightRank;
+        if(!Double.isNaN(cached))return cached;
+        MotionState origin=root.state(),s=n.agent().state();
+        double dx=goal.x()-origin.x(),dz=goal.z()-origin.z(),length=Math.hypot(dx,dz);
+        if(length<1e-6)return n.rank();
+        double reach=Math.min(16,Math.max(4,length*.35)),angle=Math.toRadians(side*45);
+        double gx=origin.x()+(dx*Math.cos(angle)-dz*Math.sin(angle))/length*reach;
+        double gz=origin.z()+(dx*Math.sin(angle)+dz*Math.cos(angle))/length*reach;
+        double fade=Math.max(0,1-Math.hypot(s.x()-origin.x(),s.z()-origin.z())/(reach*2))
+                *Math.min(1,Math.hypot(goal.x()-s.x(),goal.z()-s.z())/reach);
+        double rank=n.rank()+(Math.hypot(s.x()-gx,s.z()-gz)-reach)*12*fade;
+        if(side<0)n.leftRank=rank;else n.rightRank=rank;
+        return rank;
+    }
+    private Node pollFrontier(){
+        int count=threeWay?3:1;
+        for(int attempt=0;attempt<count;attempt++){
+            int lane=threeWay?nextLane:0;nextLane=(lane+1)%count;
+            PriorityQueue<Node> queue=lane==1?leftOpen:lane==2?rightOpen:open;
+            Node n;
+            while((n=queue.poll())!=null){
+                if(n.selected)continue;
+                if(n.g()>best.getOrDefault(key(n.agent()),Double.POSITIVE_INFINITY)+1e-8){n.selected=true;continue;}
+                n.selected=true;activeLane=lane;return n;
+            }
+        }
+        return null;
+    }
+    private void clearFrontiers(){
+        open.clear();leftOpen.clear();rightOpen.clear();sideSeeds=null;
+        if(breathingSearch!=null){breathingMetrics=breathingSearch.metrics();breathingSearch=null;}
+    }
     private double rootRange(MotionState s){return Math.hypot(s.x()-root.state().x(),s.z()-root.state().z());}
     private double priority(Agent a){
         MotionState s=a.state();
         // The pit hint fades locally; it must not pull a later ocean crossing back up to the pit's land height.
         double localHint=Double.isFinite(escapeHeight)?s.y()+Math.max(0,escapeHeight-s.y())*Math.max(0,1-rootRange(s)/8):Double.NaN;
-        return heuristic(s)*heuristicWeight+FusionGuidance.penalty(s,a.waterProfile(),deepGoal,localHint);
+        return heuristic(s)*heuristicWeight+FusionGuidance.penalty(s,a.waterProfile(),deepGoal,localHint)
+                +FusionDivePolicy.penalty(a.waterProfile(),deepGoal,s,goal,a.availableAir());
     }
     private Key key(Agent a){MotionState s=a.state();return new Key(Math.round(s.x()*8),Math.round(s.y()*8),Math.round(s.z()*8),
             Math.round(s.vx()*40),Math.round(s.vy()*40),Math.round(s.vz()*40),s.grounded(),a.water(),a.submerged(),a.horizontalCollision(),a.contextKey());}
@@ -336,7 +440,8 @@ public final class FusionSearch {
             for(Leg leg:expand(n.leg()))if(leg.interaction()!=null){if(leg.interaction().kind().equals("BREAK"))breakCandidates++;else placeCandidates++;}
         }
         Key key=key(n.agent());if(n.g()+1e-8>=best.getOrDefault(key,Double.POSITIVE_INFINITY))return;
-        best.put(key,n.g());open.add(n);}
+        best.put(key,n.g());open.add(n);
+        if(threeWay){leftOpen.add(n);rightOpen.add(n);}}
     private void considerCheckpoint(Node n,double distance){
         // Never cut at an edit boundary or select a tiny oscillating prefix just to reset the budget.
         if(n.leg()!=null && n.leg().motion()!=null && initialDistance-distance>=minProgress
@@ -381,7 +486,7 @@ public final class FusionSearch {
             while(n.parent()!=null){legs.add(n.leg());n=n.parent();}Collections.reverse(legs);legs=legs.stream().flatMap(l->expand(l).stream()).toList();
             verifying=new Result(List.copyOf(legs),cost,expanded,simulated,complete,endpoint,pitExitResult);replay=root.copy();reason="VERIFYING";
         }else finished=true;
-        expanding=null;retainCounts();open.clear();best.clear();incumbent=null;
+        expanding=null;retainCounts();clearFrontiers();best.clear();incumbent=null;
     }
     private void retainCounts(){if(retainedKnown<0){retainedKnown=best.size();retainedOpen=open.size();}}
     private void verify(){
@@ -399,7 +504,9 @@ public final class FusionSearch {
             if(leg.interaction()!=null){replay=replay.apply(leg.interaction());verifyLeg++;return;}
             MotionPlan plan=leg.motion();
             if(verifyFrame==0 && replay.state().positionError(plan.initial())>1e-7)throw new IllegalArgumentException("initial replay mismatch");
-            MotionPlan.Frame frame=plan.frames().get(verifyFrame++);MotionState s=replay.step(frame.input());
+            MotionPlan.Frame frame=plan.frames().get(verifyFrame++);
+            MotionState s=FusionBreathingSearch.EMERGENCY_PLAN.equals(plan.id())
+                    ?replay.stepBreathing(frame.input(),true):replay.step(frame.input());
             if(s.positionError(frame.after())>1e-7 || s.velocityError(frame.after())>1e-7 || s.grounded()!=frame.after().grounded())
                 throw new IllegalArgumentException("physics replay mismatch");
             if(verifyFrame==plan.frames().size()){verifyFrame=0;verifyLeg++;}

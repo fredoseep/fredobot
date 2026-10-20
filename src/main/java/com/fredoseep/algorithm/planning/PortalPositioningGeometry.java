@@ -7,6 +7,9 @@ import java.util.List;
 /** Door-relative geometry, independent of camera yaw and the block containing the player's centre. */
 public final class PortalPositioningGeometry {
     private PortalPositioningGeometry(){}
+    public static boolean rearStable(double coordinate,double previous,boolean contact){
+        return contact && Double.isFinite(previous) && Math.abs(coordinate-previous)<=.002;
+    }
     public static boolean touchesRearDoor(Box body,BlockPos door,List<Box> localShapes,int forwardX,int forwardZ){
         Box probe=body.offset(-forwardX*.025,0,-forwardZ*.025);
         for(Box shape:localShapes)if(probe.intersects(shape.offset(door.getX(),door.getY(),door.getZ())))return true;

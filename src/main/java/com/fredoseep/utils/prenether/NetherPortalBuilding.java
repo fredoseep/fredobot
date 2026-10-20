@@ -2,6 +2,7 @@ package com.fredoseep.utils.prenether;
 
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.algorithm.planning.DoorPlacementGuard;
+import com.fredoseep.algorithm.planning.PortalClearanceGeometry;
 import com.fredoseep.algorithm.planning.PortalPositioningGeometry;
 import net.minecraft.block.enums.DoubleBlockHalf;
 import com.fredoseep.logging.GlobalStateLogger;
@@ -57,6 +58,7 @@ public class NetherPortalBuilding {
     private static boolean againstTheDoor = false;
     private static final DoorPlacementGuard doorPlacementGuard=new DoorPlacementGuard();
     private static int positioningBackTicks,positioningStillTicks,positioningSideStableTicks;
+    private static double positioningLastBackCoordinate=Double.NaN;
 
     public static int lavaGrabStep = 0;
     private static Vec3d grabStoredRealPos = null;
@@ -81,6 +83,7 @@ public class NetherPortalBuilding {
         initGestureAdjusted = false;
         againstTheDoor = false;
         doorPlacementGuard.clear();positioningBackTicks=positioningStillTicks=positioningSideStableTicks=0;
+        positioningLastBackCoordinate=Double.NaN;
         KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyLeft.getDefaultKey(), false);
         KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyForward.getDefaultKey(), false);
 
@@ -183,6 +186,7 @@ public class NetherPortalBuilding {
                 // The second door is placed while facing backwards; restore the approach direction.
                 facePortalApproach(client);
                 againstTheDoor=false;positioningBackTicks=positioningStillTicks=positioningSideStableTicks=0;
+                positioningLastBackCoordinate=Double.NaN;
                 GlobalStateLogger.logCustomEvent("portal_doors_confirmed",Map.of("first",PreNether.magmaPos.up().toShortString(),
                         "second",secondDoorBasePos.up().toShortString(),
                         "first_facing",portalDoorFacing(PreNether.magmaPos).toString(),"second_facing",portalDoorFacing(secondDoorBasePos).toString(),
@@ -205,10 +209,18 @@ public class NetherPortalBuilding {
                     positioningBackTicks++;
                     KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(),true);
                     double backSpeed=Math.abs(client.player.getVelocity().getComponentAlongAxis(PreNether.fromMagmaToAligned.getAxis()));
-                    positioningStillTicks=backSpeed<.001?positioningStillTicks+1:0;
                     boolean rearContact=PortalPositioningGeometry.touchesRearDoor(client.player.getBoundingBox(),PreNether.magmaPos.up(),
                             client.world.getBlockState(PreNether.magmaPos.up()).getCollisionShape(client.world,PreNether.magmaPos.up()).getBoundingBoxes(),
                             PreNether.fromMagmaToAligned.getOffsetX(),PreNether.fromMagmaToAligned.getOffsetZ());
+                    double backCoordinate=client.player.getX()*PreNether.fromMagmaToAligned.getOffsetX()
+                            +client.player.getZ()*PreNether.fromMagmaToAligned.getOffsetZ();
+                    double displacement=Double.isFinite(positioningLastBackCoordinate)?Math.abs(backCoordinate-positioningLastBackCoordinate):0;
+                    positioningStillTicks=PortalPositioningGeometry.rearStable(backCoordinate,positioningLastBackCoordinate,rearContact)
+                            ?positioningStillTicks+1:0;
+                    positioningLastBackCoordinate=backCoordinate;
+                    if(positioningBackTicks%40==0)GlobalStateLogger.logCustomEvent("portal_positioning_rear_progress",Map.of(
+                            "pos",client.player.getPos().toString(),"ticks",positioningBackTicks,"still_ticks",positioningStillTicks,
+                            "rear_contact",rearContact,"displacement",displacement,"reported_speed",backSpeed));
                     if(positioningBackTicks>=6 && positioningStillTicks>=3 && rearContact){
                         againstTheDoor=true;
                         KeyBinding.setKeyPressed(client.options.keyBack.getDefaultKey(),false);
@@ -719,38 +731,11 @@ public class NetherPortalBuilding {
     }
 
     private static boolean areaNotClear() {
-        boolean isNotClear = false;
-        if (twoByOneAreaClearPos.isEmpty()) {
-            BlockPos magmaPos = PreNether.magmaPos.up();
-            BlockPos alignedMagmaPos = PreNether.alignedMagmaPos.up();
-            if (isNotClear(magmaPos)) {
-                isNotClear = true;
-                twoByOneAreaClearPos.add(magmaPos);
-            }
-            if (isNotClear(alignedMagmaPos)) {
-                isNotClear = true;
-                twoByOneAreaClearPos.add(alignedMagmaPos);
-            }
-            if (isNotClear(magmaPos.offset(PreNether.fromMagmaToAligned))) {
-                isNotClear = true;
-                twoByOneAreaClearPos.add(magmaPos.offset(PreNether.fromMagmaToAligned.getOpposite()));
-            }
-            if (isNotClear(alignedMagmaPos.offset((PreNether.fromMagmaToAligned)))) {
-                isNotClear = true;
-                twoByOneAreaClearPos.add(alignedMagmaPos.offset((PreNether.fromMagmaToAligned)));
-            }
-            if (isNotClear(PreNether.magmaPos.down(2))) {
-                isNotClear = true;
-                twoByOneAreaClearPos.add(PreNether.magmaPos.down(2));
-            }
-            if (isNotClear(PreNether.alignedMagmaPos.down(2))) {
-                isNotClear = true;
-                twoByOneAreaClearPos.add((PreNether.alignedMagmaPos.down(2)));
-            }
-        } else {
-            twoByOneAreaClearPos.removeIf(currentPos -> !isNotClear(currentPos));
-            isNotClear = !twoByOneAreaClearPos.isEmpty();
-        }
+        // Always test and enqueue the same coordinates, including headroom over both outer faces.
+        twoByOneAreaClearPos.clear();
+        for(BlockPos pos:PortalClearanceGeometry.cells(PreNether.magmaPos,PreNether.alignedMagmaPos,PreNether.fromMagmaToAligned))
+            if(isNotClear(pos))twoByOneAreaClearPos.add(pos);
+        boolean isNotClear=!twoByOneAreaClearPos.isEmpty();
         System.out.println("Fredodebug: twoByOneisNotClear: " + isNotClear);
         System.out.println("Fredodebug: twoByOneAreaClearPosList: " + twoByOneAreaClearPos.toString());
         return isNotClear;

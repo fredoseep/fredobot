@@ -3,7 +3,11 @@ package com.fredoseep.behave;
 import com.fredoseep.utils.player.DropCollectionOrder;
 
 import com.fredoseep.algorithm.SimplePathfinder;
+import com.fredoseep.utils.player.TntLootPolicy;
 import com.fredoseep.algorithm.planning.BuriedMiningAccess;
+import com.fredoseep.algorithm.planning.DryGravelAccess;
+import com.fredoseep.algorithm.planning.LayeredSpiralSearch;
+import com.fredoseep.algorithm.planning.UnderwaterDoorAccess;
 import com.fredoseep.algorithm.planning.TreeBreathingPolicy;
 import com.fredoseep.logging.GlobalStateLogger;
 import java.util.Map;
@@ -21,6 +25,7 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.options.KeyBinding;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.FallingBlockEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.BoatEntity;
 
@@ -64,8 +69,9 @@ public class MiscController implements IBotModule {
     private BuriedMiningAccess.Plan buriedGravel;
     private BlockPos buriedCover;
     private boolean buriedEntryRequested,buriedDescending;
-    private int buriedCoverAge,buriedCenterTicks,buriedProgressAge;
-    private void resetBuriedGravel(){buriedGravel=null;buriedCover=null;buriedEntryRequested=false;buriedDescending=false;buriedCenterTicks=0;}
+    private int buriedCoverAge,buriedCenterTicks,buriedProgressAge,buriedSettleTicks;
+    private boolean buriedWaitingFalling;
+    private void resetBuriedGravel(){buriedGravel=null;buriedCover=null;buriedEntryRequested=false;buriedDescending=false;buriedCenterTicks=0;buriedSettleTicks=0;buriedWaitingFalling=false;}
     private int finalRecoveryStartAge=-1;
     private boolean finalRecoverySawDrop;
     private boolean pressForward = false;
@@ -95,6 +101,7 @@ public class MiscController implements IBotModule {
     private UnderwaterGravelWork uwGravelWork;
     private BlockPos uwIssuedTarget;
     private BlockPos uwDoorAdjustedTarget;
+    private final Set<BlockPos> uwSkippedTargets=new HashSet<>();
     private int leafSettleTicks;
     private final Set<BlockPos> failedLeafApproaches=new HashSet<>();
     private boolean gotOffBoat = false;
@@ -144,7 +151,7 @@ public class MiscController implements IBotModule {
         this.targetPos = pos;
         var taskClient=MinecraftClient.getInstance();
         uwGravelMission=taskClient.world!=null && pos!=null && taskClient.world.getBlockState(pos).getBlock()==Blocks.GRAVEL;
-        uwGravelWork=new UnderwaterGravelWork();uwIssuedTarget=null;uwDoorAdjustedTarget=null;
+        uwGravelWork=new UnderwaterGravelWork();uwIssuedTarget=null;uwDoorAdjustedTarget=null;uwSkippedTargets.clear();
         leafLogDrop=null;lastLeafApproach=null;failedLeafApproaches.clear();leafSettleTicks=0;
         miningSearchFailures=0;lastMiningApproach=null;failedMiningApproaches.clear();
         PathExecutor executor=BotEngine.getInstance().getModule(PathExecutor.class);
@@ -309,7 +316,7 @@ public class MiscController implements IBotModule {
         targetEntity = null;
         pathingFailTicks = 0;
         uwPhase = UwDoorPhase.NONE;
-        uwGravelMission=false;uwGravelWork=null;uwIssuedTarget=null;uwDoorAdjustedTarget=null;
+        uwGravelMission=false;uwGravelWork=null;uwIssuedTarget=null;uwDoorAdjustedTarget=null;uwSkippedTargets.clear();
         doorPos = null;
         uwWaitTicks = 0;
         finalRecoveryStartAge=-1;
@@ -444,8 +451,8 @@ public class MiscController implements IBotModule {
                 }
 
                 if (uwPhase == UwDoorPhase.NONE) {
-                    boolean isUnderwater = client.world.getBlockState(targetPos).getBlock() == Blocks.WATER ||
-                            client.world.getBlockState(targetPos.up()).getBlock() == Blocks.WATER;
+                    boolean isUnderwater = UnderwaterDoorAccess.water(client.world,targetPos)
+                            || UnderwaterDoorAccess.water(client.world,targetPos.up());
 
                     int doorSlot = -1;
                     for (int i = 0; i < 36; i++) {
@@ -460,7 +467,7 @@ public class MiscController implements IBotModule {
                         BlockPos bestSpot=null,fallbackSpot=null;
                         for(Direction d:Direction.Type.HORIZONTAL) {
                             BlockPos p=targetPos.up().offset(d);
-                            if(client.world.getBlockState(p).getMaterial().isLiquid() && isSafeDoorFoundation(client,p.down())
+                            if(UnderwaterDoorAccess.doorSpace(client.world,p) && isSafeDoorFoundation(client,p.down())
                                     && !p.down().equals(targetPos)) {
                                 if(fallbackSpot==null)fallbackSpot=p;
                                 if(!MiningHelper.blockToMine.contains(p.down()) && client.world.getBlockState(p.down()).getBlock()!=Blocks.GRAVEL) {
@@ -469,7 +476,7 @@ public class MiscController implements IBotModule {
                             }
                         }
                         if(bestSpot==null)bestSpot=fallbackSpot;
-                        if(bestSpot==null && client.world.getBlockState(targetPos.up()).getMaterial().isLiquid()
+                        if(bestSpot==null && UnderwaterDoorAccess.doorSpace(client.world,targetPos.up())
                                 && isSafeDoorFoundation(client,targetPos))bestSpot=targetPos.up();
 
                         if (bestSpot != null) {
@@ -488,7 +495,7 @@ public class MiscController implements IBotModule {
                         if(uwIssuedTarget!=null && uwGravelWork.confirmRemoval(client.world.getBlockState(uwIssuedTarget).isAir()
                                 || client.world.getBlockState(uwIssuedTarget).getMaterial().isLiquid())) {
                             System.out.println("FredoBot: UW_CONFIRMED_BREAK target="+uwIssuedTarget.toShortString());
-                            uwGravelWork.broken();uwIssuedTarget=null;uwWaitTicks=2;
+                            uwGravelWork.broken();uwIssuedTarget=null;uwWaitTicks=2;uwSkippedTargets.clear();
                         }
                         if(uwPhase==UwDoorPhase.MINE_TARGETS && uwGravelWork.collect()) {
                             resetKeys();uwPhase=UwDoorPhase.COLLECT_DROPS;pickupCoolDownTick=0;
@@ -506,20 +513,13 @@ public class MiscController implements IBotModule {
                                 return;
                             }
                             if (pathExecutor.isBusy()) pathExecutor.stop();
-                            Block blockAtDoor = client.world.getBlockState(doorPos).getBlock();
-                            if (blockAtDoor == Blocks.SEAGRASS ||
-                                    blockAtDoor == Blocks.TALL_SEAGRASS ||
-                                    blockAtDoor == Blocks.KELP ||
-                                    blockAtDoor == Blocks.KELP_PLANT) {
-                                client.interactionManager.updateBlockBreakingProgress(doorPos, Direction.UP);
-                                player.swingHand(Hand.MAIN_HAND);
-                                return; // 等待下一帧水草消失
-                            }
+                            if(clearUnderwaterDoorPlants(client,player))return;
 
                             uwPhase = UwDoorPhase.PLACE_DOOR;
                             return;
 
                         case PLACE_DOOR:
+                            if(clearUnderwaterDoorPlants(client,player))return;
                             int dSlot = -1;
                             for (int i = 0; i < 36; i++) {
                                 if (player.inventory.getStack(i).getItem().isIn(ItemTags.DOORS)) {
@@ -552,11 +552,29 @@ public class MiscController implements IBotModule {
                             Vec3d doorEye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
                             boolean targetStillSolid=!client.world.getBlockState(targetPos).isAir()
                                     && !client.world.getBlockState(targetPos).getMaterial().isLiquid();
-                            BlockHitResult miningHit=targetStillSolid?MiningAim.visibleFace(client.world,player,targetPos):null;
+                            BlockHitResult miningHit=targetStillSolid?(uwGravelMission?MiningAim.gravelFace(client.world,player,targetPos):MiningAim.visibleFace(client.world,player,targetPos)):null;
                             if (targetStillSolid && (doorEye.squaredDistanceTo(Vec3d.ofCenter(targetPos))>20
                                     || miningHit==null)) {
+                                if(uwGravelMission && miningHit==null && doorEye.squaredDistanceTo(Vec3d.ofCenter(targetPos))<=20){
+                                    BlockHitResult cover=MiningAim.blockingFace(client.world,player,targetPos,p ->
+                                            client.world.getBlockState(p).getBlock()==Blocks.GRAVEL
+                                            && MiningHelper.gravelTargetAllowed(p) && !p.equals(doorPos.down())
+                                            && !p.equals(doorPos) && !p.equals(doorPos.up())
+                                            && MiningAim.gravelFace(client.world,player,p)!=null);
+                                    if(cover!=null){
+                                        BlockPos blocked=targetPos.toImmutable(),exposed=cover.getBlockPos().toImmutable();
+                                        MiningHelper.blockToMine.remove(exposed);
+                                        if(!MiningHelper.blockToMine.contains(blocked))MiningHelper.blockToMine.add(0,blocked);
+                                        client.interactionManager.cancelBlockBreaking();uwIssuedTarget=null;
+                                        uwGravelWork.issued();targetPos=exposed;
+                                        System.out.println("FredoBot: UW_GRAVEL_COVER target="+blocked.toShortString()+" mine_visible="+exposed.toShortString());
+                                        return;
+                                    }
+                                }
                                 if(miningHit==null && doorEye.squaredDistanceTo(Vec3d.ofCenter(targetPos))<=20
-                                        && !targetPos.equals(uwDoorAdjustedTarget) && client.world.getBlockState(doorPos).getBlock() instanceof DoorBlock) {
+                                        && uwDoorAdjustedTarget==null && client.world.getBlockState(doorPos).getBlock() instanceof DoorBlock
+                                        && MiningAim.blockingFace(client.world,player,targetPos,
+                                                p -> p.equals(doorPos) || p.equals(doorPos.up()))!=null) {
                                     uwDoorAdjustedTarget=targetPos.toImmutable();
                                     client.interactionManager.interactBlock(client.player,client.world,Hand.MAIN_HAND,
                                             new BlockHitResult(Vec3d.ofCenter(doorPos),Direction.UP,doorPos,false));
@@ -565,6 +583,7 @@ public class MiscController implements IBotModule {
                                     return;
                                 }
                                 System.out.println("FredoBot: UW_TARGET_SKIPPED target="+targetPos.toShortString()+" reason=NO_VISIBLE_FACE not counted as mined");
+                                if(uwGravelMission)uwSkippedTargets.add(targetPos.toImmutable());
                                 advanceDoorTarget(client,player);return;
                             }
 
@@ -583,7 +602,7 @@ public class MiscController implements IBotModule {
                                 pitch=(float)-Math.toDegrees(Math.atan2(aimY,Math.hypot(aimX,aimZ)));
                                 MovementController.setLookDirection(player, yaw, pitch);
                                 Vec3d look=player.getRotationVec(1F);
-                                var actualHit=client.world.rayTrace(new RayTraceContext(doorEye,
+                                var actualHit=uwGravelMission?miningHit:client.world.rayTrace(new RayTraceContext(doorEye,
                                         new Vec3d(doorEye.x+look.x*4.5,doorEye.y+look.y*4.5,doorEye.z+look.z*4.5),
                                         RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
                                 if(actualHit.getType()!=HitResult.Type.BLOCK || !actualHit.getBlockPos().equals(targetPos))return;
@@ -950,7 +969,7 @@ public class MiscController implements IBotModule {
                     List<ItemEntity> drops = client.world.getEntities(
                             ItemEntity.class,
                             searchBox,
-                            e -> (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
+                            e -> TntLootPolicy.excavationEligible(client.world,e) && (validDrops.isEmpty() || validDrops.contains(e.getStack().getItem()))
                                     && !ItemCategory.isSapling(e.getStack().getItem())
                                     && !unreachableEntities.contains(e)
                                     // 【核心防空中截停】：只找落地/落水/完全静止的掉落物
@@ -1097,9 +1116,31 @@ public class MiscController implements IBotModule {
         GlobalStateLogger.logCustomEvent("buried_gravel_access_failed",Map.of("target",targetPos.toShortString(),"reason",reason));
         MiningHelper.blacklistGravelTarget(targetPos);path.stop();resetKeys();resetBuriedGravel();pickupCoolDownTick=1;
     }
+    private boolean waitForBuriedGravelSettling(MinecraftClient client,PlayerEntity player){
+        Box column=new Box(targetPos.getX()-.5,targetPos.getY(),targetPos.getZ()-.5,
+                targetPos.getX()+1.5,buriedGravel.entry().getY()+3,targetPos.getZ()+1.5);
+        boolean falling=!client.world.getEntities(FallingBlockEntity.class,column,e->e.isAlive()).isEmpty();
+        if(falling && !buriedWaitingFalling)GlobalStateLogger.logCustomEvent("buried_gravel_wait_falling",Map.of(
+                "target",targetPos.toShortString(),"pos",player.getBlockPos().toShortString()));
+        buriedWaitingFalling|=falling;
+        if(falling || !player.isOnGround() || Math.abs(player.getVelocity().y)>.1)buriedSettleTicks=0;
+        else buriedSettleTicks=Math.min(6,buriedSettleTicks+1);
+        if(buriedSettleTicks<6){client.interactionManager.cancelBlockBreaking();return true;}
+        if(buriedWaitingFalling){
+            GlobalStateLogger.logCustomEvent("buried_gravel_settled",Map.of("target",targetPos.toShortString()));
+            buriedWaitingFalling=false;
+        }
+        return false;
+    }
     /** Dry covered gravel is reached through an actual confirmed shaft, never a feet goal inside gravel. */
     private boolean handleBuriedGravel(MinecraftClient client,PlayerEntity player,PathExecutor path){
         if(!MiningHelper.gravelTargetAllowed(targetPos))return false;
+        if(buriedGravel!=null && buriedDescending){
+            resetKeys();player.setSprinting(false);
+            if(player.isTouchingWater()){failBuriedGravel(client,path,"ACCESS_FLOODED");return true;}
+            if(player.age-buriedProgressAge>600){failBuriedGravel(client,path,"DESCENT_NO_PROGRESS");return true;}
+            if(waitForBuriedGravelSettling(client,player))return true;
+        }
         Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
         if(eye.squaredDistanceTo(Vec3d.ofCenter(targetPos))<=20 && miningVisible(client,player,eye,targetPos)){
             if(buriedGravel!=null){
@@ -1113,7 +1154,7 @@ public class MiscController implements IBotModule {
         if(buriedGravel==null){
             if(dryClear(client,targetPos.up()) || !client.world.getBlockState(targetPos.up()).getFluidState().isEmpty())return false;
             if(findMiningApproach(client,player,targetPos,failedMiningApproaches)!=null)return false;
-            buriedGravel=BuriedMiningAccess.find(targetPos,16,p->dryClear(client,p),p->safeGravelCover(client,p));
+            buriedGravel=BuriedMiningAccess.find(targetPos,DryGravelAccess.MAX_COVER,p->dryClear(client,p),p->DryGravelAccess.safeCover(client.world,p));
             if(buriedGravel==null){failBuriedGravel(client,path,"NO_SAFE_DRY_COVER_COLUMN");return true;}
             dryGravelExitSurface=buriedGravel.entry().toImmutable();
             resetKeys();buriedProgressAge=player.age;
@@ -1123,7 +1164,10 @@ public class MiscController implements IBotModule {
         if(path.isBusy())return true;
         double dx=player.getX()-buriedGravel.entry().getX()-.5,dz=player.getZ()-buriedGravel.entry().getZ()-.5;
         if(!buriedDescending){
-            if(dx*dx+dz*dz<=.25 && Math.abs(player.getY()-buriedGravel.entry().getY())<.5 && player.isOnGround()){buriedDescending=true;buriedProgressAge=player.age;}
+            if(dx*dx+dz*dz<=.25 && Math.abs(player.getY()-buriedGravel.entry().getY())<.5 && player.isOnGround()){
+                resetKeys();player.setSprinting(false);client.interactionManager.cancelBlockBreaking();
+                buriedDescending=true;buriedProgressAge=player.age;buriedSettleTicks=0;return true;
+            }
             else{
                 if(buriedEntryRequested){failBuriedGravel(client,path,"ENTRY_ROUTE_DID_NOT_ARRIVE");return true;}
                 if(path.trySetGoal(buriedGravel.entry(),"buried gravel entry"))buriedEntryRequested=true;
@@ -1153,7 +1197,7 @@ public class MiscController implements IBotModule {
         if(cover==null){failBuriedGravel(client,path,"TARGET_NOT_VISIBLE_AFTER_OPENING_COLUMN");return true;}
         // Removing one floor may not be followed by digging a second floor before actually landing.
         if(!BuriedMiningAccess.readyForCover(cover,player.getBlockPos(),player.isOnGround(),player.getVelocity().y))return true;
-        if(!safeGravelCover(client,cover)){failBuriedGravel(client,path,"COVER_CHANGED_OR_UNSAFE");return true;}
+        if(!DryGravelAccess.safeCover(client.world,cover)){failBuriedGravel(client,path,"COVER_CHANGED_OR_UNSAFE");return true;}
         BlockHitResult hit=MiningAim.visibleFace(client.world,player,cover);
         if(hit==null){failBuriedGravel(client,path,"COVER_NOT_REACHABLE");return true;}
         if(!cover.equals(buriedCover)){
@@ -1306,7 +1350,7 @@ public class MiscController implements IBotModule {
                 player.isOnGround(),player.isSubmergedIn(FluidTags.WATER));
     }
     private boolean underwaterLootEligible(ItemEntity drop,boolean finalRecovery) {
-        if(!drop.isAlive() || drop.getStack().isEmpty())return false;
+        if(!drop.isAlive() || drop.getStack().isEmpty() || !TntLootPolicy.excavationEligible(MinecraftClient.getInstance().world,drop))return false;
         Item item=drop.getStack().getItem();
         if(finalRecovery && item.isIn(ItemTags.DOORS))return true;
         if(uwGravelMission) {
@@ -1315,14 +1359,50 @@ public class MiscController implements IBotModule {
         }
         return validDrops.isEmpty() || validDrops.contains(item);
     }
-    private void advanceDoorTarget(MinecraftClient client,PlayerEntity player) {
+    private boolean clearUnderwaterDoorPlants(MinecraftClient client,PlayerEntity player){
+        BlockPos plant=UnderwaterDoorAccess.plantToClear(client.world,doorPos);
+        if(plant==null)return false;
+        resetKeys();
+        BlockHitResult hit=MiningAim.visibleFace(client.world,player,plant);
+        if(hit==null)return true;
+        float[] aim=MiningHelper.getValidMiningAngle(player,plant);
+        MovementController.setLookDirection(player,aim[0],aim[1]);
+        client.interactionManager.updateBlockBreakingProgress(plant,hit.getSide());
+        if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
+        return true;
+    }
+    private BlockPos nearestDoorGravel(MinecraftClient client,PlayerEntity player,boolean visible){
         Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
-        if(!uwGravelMission || !uwGravelWork.collect()) {
+        List<BlockPos> found=LayeredSpiralSearch.findFeetFirst(player.getBlockPos(),4,1,p->{
+            if(p.equals(doorPos.down()) || p.equals(doorPos) || p.equals(doorPos.up()) || uwSkippedTargets.contains(p)
+                    || !client.world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
+                    || client.world.getBlockState(p).getBlock()!=Blocks.GRAVEL || !MiningHelper.gravelTargetAllowed(p)
+                    || eye.squaredDistanceTo(Vec3d.ofCenter(p))>20)return false;
+            if(visible)return MiningAim.gravelFace(client.world,player,p)!=null;
+            return uwDoorAdjustedTarget==null && client.world.getBlockState(doorPos).getBlock() instanceof DoorBlock
+                    && MiningAim.blockingFace(client.world,player,p,q->q.equals(doorPos) || q.equals(doorPos.up()))!=null;
+        },p->true);
+        return found.isEmpty()?null:found.get(0);
+    }
+    private void advanceDoorTarget(MinecraftClient client,PlayerEntity player) {
+        if(uwGravelMission && !uwGravelWork.collect()){
+            BlockPos next=nearestDoorGravel(client,player,true);
+            if(next==null)next=nearestDoorGravel(client,player,false);
+            if(next!=null){
+                client.interactionManager.cancelBlockBreaking();uwIssuedTarget=null;uwGravelWork.issued();
+                MiningHelper.blockToMine.remove(next);targetPos=next;resetMiningApproachFailures();
+                GlobalStateLogger.logCustomEvent("underwater_gravel_local_target",Map.of("target",next.toShortString(),
+                        "door",doorPos.toShortString(),"confirmed_mined",uwGravelWork.count()));
+                return;
+            }
+        }
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        if(!uwGravelMission) {
             for(int i=0;i<MiningHelper.blockToMine.size();i++) {
                 BlockPos candidate=MiningHelper.blockToMine.get(i);
                 if(candidate.equals(doorPos.down()) || candidate.equals(doorPos) || candidate.equals(doorPos.up()))continue;
                 if(uwGravelMission && client.world.getBlockState(candidate).getBlock()!=Blocks.GRAVEL)continue;
-                if(eye.squaredDistanceTo(Vec3d.ofCenter(candidate))>20 || MiningAim.visibleFace(client.world,player,candidate)==null)continue;
+                if(eye.squaredDistanceTo(Vec3d.ofCenter(candidate))>20 || (uwGravelMission?MiningAim.gravelFace(client.world,player,candidate):MiningAim.visibleFace(client.world,player,candidate))==null)continue;
                 targetPos=MiningHelper.blockToMine.remove(i);resetMiningApproachFailures();return;
             }
             // Give a reachable but occluded candidate one door adjustment before abandoning it.
