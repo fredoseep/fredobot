@@ -70,7 +70,9 @@ public final class BotStatusHud {
         if(state==GlobalExecutor.GlobalState.BUILDING_TWO_BY_ONE_NETHER_PORTAL)
             return "传送门："+switch(NetherPortalBuilding.currentTBOState) {
                 case IDLE -> "准备搭建";
-                case CLEARING_AREA,CLEARING_SPACE -> "清理施工区域";
+                case SETTING_UP_FIRST_DOOR -> "first door set up";
+                case ENTERING_CLEARANCE_DOOR -> "entering clearance door";
+                case CLEARING_AREA, CLEARING_SPACE -> "清理施工区域";
                 case SETTING_UP_HIT_POINT -> "选择操作位置";
                 case SETTING_UP_DOOR -> "放置呼吸门";
                 case ADJUSTING_STANDING_POINT,POSITIONING -> "调整站位";

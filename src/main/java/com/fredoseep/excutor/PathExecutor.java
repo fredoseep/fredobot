@@ -154,7 +154,7 @@ public class PathExecutor implements IBotModule {
     private PlannerDebug plannerDebug;
     private record RequestKey(World world,BlockPos start,BlockPos goal,Set<BlockPos> blacklist) {}
     private final RetryBackoff<RequestKey> retryBackoff=new RetryBackoff<>();
-    private boolean breathingDoorGoal,shortLogRoute,firstTierLogRoute;
+    private boolean breathingDoorGoal,shortLogRoute,firstTierLogRoute,shortLeafRoute;
     private long searchFailureSerial;
     private World lastSearchFailureWorld;
     private BlockPos lastSearchFailureGoal;
@@ -385,7 +385,13 @@ public class PathExecutor implements IBotModule {
     }
 
     // 支持黑名单的 setTemporaryGoal
+    public void setTemporaryPickupGoal(BlockPos destination,boolean leafLoot){
+        setTemporaryGoal(destination,TempMissionType.GO_TO_ENTITY,this.currentBlacklist,leafLoot?"leaf loot pickup":"temp target");
+    }
     public void setTemporaryGoal(BlockPos tempDestination, TempMissionType type, Set<BlockPos> blacklist) {
+        setTemporaryGoal(tempDestination,type,blacklist,"temp target");
+    }
+    private void setTemporaryGoal(BlockPos tempDestination,TempMissionType type,Set<BlockPos> blacklist,String targetType){
         if(!requestAllowed(tempDestination,blacklist==null?Collections.emptySet():blacklist))return;
         tempMissionType = type;
         if (this.finalDestination != null) {
@@ -393,7 +399,7 @@ public class PathExecutor implements IBotModule {
             System.out.println("FredoBot: 挂起原目标 -> " + this.finalDestination.toShortString() + "，前往临时目标 -> " + tempDestination.toShortString());
         }
         this.currentBlacklist = blacklist != null ? blacklist : Collections.emptySet();
-        startNewPath(tempDestination, "temp target");
+        startNewPath(tempDestination,targetType);
     }
 
     public void resumeSuspendedGoal() {
@@ -433,8 +439,11 @@ public class PathExecutor implements IBotModule {
         this.primaryFailedGoal=null;
         this.breathingDoorGoal="breathing door".equals(targetType);
         this.shortLogRoute="tree trunk approach".equals(targetType) || "log mining approach".equals(targetType);
+        this.shortLeafRoute="leaf loot pickup".equals(targetType) || "collect released leaf loot".equals(targetType)
+                || "tnt foliage loot".equals(targetType);
+        this.shortLogRoute|=shortLeafRoute;
         GlobalExecutor global=BotEngine.getInstance().getModule(GlobalExecutor.class);
-        this.firstTierLogRoute=LogApproachPolicy.firstTierOnly(shortLogRoute,
+        this.firstTierLogRoute=shortLeafRoute || LogApproachPolicy.firstTierOnly(shortLogRoute,
                 global!=null && global.currentState==GlobalExecutor.GlobalState.LOOKING_FOR_TREES);
         this.finalDestination = dest;
         this.isCalculatingNext = false;
@@ -463,7 +472,7 @@ public class PathExecutor implements IBotModule {
         if(!client.isOnThread()) { client.execute(this::stop); return; }
         clearUnderwaterApproach();
         crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
-        shortLogRoute=false;firstTierLogRoute=false;manualPath=false;
+        shortLogRoute=false;firstTierLogRoute=false;shortLeafRoute=false;manualPath=false;
         invalidatePrimaryRouting();resumePrimaryRouting=false;
         MotionCoordinator.cancel("PATH_STOPPED");
         calculationGeneration++;
@@ -476,6 +485,16 @@ public class PathExecutor implements IBotModule {
         this.consecutiveStuckCount = 0; // 【新增】：开始新路径时重置
         tempMissionType = TempMissionType.IDLE;
         resetMovementKeys();
+    }
+
+    /** End an owned task so later pickup cannot resume its already completed destination. */
+    public void stopAndForgetGoal() {
+        MinecraftClient client=MinecraftClient.getInstance();
+        if(!client.isOnThread()){client.execute(this::stopAndForgetGoal);return;}
+        stop();
+        suspendedDestinations.clear();
+        finalDestination=null;
+        currentBlacklist=Collections.emptySet();
     }
 
     public void replanFromPlayer() {
@@ -561,7 +580,7 @@ public class PathExecutor implements IBotModule {
                 reportFailure(client);stop();return;
             }
             if(shortLogRoute && FusionRuntime.enabled()){
-                GlobalStateLogger.logCustomEvent("log_approach_failed",Map.of("goal",destination.toShortString(),"reason",reason+": "+failureReason[0]));
+                GlobalStateLogger.logCustomEvent(shortLeafRoute?"leaf_pickup_failed":"log_approach_failed",Map.of("goal",destination.toShortString(),"reason",reason+": "+failureReason[0]));
                 reportFailure(client);stop();return;
             }
             // Retain supported prefixes after a failed whole-goal attempt, but do not repeat its endpoint.
@@ -595,9 +614,13 @@ public class PathExecutor implements IBotModule {
     }
 
     private void recalculatePath(BlockPos startPos) {
-        manualPath=false;
         MinecraftClient client=MinecraftClient.getInstance();
         if(!client.isOnThread()) { client.execute(() -> recalculatePath(startPos)); return; }
+        if(manualPath){
+            GlobalStateLogger.logCustomEvent("manual_path_replan_blocked",Map.of("node_index",currentPathIndex,
+                    "reason","SCRIPTED_ROUTE_REQUIRES_OWNER_RECOVERY"));
+            stop();return;
+        }
         invalidatePrimaryRouting();resumePrimaryRouting=false;
         MotionCoordinator.cancel("PATH_RECALCULATED");
         if(finalDestination==null || client.world==null || client.player==null) return;
@@ -770,6 +793,7 @@ public class PathExecutor implements IBotModule {
                 if (PlannerSettings.DEFAULT.isStuckDisplacement(dx,dy,dz)) {
                     dumpStuck(client,player,dx,player.getY()-lastStuckCheckPos.y,dz,minMovement);
                     consecutiveStuckCount++;
+                    if(manualPath){retryManualNode(player);return;}
                     player.sendMessage(new LiteralText("§c[Bot] 检测到被困！尝试重新寻路... (连续卡死: " + consecutiveStuckCount + " 次)"), false);
                     System.out.println("FredoBot: 触发被困保护，连续次数: " + consecutiveStuckCount + "，正在重新计算！");
 
@@ -1020,6 +1044,18 @@ public class PathExecutor implements IBotModule {
     }
 
 
+    /** Keep the exact scripted node sequence; never replace micro-actions with a general route. */
+    private void retryManualNode(PlayerEntity player){
+        GlobalStateLogger.logCustomEvent("manual_path_stuck",Map.of("node_index",currentPathIndex,
+                "attempt",consecutiveStuckCount,"pos",player.getPos().toString(),
+                "action",consecutiveStuckCount>=3?"STOP_FOR_OWNER":"RETRY_SAME_NODE"));
+        resetMovementKeys();stuckCheckTicks=0;lastStuckCheckPos=player.getPos();
+        if(consecutiveStuckCount>=3){
+            player.sendMessage(new LiteralText("§c[Bot] 手工路线持续受阻，已停止并交回任务模块。"),false);
+            stop();
+        }else player.sendMessage(new LiteralText("§e[Bot] 手工路线受阻，重试当前节点（"+consecutiveStuckCount+"/3）。"),false);
+    }
+
     private void updateProgress(PlayerEntity player) {
         World world = MinecraftClient.getInstance().world;
         if (world == null) return;
@@ -1188,7 +1224,7 @@ public class PathExecutor implements IBotModule {
     public void executeCustomPath(List<SimplePathfinder.Node> customPath) {
         clearUnderwaterApproach();
         crossingLegs.clear();boatOnlyLeg=false;crossingFinalGoal=null;
-        shortLogRoute=false;firstTierLogRoute=false;manualPath=true;
+        shortLogRoute=false;firstTierLogRoute=false;shortLeafRoute=false;manualPath=true;
         invalidatePrimaryRouting();resumePrimaryRouting=false;
         MotionCoordinator.cancel("CUSTOM_PATH_TAKES_OVER");
         if (customPath == null || customPath.isEmpty()) {

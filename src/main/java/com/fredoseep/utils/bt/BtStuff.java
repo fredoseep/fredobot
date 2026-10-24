@@ -2,7 +2,10 @@ package com.fredoseep.utils.bt;
 
 import com.fredoseep.BtPosContext;
 import com.fredoseep.utils.player.DropCollectionOrder;
+import com.fredoseep.utils.player.DropPickupReadiness;
 import com.fredoseep.algorithm.planning.SquareSpiral;
+import com.fredoseep.algorithm.planning.TntPillarSupplySearch;
+import com.fredoseep.utils.player.MiningAim;
 import net.minecraft.block.Block;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.world.RayTraceContext;
@@ -66,14 +69,21 @@ public class BtStuff {
 
     public static BlockPos btPos = null;
     public static BlockPos btStandingPos = null;
-    private static final DropCollectionOrder tntPickupOrder=new DropCollectionOrder();
+    private static final DropCollectionOrder tntPickupOrder = new DropCollectionOrder();
+    private static ItemEntity tntLootTarget;
+    private static boolean tntLootFirstTier;
+    private static long tntLootFailureSerial;
     public static BlockPos craftingTablePos = null;
     public static BlockPos workbenchAnchor = null;
     private static WorkbenchApproach.Request workbenchRequest;
-    private static final Set<BlockPos> rejectedWorkbenchStances=new HashSet<>();
+    private static final Set<BlockPos> rejectedWorkbenchStances = new HashSet<>();
     public static BlockPos TNTSetupPos = null;
     public static boolean treeQueueGenerated = false;
     public static boolean tntQueueGenerated = false;
+    private static TntPillarSupplySearch.Plan tntSupplyPlan;
+    private static final Set<BlockPos> rejectedTntSupplies = new HashSet<>();
+    private static long tntSupplyFailureSerial;
+    private static boolean tntSupplyApproachIssued;
 
     public static final List<Item> itemsToCraft = new ArrayList<>();
 
@@ -107,14 +117,17 @@ public class BtStuff {
     public static BtCraftPhase btCraftPhase = BtCraftPhase.CRUSH_LOGS;
     public static TNTCraftPhase tntCraftPhase = TNTCraftPhase.EVALUATE;
 
-    private static final TntLootPolicy tntLootPolicy=new TntLootPolicy();
+    private static final TntLootPolicy tntLootPolicy = new TntLootPolicy();
 
     public static void reset() {
         WorkbenchApproach.cancel();
-        workbenchRequest=null;
+        workbenchRequest = null;
         rejectedWorkbenchStances.clear();
         tntLootPolicy.reset();
         tntPickupOrder.reset();
+        tntLootTarget = null;
+        tntLootFirstTier = false;
+        tntLootFailureSerial = 0;
         hasTNT = false;
         ironIngotCount = 0;
         goldIngotCount = 0;
@@ -135,6 +148,9 @@ public class BtStuff {
         TNTSetupPos = null;
         treeQueueGenerated = false;
         tntQueueGenerated = false;
+        tntSupplyPlan = null;
+        rejectedTntSupplies.clear();
+        tntSupplyApproachIssued = false;
         hasCheckedPlanksForFinalCrafts = false;
         btCraftPhase = BtCraftPhase.CRUSH_LOGS;
         tntCraftPhase = TNTCraftPhase.EVALUATE;
@@ -148,64 +164,115 @@ public class BtStuff {
     public static BlockPos calTNTSetupPos(PlayerEntity player) {
         var saved = EarlyResetPreflight.plan(MinecraftClient.getInstance());
         if (saved != null && saved.tnt() != null) return saved.tnt();
-        BlockPos result = PreflightGeometry.tnt(player.world, btPos != null ? btPos : player.getBlockPos(), () -> {});
+        BlockPos result = PreflightGeometry.tnt(player.world, btPos != null ? btPos : player.getBlockPos(), () -> {
+        });
         return result == null ? new BlockPos(-1, -1, -1) : result;
     }
 
     public static void TNTSetupStaffs(PlayerEntity player) {
-        var saved = EarlyResetPreflight.plan(MinecraftClient.getInstance());
+        MinecraftClient client = MinecraftClient.getInstance();
+        PathExecutor path = BotEngine.getInstance().getModule(PathExecutor.class);
+        MiscController misc = BotEngine.getInstance().getModule(MiscController.class);
+        GlobalExecutor global = BotEngine.getInstance().getModule(GlobalExecutor.class);
+        var saved = EarlyResetPreflight.plan(client);
         if (saved != null && saved.tnt() != null && !player.world.getChunkManager()
                 .isChunkLoaded(saved.tnt().getX() >> 4, saved.tnt().getZ() >> 4)) return;
-        TNTSetupPos = calTNTSetupPos(player);
+        if (TNTSetupPos == null) TNTSetupPos = calTNTSetupPos(player);
         if (TNTSetupPos.equals(new BlockPos(-1, -1, -1))) {
-            BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("TNT 布置条件不足：无合适位置");
-            System.out.println("Fredobot: reset because no place to set up TNT");
+            global.resetWorld("TNT 布置条件不足：无合适位置");
             return;
         }
-
-        int TNTSetupPosY = groundYNoLeavesOrTrees(TNTSetupPos);
-        int neededBlockCount = TNTSetupPos.getY() - TNTSetupPosY - 1;
-
-        if (InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks < neededBlockCount) {
-            if (player.isTouchingWater() || player.isSwimming()) {
-                List<BlockPos> lands = MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), 1, 30);
-                if (!lands.isEmpty()) {
-                    BotEngine.getInstance().getModule(PathExecutor.class).setGoal(lands.get(0), "the land pos");
-                } else {
-                    BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("TNT 垫高材料不足：水中找不到草地");
-                    System.out.println("Fredobot: reset because no land found");
-                }
-                return;
-            }
-            MiningHelper.blockToMine.clear();
-            MiningHelper.blockToMine.addAll(MiningHelper.findNearestBlocks(player, new HashSet<>(Collections.singletonList(Blocks.GRASS_BLOCK)), neededBlockCount, 30));
-
-            if (MiningHelper.blockToMine.size() < neededBlockCount) {
-                BotEngine.getInstance().getModule(GlobalExecutor.class).resetWorld("TNT 垫高材料不足：草方块不够");
-                System.out.println("Fredobot : reset because cannot find enough grassblock");
-                return;
-            }
+        int ground = groundYNoLeavesOrTrees(TNTSetupPos);
+        int required = Math.max(0, TNTSetupPos.getY() - ground - 1);
+        int available = InventoryHelper.countAvailableBuildingBlocks(player).pillaringBlocks;
+        if (available >= required) {
+            tntSupplyPlan = null;
+            tntSupplyApproachIssued = false;
             tntQueueGenerated = true;
-            MiningHelper.dispatchNextMineAndCollectTask();
-        } else {
-            tntQueueGenerated = true;
+            return;
         }
+        if (path.isBusy() || misc.isBusy()) return;
+        if (tntSupplyPlan == null) {
+            BlockPos center = new BlockPos(TNTSetupPos.getX(), ground, TNTSetupPos.getZ());
+            tntSupplyPlan = TntPillarSupplySearch.find(center, TNTSetupPos, rejectedTntSupplies, p -> {
+                if (!client.world.getChunkManager().isChunkLoaded(p.getX() >> 4, p.getZ() >> 4)) return false;
+                BlockState state = client.world.getBlockState(p);
+                Block block = state.getBlock();
+                return state.getFluidState().isEmpty() && (block == Blocks.DIRT || block == Blocks.GRAVEL
+                        || block == Blocks.SAND || block == Blocks.GRASS_BLOCK || block == Blocks.COARSE_DIRT);
+            }, p -> tntSupplyStance(client, p));
+            if (tntSupplyPlan == null) {
+                global.resetWorld("TNT 垫高材料不足：TNT 周围没有可挖且可接近的材料，缺少 " + (required - available) + " 块");
+                return;
+            }
+            tntSupplyApproachIssued = false;
+        }
+        if (!tntSupplyApproachIssued) {
+            Set<BlockPos> protectedColumn = new HashSet<>();
+            for (int y = 0; y < 256; y++) protectedColumn.add(new BlockPos(TNTSetupPos.getX(), y, TNTSetupPos.getZ()));
+            tntSupplyFailureSerial = path.getSearchFailureSerial();
+            tntSupplyApproachIssued = true;
+            path.setGoal(tntSupplyPlan.stand(), protectedColumn, "TNT pillar material approach");
+            return;
+        }
+        BlockPos target = tntSupplyPlan.target(), stand = tntSupplyPlan.stand();
+        if (path.getSearchFailureSerial() != tntSupplyFailureSerial
+                || player.squaredDistanceTo(Vec3d.ofBottomCenter(stand)) > 1.0
+                || MiningAim.visibleFace(client.world, player, target) == null) {
+            rejectedTntSupplies.add(target);
+            tntSupplyPlan = null;
+            tntSupplyApproachIssued = false;
+            return;
+        }
+        path.stopAndForgetGoal();
+        MiningHelper.blockToMine.clear();
+        MiningHelper.currentTargetBlocks.clear();
+        MiningHelper.currentTargetBlocks.add(client.world.getBlockState(target).getBlock());
+        rejectedTntSupplies.add(target);
+        tntSupplyPlan = null;
+        tntSupplyApproachIssued = false;
+        // Only this target is mined/collected; the inventory is checked again before choosing another.
+        misc.startTask(MiscController.MiscType.MINE_THE_BLOCK_AND_COLLECT_THE_DROP, target);
+    }
+
+    private static BlockPos tntSupplyStance(MinecraftClient client, BlockPos target) {
+        for (int radius : new int[]{1, 2, 0})
+            for (int dy : new int[]{1, 0, -1, 2})
+                for (int x = -radius; x <= radius; x++)
+                    for (int z = -radius; z <= radius; z++) {
+                        if (Math.max(Math.abs(x), Math.abs(z)) != radius) continue;
+                        BlockPos stand = target.add(x, dy, z);
+                        if (stand.getX() == TNTSetupPos.getX() && stand.getZ() == TNTSetupPos.getZ()
+                                || !WorkbenchApproach.standable(client, stand)) continue;
+                        Vec3d eye = Vec3d.ofBottomCenter(stand).add(0, 1.62, 0);
+                        for (Direction side : Direction.values()) {
+                            Vec3d point = Vec3d.ofCenter(target).add(side.getOffsetX() * .49, side.getOffsetY() * .49, side.getOffsetZ() * .49);
+                            if (eye.squaredDistanceTo(point) > 20.25) continue;
+                            BlockHitResult hit = client.world.rayTrace(new RayTraceContext(eye, point, RayTraceContext.ShapeType.OUTLINE,
+                                    RayTraceContext.FluidHandling.NONE, client.player));
+                            if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target)) return stand;
+                        }
+                    }
+        return null;
     }
 
     public static BlockPos findAProperCraftingTablePos(PlayerEntity player) {
-        World world=player.world;Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
-        for(var offset:SquareSpiral.offsets(4))for(int dy:new int[]{0,1,-1}){
-            BlockPos pos=player.getBlockPos().add(offset.x(),dy,offset.z());
-            if(!world.getChunkManager().isChunkLoaded(pos.getX()>>4,pos.getZ()>>4))continue;
-            BlockState space=world.getBlockState(pos),support=world.getBlockState(pos.down());
-            if(!space.getMaterial().isReplaceable() || !space.getFluidState().isEmpty()
-                    || !Block.isShapeFullCube(support.getCollisionShape(world,pos.down())) || world.getBlockEntity(pos.down())!=null
-                    || player.getBoundingBox().intersects(new Box(pos)))continue;
-            Vec3d point=new Vec3d(pos.getX()+.5,pos.getY()-.01,pos.getZ()+.5);
-            if(eye.squaredDistanceTo(point)>20.25)continue;
-            BlockHitResult hit=world.rayTrace(new RayTraceContext(eye,point,RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
-            if(hit.getType()==HitResult.Type.BLOCK && hit.getBlockPos().equals(pos.down()) && hit.getSide()==Direction.UP)return pos;
-        }
+        World world = player.world;
+        Vec3d eye = new Vec3d(player.getX(), player.getEyeY(), player.getZ());
+        for (var offset : SquareSpiral.offsets(4))
+            for (int dy : new int[]{0, 1, -1}) {
+                BlockPos pos = player.getBlockPos().add(offset.x(), dy, offset.z());
+                if (!world.getChunkManager().isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)) continue;
+                BlockState space = world.getBlockState(pos), support = world.getBlockState(pos.down());
+                if (!space.getMaterial().isReplaceable() || !space.getFluidState().isEmpty()
+                        || !Block.isShapeFullCube(support.getCollisionShape(world, pos.down())) || world.getBlockEntity(pos.down()) != null
+                        || player.getBoundingBox().intersects(new Box(pos))) continue;
+                Vec3d point = new Vec3d(pos.getX() + .5, pos.getY() - .01, pos.getZ() + .5);
+                if (eye.squaredDistanceTo(point) > 20.25) continue;
+                BlockHitResult hit = world.rayTrace(new RayTraceContext(eye, point, RayTraceContext.ShapeType.OUTLINE, RayTraceContext.FluidHandling.NONE, player));
+                if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(pos.down()) && hit.getSide() == Direction.UP)
+                    return pos;
+            }
         return null;
     }
 
@@ -290,16 +357,17 @@ public class BtStuff {
 
 
         if (hasTNT) {
-            var trigger=TntTriggerPolicy.choose(InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL)>=0,
-                    InventoryHelper.countItem(player,Items.FLINT),currentIronCount,currentIronCount>=3,currentGoldCount>=2);
-            if(trigger==TntTriggerPolicy.Trigger.EXISTING_LIGHTER) {
+            var trigger = TntTriggerPolicy.choose(InventoryHelper.findItemSlot(player, Items.FLINT_AND_STEEL) >= 0,
+                    InventoryHelper.countItem(player, Items.FLINT), currentIronCount, currentIronCount >= 3, currentGoldCount >= 2);
+            if (trigger == TntTriggerPolicy.Trigger.EXISTING_LIGHTER) {
                 // Reuse an existing lighter; no trigger recipe required.
-            } else if(trigger==TntTriggerPolicy.Trigger.CRAFT_LIGHTER) {
-                itemsToCraft.add(Items.FLINT_AND_STEEL);currentIronCount--;
-            } else if (trigger==TntTriggerPolicy.Trigger.IRON_PLATE) {
+            } else if (trigger == TntTriggerPolicy.Trigger.CRAFT_LIGHTER) {
+                itemsToCraft.add(Items.FLINT_AND_STEEL);
+                currentIronCount--;
+            } else if (trigger == TntTriggerPolicy.Trigger.IRON_PLATE) {
                 itemsToCraft.add(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
                 currentIronCount -= 2;
-            } else if (trigger==TntTriggerPolicy.Trigger.GOLD_PLATE) {
+            } else if (trigger == TntTriggerPolicy.Trigger.GOLD_PLATE) {
                 itemsToCraft.add(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
                 currentGoldCount -= 2;
             } else {
@@ -343,25 +411,28 @@ public class BtStuff {
 
 
     private static boolean canCraftTntLighter(PlayerEntity player) {
-        int reserved=0;
-        for(Item item:itemsToCraft) {
-            if(item==Items.IRON_PICKAXE || item==Items.IRON_AXE || item==Items.BUCKET)reserved+=3;
-            else if(item==Items.SHEARS || item==Items.IRON_SWORD)reserved+=2;
-            else if(item==Items.IRON_SHOVEL)reserved++;
+        int reserved = 0;
+        for (Item item : itemsToCraft) {
+            if (item == Items.IRON_PICKAXE || item == Items.IRON_AXE || item == Items.BUCKET) reserved += 3;
+            else if (item == Items.SHEARS || item == Items.IRON_SWORD) reserved += 2;
+            else if (item == Items.IRON_SHOVEL) reserved++;
         }
-        return TntTriggerPolicy.choose(false,InventoryHelper.countItem(player,Items.FLINT),
-                InventoryHelper.countItem(player,Items.IRON_INGOT)-reserved,false,false)==TntTriggerPolicy.Trigger.CRAFT_LIGHTER;
+        return TntTriggerPolicy.choose(false, InventoryHelper.countItem(player, Items.FLINT),
+                InventoryHelper.countItem(player, Items.IRON_INGOT) - reserved, false, false) == TntTriggerPolicy.Trigger.CRAFT_LIGHTER;
     }
+
     private static void removeTntTriggerRecipes() {
-        itemsToCraft.remove(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);itemsToCraft.remove(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
-        itemsToCraft.remove(Items.STONE_BUTTON);itemsToCraft.remove(Items.FLINT_AND_STEEL);
+        itemsToCraft.remove(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
+        itemsToCraft.remove(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
+        itemsToCraft.remove(Items.STONE_BUTTON);
+        itemsToCraft.remove(Items.FLINT_AND_STEEL);
     }
 
     public static void lightUpTNT(PlayerEntity player) {
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
         PathExecutor pathExecutor = BotEngine.getInstance().getModule(PathExecutor.class);
-        if(player==null || !player.isAlive() || MinecraftClient.getInstance().world==null) {
-            if(pathExecutor!=null)pathExecutor.stop();
+        if (player == null || !player.isAlive() || MinecraftClient.getInstance().world == null) {
+            if (pathExecutor != null) pathExecutor.stop();
             return;
         }
 
@@ -397,11 +468,15 @@ public class BtStuff {
 
                 switch (tntCraftPhase) {
                     case EVALUATE:
-                        if(InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL)>=0) {
-                            removeTntTriggerRecipes();tntState=TNTState.PLACE_TNT_AND_TRIGGER;break;
+                        if (InventoryHelper.findItemSlot(player, Items.FLINT_AND_STEEL) >= 0) {
+                            removeTntTriggerRecipes();
+                            tntState = TNTState.PLACE_TNT_AND_TRIGGER;
+                            break;
                         }
-                        if(canCraftTntLighter(player)) {
-                            tempCraftTarget=Items.FLINT_AND_STEEL;tntCraftPhase=TNTCraftPhase.CRAFT_TRIGGER;break;
+                        if (canCraftTntLighter(player)) {
+                            tempCraftTarget = Items.FLINT_AND_STEEL;
+                            tntCraftPhase = TNTCraftPhase.CRAFT_TRIGGER;
+                            break;
                         }
                         boolean needIronPlate = itemsToCraft.contains(Items.HEAVY_WEIGHTED_PRESSURE_PLATE);
                         boolean needGoldPlate = itemsToCraft.contains(Items.LIGHT_WEIGHTED_PRESSURE_PLATE);
@@ -447,8 +522,8 @@ public class BtStuff {
                 }
                 break;
             case PLACE_TNT_AND_TRIGGER:
-                tntLootPolicy.remember(player.world,btPos,32);
-                tntLootPolicy.remember(player.world,TNTSetupPos,16);
+                tntLootPolicy.remember(player.world, btPos, 32);
+                tntLootPolicy.remember(player.world, TNTSetupPos, 16);
                 if (player.isOnGround()) {
                     player.jump();
                     break;
@@ -469,12 +544,15 @@ public class BtStuff {
                     player.inventory.selectedSlot = 0;
                     MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity) player, MinecraftClient.getInstance().world, net.minecraft.util.Hand.MAIN_HAND, tntHit);
 
-                    int lighterSlot=InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL);
-                    if(lighterSlot>=0) {
-                        InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(),player,lighterSlot,1);player.inventory.selectedSlot=1;
-                        MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity)player,MinecraftClient.getInstance().world,
-                                net.minecraft.util.Hand.MAIN_HAND,new BlockHitResult(Vec3d.ofCenter(TNTSetupPos),Direction.UP,TNTSetupPos,false));
-                        tntState=TNTState.TAKING_COVER_MOVE;tntWaitTicks=0;break;
+                    int lighterSlot = InventoryHelper.findItemSlot(player, Items.FLINT_AND_STEEL);
+                    if (lighterSlot >= 0) {
+                        InventoryHelper.moveItemToHotbar(MinecraftClient.getInstance(), player, lighterSlot, 1);
+                        player.inventory.selectedSlot = 1;
+                        MinecraftClient.getInstance().interactionManager.interactBlock((ClientPlayerEntity) player, MinecraftClient.getInstance().world,
+                                net.minecraft.util.Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(TNTSetupPos), Direction.UP, TNTSetupPos, false));
+                        tntState = TNTState.TAKING_COVER_MOVE;
+                        tntWaitTicks = 0;
+                        break;
                     }
                     Item triggerItem = Items.OAK_BUTTON;
                     if (InventoryHelper.findItemSlot(player, Items.HEAVY_WEIGHTED_PRESSURE_PLATE) != -1) {
@@ -555,21 +633,58 @@ public class BtStuff {
                 break;
 
             case COLLECT_LOOT:
+                if (tntLootTarget != null && (!tntLootTarget.isAlive() || tntLootTarget.getStack().isEmpty())) {
+                    tntLootTarget = null;
+                    tntLootFirstTier = false;
+                }
+                if (tntLootTarget != null && tntLootFirstTier && pathExecutor.getSearchFailureSerial() != tntLootFailureSerial) {
+                    boolean wood = tntLootTarget.getStack().getItem().isIn(ItemTags.LOGS);
+                    pathExecutor.stopAndForgetGoal();
+                    if (wood) {
+                        globalExecutor.resetWorld("TNT 爆炸后树叶或木头上的木头首级寻路失败");
+                        return;
+                    }
+                    tntLootPolicy.discard(player.world, tntLootTarget);
+                    System.out.println("FredoBot: 放弃树叶或木头上的非木头掉落物：首级寻路失败，pos=" + tntLootTarget.getBlockPos().toShortString());
+                    tntLootTarget = null;
+                    tntLootFirstTier = false;
+                }
                 List<ItemEntity> drops = MinecraftClient.getInstance().world.getEntities(ItemEntity.class, new Box(TNTSetupPos).expand(12.0),
-                        e -> tntLootPolicy.eligible(player.world,e));
+                        e -> tntLootPolicy.eligible(player.world, e));
 
                 if (!drops.isEmpty()) {
                     if (!pathExecutor.isBusy()) {
-                        ItemEntity nearestDrop=tntPickupOrder.next(player,drops);
-                        if(nearestDrop==null){tntState=TNTState.DONE;break;}
+                        List<ItemEntity> settledDrops = new ArrayList<>();
+                        for (ItemEntity drop : drops)
+                            if (DropPickupReadiness.ready(player.world, drop)) settledDrops.add(drop);
+                        // Airborne useful loot is still pending; wait with the world running.
+                        if (settledDrops.isEmpty()) break;
+                        ItemEntity nearestDrop = tntPickupOrder.next(player, settledDrops);
+                        if (nearestDrop == null) {
+                            tntState = TNTState.DONE;
+                            break;
+                        }
                         BlockPos safePos = new BlockPos(nearestDrop.getX(), nearestDrop.getY() + 0.5, nearestDrop.getZ());
-                        pathExecutor.setGoal(safePos, "drop pos");
+                        tntLootTarget = nearestDrop;
+                        tntLootFirstTier = tntLootInLeaves(player.world, nearestDrop);
+                        tntLootFailureSerial = pathExecutor.getSearchFailureSerial();
+                        pathExecutor.setGoal(safePos, tntLootFirstTier ? "tnt foliage loot" : "drop pos");
                     }
                 } else {
                     tntState = TNTState.DONE;
                 }
                 break;
         }
+    }
+
+    private static boolean tntLootInLeaves(World world, ItemEntity drop) {
+        Box body = drop.getBoundingBox();
+        for (int x = (int) Math.floor(body.minX); x <= (int) Math.floor(body.maxX - 1e-6); x++)
+            for (int y = (int) Math.floor(body.minY - .05); y <= (int) Math.floor(body.maxY - 1e-6); y++)
+                for (int z = (int) Math.floor(body.minZ); z <= (int) Math.floor(body.maxZ - 1e-6); z++)
+                    if (world.getBlockState(new BlockPos(x, y, z)).isIn(BlockTags.LEAVES)
+                            || world.getBlockState(new BlockPos(x, y, z)).isIn(BlockTags.LOGS)) return true;
+        return false;
     }
 
     private static List<SimplePathfinder.Node> calcTakeCoverBehave(BlockPos coverPos) {
@@ -649,7 +764,7 @@ public class BtStuff {
                         return;
                     }
                 }
-                TntLootPolicy.rememberExcavation(minecraftClient.world,btPos);
+                TntLootPolicy.rememberExcavation(minecraftClient.world, btPos);
                 globalExecutor.currentState = GlobalExecutor.GlobalState.LOOKING_FOR_TREES;
                 break;
 
@@ -660,10 +775,14 @@ public class BtStuff {
                     MiningHelper.dispatchNextMineAndCollectTask();
                     break;
                 }
+                if (hasTNT && !tntQueueGenerated) {
+                    TNTSetupStaffs(player);
+                    break;
+                }
                 if (!treeQueueGenerated) {
                     if (pathExecutor.isBusy()) break;
                     if (hasTNT) {
-                        if (itemsToCraft.contains(Items.STONE_BUTTON) && InventoryHelper.findItemSlot(player,Items.FLINT_AND_STEEL)<0
+                        if (itemsToCraft.contains(Items.STONE_BUTTON) && InventoryHelper.findItemSlot(player, Items.FLINT_AND_STEEL) < 0
                                 && !canCraftTntLighter(player)) {
                             MiningHelper.mineAndCollect(player, InventoryHelper.anyLogs, 1, 100);
                         }
@@ -675,12 +794,6 @@ public class BtStuff {
                 }
 
                 if (hasTNT) {
-                    if (!tntQueueGenerated) {
-                        if (pathExecutor.isBusy()) break;
-                        TNTSetupStaffs(player);
-                        break;
-                    }
-
                     if (tntState == TNTState.INIT) {
                         double dX = player.getX() - (TNTSetupPos.getX() + 0.5);
                         double dZ = player.getZ() - (TNTSetupPos.getZ() + 0.5);
@@ -748,8 +861,8 @@ public class BtStuff {
                         break;
 
                     case PLACE_TABLE:
-                        if(pathExecutor.isBusy())return;
-                        if (itemsToCraft.isEmpty()&&InventoryHelper.findItemSlot(player,Items.CRAFTING_TABLE)==-1) {
+                        if (pathExecutor.isBusy()) return;
+                        if (itemsToCraft.isEmpty() && InventoryHelper.findItemSlot(player, Items.CRAFTING_TABLE) == -1) {
                             btCraftPhase = BtCraftPhase.BREAK_TABLE;
                             break;
                         }
@@ -763,7 +876,7 @@ public class BtStuff {
                         InventoryHelper.moveItemToHotbar(minecraftClient, player, tableSlot, 4);
                         craftingTablePos = findAProperCraftingTablePos(player);
                         workbenchAnchor = craftingTablePos;
-                        workbenchRequest=null;
+                        workbenchRequest = null;
                         rejectedWorkbenchStances.clear();
                         if (craftingTablePos == null) {
                             globalExecutor.resetWorld("无法放置工作台");
@@ -783,7 +896,7 @@ public class BtStuff {
 
                         // 放置工作台
                         BlockHitResult placeHit = new BlockHitResult(tableTopCenter, Direction.UP, craftingTablePos.down(), false);
-                        if(minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit) != ActionResult.SUCCESS){
+                        if (minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, net.minecraft.util.Hand.MAIN_HAND, placeHit) != ActionResult.SUCCESS) {
                             System.out.println("Fredodebug: fail to place the crafting table, trying to move");
                             List<SimplePathfinder.Node> customeNodeList = calcCraftingTableUnblockMove(player);
                             pathExecutor.executeCustomPath(customeNodeList);
@@ -976,49 +1089,49 @@ public class BtStuff {
                             MiningHelper.blockToMine.remove(craftingTablePos);
                         }
 
-                        BlockHitResult returnHit=WorkbenchApproach.interaction(minecraftClient,craftingTablePos,
-                                new Vec3d(player.getX(),player.getEyeY(),player.getZ()));
-                        if(returnHit==null || !player.isOnGround()){
-                            if(!MiningHelper.blockToMine.isEmpty()){
+                        BlockHitResult returnHit = WorkbenchApproach.interaction(minecraftClient, craftingTablePos,
+                                new Vec3d(player.getX(), player.getEyeY(), player.getZ()));
+                        if (returnHit == null || !player.isOnGround()) {
+                            if (!MiningHelper.blockToMine.isEmpty()) {
                                 MiningHelper.dispatchNextMineAndCollectTask();
                                 break;
                             }
-                            if(workbenchRequest!=null && !workbenchRequest.finished())return;
-                            if(workbenchRequest!=null && workbenchRequest.cancelled()){
-                                workbenchRequest=null;
+                            if (workbenchRequest != null && !workbenchRequest.finished()) return;
+                            if (workbenchRequest != null && workbenchRequest.cancelled()) {
+                                workbenchRequest = null;
                                 return;
                             }
-                            if(workbenchRequest!=null){
-                                BlockPos stand=workbenchRequest.position();
-                                if(stand==null){
-                                    workbenchRequest=null;
+                            if (workbenchRequest != null) {
+                                BlockPos stand = workbenchRequest.position();
+                                if (stand == null) {
+                                    workbenchRequest = null;
                                     globalExecutor.resetWorld("工作台周围没有可站立且能交互的位置");
                                     return;
                                 }
                                 // Do not revisit an attempted stance if arrival still cannot interact.
                                 rejectedWorkbenchStances.add(stand);
-                                workbenchRequest=null;
-                                if(WorkbenchApproach.standable(minecraftClient,stand))
-                                    pathExecutor.setGoal(stand,Collections.singleton(craftingTablePos),"crafting table interaction stance");
+                                workbenchRequest = null;
+                                if (WorkbenchApproach.standable(minecraftClient, stand))
+                                    pathExecutor.setGoal(stand, Collections.singleton(craftingTablePos), "crafting table interaction stance");
                                 return;
                             }
-                            MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
-                            if(movement!=null)movement.resetKeys();
-                            BlockPos requestedTable=craftingTablePos;
-                            workbenchRequest=WorkbenchApproach.begin(minecraftClient,requestedTable,rejectedWorkbenchStances,
-                                    ()->btCraftPhase==BtCraftPhase.RETURN_TO_TABLE && requestedTable.equals(craftingTablePos));
+                            MovementController movement = BotEngine.getInstance().getModule(MovementController.class);
+                            if (movement != null) movement.resetKeys();
+                            BlockPos requestedTable = craftingTablePos;
+                            workbenchRequest = WorkbenchApproach.begin(minecraftClient, requestedTable, rejectedWorkbenchStances,
+                                    () -> btCraftPhase == BtCraftPhase.RETURN_TO_TABLE && requestedTable.equals(craftingTablePos));
                             return;
                         }
                         WorkbenchApproach.cancel();
-                        workbenchRequest=null;
+                        workbenchRequest = null;
                         rejectedWorkbenchStances.clear();
-                        if(!MiningHelper.blockToMine.isEmpty())MiningHelper.blockToMine.clear();
-                        if(pathExecutor.isBusy())pathExecutor.stop();
-                        MovementController movement=BotEngine.getInstance().getModule(MovementController.class);
-                        if(movement!=null)movement.resetKeys();
-                        WorkbenchApproach.face(player,returnHit.getPos());
+                        if (!MiningHelper.blockToMine.isEmpty()) MiningHelper.blockToMine.clear();
+                        pathExecutor.stopAndForgetGoal();
+                        MovementController movement = BotEngine.getInstance().getModule(MovementController.class);
+                        if (movement != null) movement.resetKeys();
+                        WorkbenchApproach.face(player, returnHit.getPos());
                         System.out.println("FredoBot: 已到达工作台交互站位，准备打开...");
-                        minecraftClient.interactionManager.interactBlock(player,minecraftClient.world,Hand.MAIN_HAND,returnHit);
+                        minecraftClient.interactionManager.interactBlock(player, minecraftClient.world, Hand.MAIN_HAND, returnHit);
 
                         craftingWaitTicks = 10;
                         btCraftPhase = BtCraftPhase.OPEN_TABLE_RETURN;
@@ -1034,6 +1147,10 @@ public class BtStuff {
                         }
                         break;
                     case BREAK_TABLE:
+                        WorkbenchApproach.cancel();
+                        workbenchRequest = null;
+                        rejectedWorkbenchStances.clear();
+                        pathExecutor.stopAndForgetGoal();
                         player.closeHandledScreen();
                         minecraftClient.openScreen(null);
                         InventoryHelper.putAxeToHotbar(player);
@@ -1054,7 +1171,7 @@ public class BtStuff {
                         boolean hasShears = InventoryHelper.findItemSlot(player, Items.SHEARS) != -1;
                         int currentLeaves = InventoryHelper.countItem(player, net.minecraft.tag.ItemTags.LEAVES);
                         if (!hasShears || currentLeaves >= 64 || MiningHelper.harvestExhaustedIn(minecraftClient.world)) {
-                            if(MiningHelper.harvestExhaustedIn(minecraftClient.world) && currentLeaves<64) {
+                            if (MiningHelper.harvestExhaustedIn(minecraftClient.world) && currentLeaves < 64) {
                                 System.out.println("FredoBot: no further safe harvest target or usable shears; continue without repeating the same search");
                             } else if (!hasShears) {
                                 System.out.println("FredoBot : no shears go next");
@@ -1085,16 +1202,7 @@ public class BtStuff {
                         }
                         break;
                     case INVENTORY_MANAGEMENT:
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, AxeItem.class, 0);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, PickaxeItem.class, 1);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, ShovelItem.class, 2);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.BUCKET, 3);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.COOKED_SALMON, 4);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.COOKED_COD, 4);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, false), 5);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, false), 6);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, true), 6);
-                        InventoryHelper.moveItemToHotbar(minecraftClient, player, BoatItem.class, 7);
+                        InventoryHelper.inventoryManagement();
                         InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.doorType, 8);
                         globalExecutor.currentState = GlobalExecutor.GlobalState.PRE_NETHER;
                         System.out.println("Fredobot: Inventory management done");
@@ -1106,7 +1214,7 @@ public class BtStuff {
 
     private static List<SimplePathfinder.Node> calcCraftingTableUnblockMove(ClientPlayerEntity player) {
         List<SimplePathfinder.Node> result = new ArrayList<>();
-        BlockPos pos = new BlockPos(Math.floor(player.getX()),player.getY(),Math.floor(player.getZ()));
+        BlockPos pos = new BlockPos(Math.floor(player.getX()), player.getY(), Math.floor(player.getZ()));
         result.add(new SimplePathfinder.Node(pos, null, null, 0, 0, SimplePathfinder.MovementState.WALKING, 0));
         return result;
     }

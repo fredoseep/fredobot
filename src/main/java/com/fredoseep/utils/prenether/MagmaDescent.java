@@ -1,9 +1,9 @@
 package com.fredoseep.utils.prenether;
 
 import com.fredoseep.algorithm.planning.ShaftCenterControl;
+import com.fredoseep.algorithm.planning.ShaftWaterCenterControl;
 import com.fredoseep.algorithm.planning.MagmaEntryControl;
 import com.fredoseep.algorithm.planning.ShaftColumnLock;
-import com.fredoseep.algorithm.planning.WaterSteering;
 import com.fredoseep.logging.GlobalStateLogger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,11 +18,10 @@ import net.minecraft.client.options.KeyBinding;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.tag.FluidTags;
 import net.minecraft.util.Hand;
-import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.Direction;
 import net.minecraft.block.BlockState;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.RayTraceContext;
 import net.minecraft.world.World;
 
 /** Default magma travel: approach the column, then descend and mine vertically. */
@@ -122,7 +121,10 @@ public final class MagmaDescent {
             }
             if(++entryAlignTicks>200){fail(client,"PORTAL_ENTRY_NOT_SETTLED");return;}
             if(!settled){
-                var input=MagmaEntryControl.align(dx,dz,velocity.x,velocity.z,player.yaw);
+                boolean wet=player.isTouchingWater() || player.isSwimming();
+                var input=wet?ShaftWaterCenterControl.align(dx,dz,velocity.x,velocity.z,player.yaw,true)
+                        :MagmaEntryControl.align(dx,dz,velocity.x,velocity.z,player.yaw);
+                if(wet){player.yaw=input.yaw();player.pitch=input.pitch();}
                 key(client.options.keyForward,input.forward());key(client.options.keyBack,input.back());
                 key(client.options.keyLeft,input.left());key(client.options.keyRight,input.right());
             }
@@ -140,8 +142,8 @@ public final class MagmaDescent {
         boolean locked=columnLock.update(dx,dz,Math.max(body.maxX-body.minX,body.maxZ-body.minZ)*.5);
         if(!locked){
             if(waterDrive){
-                var aim=WaterSteering.aim(dx,-2,dz,velocity.x,velocity.y,velocity.z,0,0,0,player.yaw);
-                player.yaw=aim.yaw();player.pitch=aim.pitch();
+                var input=ShaftWaterCenterControl.align(dx,dz,velocity.x,velocity.z,player.yaw,false);
+                player.yaw=input.yaw();player.pitch=input.pitch();
                 swimDown(client,player);status(player,"SWIM_TO_COLUMN",null);
             }else{
                 var input=ShaftCenterControl.align(dx,dz,velocity.x,velocity.z,
@@ -156,7 +158,7 @@ public final class MagmaDescent {
         // Continue straight down even while touching the floor: do not brake out of swimming.
         player.pitch=90;
         if(waterDrive)swimDown(client,player);
-        // Water plants have outline/ray collisions even when their physical collision is empty.
+        // Clear plants in the descent column even when their physical collision is empty.
         if(clearWaterPlant(client,player))return;
         BlockPos dig=new BlockPos(goal.getX(),player.getY()-.1,goal.getZ());
         if(dig.getY()<goal.getY())return; // Never break the destination magma block.
@@ -182,14 +184,7 @@ public final class MagmaDescent {
             sealingTicks=0;
             status(player,waterDrive && body.maxY-body.minY>1.0?"MINING_STANDING_WATER":"MINING",dig);
             player.pitch=90;
-            Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ()),look=player.getRotationVec(1F);
-            var hit=world.rayTrace(new RayTraceContext(eye,new Vec3d(eye.x+look.x*4.5,eye.y+look.y*4.5,eye.z+look.z*4.5),
-                    RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
-            if(hit.getType()==HitResult.Type.BLOCK && hit.getBlockPos().equals(dig)) {
-                ToolsHelper.equipBestTool(player,dig,false);
-                client.interactionManager.updateBlockBreakingProgress(dig,hit.getSide());
-                if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
-            }
+            mineColumnBlock(client,player,dig);
         } else {
             status(player,"WATER_DESCENT",dig);
             player.pitch=90;
@@ -197,16 +192,28 @@ public final class MagmaDescent {
         }
     }
     private boolean clearWaterPlant(MinecraftClient client,PlayerEntity player){
-        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
-        var hit=world.rayTrace(new RayTraceContext(eye,eye.add(0,-4.5,0),RayTraceContext.ShapeType.OUTLINE,RayTraceContext.FluidHandling.NONE,player));
-        if(hit.getType()!=HitResult.Type.BLOCK)return false;
-        BlockPos pos=hit.getBlockPos();BlockState state=world.getBlockState(pos);
+        // Check only the occupied column near the body, never raycast through plants.
+        int bottom=Math.max(goal.getY(),(int)Math.floor(player.getY()-.1));
+        int top=(int)Math.floor(player.getBoundingBox().maxY);
+        for(int y=top;y>=bottom;y--){
+            BlockPos pos=new BlockPos(goal.getX(),y,goal.getZ());
+            BlockState state=world.getBlockState(pos);
+            if(state.getBlock()!=Blocks.SEAGRASS && state.getBlock()!=Blocks.TALL_SEAGRASS
+                    && state.getBlock()!=Blocks.KELP && state.getBlock()!=Blocks.KELP_PLANT)continue;
+            if(mineColumnBlock(client,player,pos)){
+                status(player,"CLEARING_WATER_PLANT",pos);return true;
+            }
+        }
+        return false;
+    }
+    private boolean mineColumnBlock(MinecraftClient client,PlayerEntity player,BlockPos pos){
         if(pos.getX()!=goal.getX() || pos.getZ()!=goal.getZ() || pos.getY()<goal.getY())return false;
-        if(state.getBlock()!=Blocks.SEAGRASS && state.getBlock()!=Blocks.TALL_SEAGRASS
-                && state.getBlock()!=Blocks.KELP && state.getBlock()!=Blocks.KELP_PLANT)return false;
-        status(player,"CLEARING_WATER_PLANT",pos);ToolsHelper.equipBestTool(player,pos,false);
-        client.interactionManager.updateBlockBreakingProgress(pos,hit.getSide());
-        if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);return true;
+        Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
+        if(eye.squaredDistanceTo(Vec3d.ofCenter(pos))>20.25)return false;
+        ToolsHelper.equipBestTool(player,pos,false);
+        client.interactionManager.updateBlockBreakingProgress(pos,Direction.UP);
+        if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
+        return true;
     }
     private static void swimDown(MinecraftClient client,PlayerEntity player){
         key(client.options.keyForward,true);key(client.options.keySprint,true);

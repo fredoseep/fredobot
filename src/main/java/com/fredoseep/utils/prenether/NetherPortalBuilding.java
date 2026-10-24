@@ -1,8 +1,11 @@
 package com.fredoseep.utils.prenether;
 
+import com.fredoseep.Test;
 import com.fredoseep.algorithm.SimplePathfinder;
 import com.fredoseep.algorithm.planning.DoorPlacementGuard;
 import com.fredoseep.algorithm.planning.PortalClearanceGeometry;
+import net.minecraft.block.FallingBlock;
+import net.minecraft.tag.FluidTags;
 import com.fredoseep.algorithm.planning.PortalPositioningGeometry;
 import net.minecraft.block.enums.DoubleBlockHalf;
 import com.fredoseep.logging.GlobalStateLogger;
@@ -56,6 +59,8 @@ public class NetherPortalBuilding {
     private static Direction activePlaceDirection = null;
     private static boolean initGestureAdjusted = false;
     private static boolean againstTheDoor = false;
+    private static String clearanceStatus="";
+    private static int alignedLavaRetryTick=-1;
     private static final DoorPlacementGuard doorPlacementGuard=new DoorPlacementGuard();
     private static int positioningBackTicks,positioningStillTicks,positioningSideStableTicks;
     private static double positioningLastBackCoordinate=Double.NaN;
@@ -82,6 +87,7 @@ public class NetherPortalBuilding {
         activeGrabPos = null;
         initGestureAdjusted = false;
         againstTheDoor = false;
+        clearanceStatus="";alignedLavaRetryTick=-1;
         doorPlacementGuard.clear();positioningBackTicks=positioningStillTicks=positioningSideStableTicks=0;
         positioningLastBackCoordinate=Double.NaN;
         KeyBinding.setKeyPressed(MinecraftClient.getInstance().options.keyLeft.getDefaultKey(), false);
@@ -90,7 +96,7 @@ public class NetherPortalBuilding {
     }
 
     public enum TwoByOneBuildState {
-        IDLE, CLEARING_AREA, SETTING_UP_HIT_POINT, SETTING_UP_DOOR, ADJUSTING_STANDING_POINT, BREAKING_FIRST_MAGMA_BLOCK, QUADRUPLE_GRAB, SEALING_SPACE, FIRST_WATER_MOVE, SECOND_WATER_MOVE,PENDING, THIRD_WATER_MOVE, FOURTH_WATER_MOVE, CLEARING_SPACE,POSITIONING,FORCING_FLINT, CRAFTING_LIGHTER, NEXT, LIGHTING;
+        IDLE, SETTING_UP_FIRST_DOOR, ENTERING_CLEARANCE_DOOR, CLEARING_AREA, SETTING_UP_HIT_POINT, SETTING_UP_DOOR, ADJUSTING_STANDING_POINT, BREAKING_FIRST_MAGMA_BLOCK, QUADRUPLE_GRAB, SEALING_SPACE, FIRST_WATER_MOVE, SECOND_WATER_MOVE,PENDING, THIRD_WATER_MOVE, FOURTH_WATER_MOVE, CLEARING_SPACE,POSITIONING,FORCING_FLINT, CRAFTING_LIGHTER, NEXT, LIGHTING;
     }
 
     public static TwoByOneBuildState currentTBOState = TwoByOneBuildState.IDLE;
@@ -108,20 +114,26 @@ public class NetherPortalBuilding {
     public static void twoByOneBuild() {
         MinecraftClient client = MinecraftClient.getInstance();
         GlobalExecutor globalExecutor = BotEngine.getInstance().getModule(GlobalExecutor.class);
+        boolean pathPositioning=currentTBOState==TwoByOneBuildState.POSITIONING;
+        boolean clearancePositioning=currentTBOState==TwoByOneBuildState.SETTING_UP_FIRST_DOOR
+                || currentTBOState==TwoByOneBuildState.ENTERING_CLEARANCE_DOOR
+                || currentTBOState==TwoByOneBuildState.CLEARING_AREA;
+        // The path executor owns all movement while entering the finished portal shaft.
+        if(pathPositioning && pathExecutor.isBusy())return;
         if(currentTBOState!=TwoByOneBuildState.ADJUSTING_STANDING_POINT)stopPositioning(client);
-        boolean sneak = currentTBOState==TwoByOneBuildState.ADJUSTING_STANDING_POINT
-                || client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK;
-        if (client.player.isSwimming()) {
+        boolean sneak = !pathPositioning && (currentTBOState==TwoByOneBuildState.ADJUSTING_STANDING_POINT
+                || client.world.getBlockState(client.player.getBlockPos().down()).getBlock() == Blocks.MAGMA_BLOCK);
+        if (!pathPositioning && !clearancePositioning && client.player.isSwimming()) {
             MovementController.setLookDirection(client.player, client.player.yaw, -90);
             initGestureAdjusted = false;
             sneak = false;
         }
-        if (!initGestureAdjusted) {
+        if (!pathPositioning && !initGestureAdjusted) {
             KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), sneak);
             initGestureAdjusted = true;
             return;
         }
-        if (client.player.pitch == -90) client.player.pitch = 2;
+        if (!pathPositioning && client.player.pitch == -90) client.player.pitch = 2;
         KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(), sneak);
 
 
@@ -142,20 +154,43 @@ public class NetherPortalBuilding {
                 } else System.out.println("Fredodebug: alignedMagmaPos : " + PreNether.alignedMagmaPos.toShortString());
                 magmaSideMiddleFragmentPos = PreNether.magmaPos.offset(PreNether.fromMagmaToAligned.getOpposite());
                 alignedSideMiddleFragmentPos = PreNether.alignedMagmaPos.offset(PreNether.fromMagmaToAligned);
-                currentTBOState = TwoByOneBuildState.CLEARING_AREA;
+                clearanceStatus="";alignedLavaRetryTick=-1;
+                currentTBOState = TwoByOneBuildState.SETTING_UP_FIRST_DOOR;
                 break;
+            case SETTING_UP_FIRST_DOOR:
+                if(!ensurePortalDoor(client,PreNether.magmaPos,2))return;
+                
+                currentTBOState=TwoByOneBuildState.ENTERING_CLEARANCE_DOOR;
+                GlobalStateLogger.logCustomEvent("portal_clearance_first_door_ready",Map.of("door",PreNether.magmaPos.up().toShortString()));
+                return;
+            case ENTERING_CLEARANCE_DOOR:
+                if(!portalDoorMatches(client,PreNether.magmaPos)){
+                    doorPlacementGuard.clear();
+                    currentTBOState=TwoByOneBuildState.SETTING_UP_FIRST_DOOR;return;
+                }
+                if(!holdClearanceDoor(client))return;
+                currentTBOState=TwoByOneBuildState.CLEARING_AREA;
+                GlobalStateLogger.logCustomEvent("portal_clearance_entered_door",Map.of("pos",client.player.getPos().toString()));
+                return;
             case CLEARING_AREA:
-                if (areaNotClear()) {
-                    if (twoByOneAreaClearPos.isEmpty()) {
-                        System.out.println("Fredodebug: twoByOneAreaClearPos is empty ");
-                        return;
+                if(!portalDoorMatches(client,PreNether.magmaPos)){
+                    doorPlacementGuard.clear();
+                    currentTBOState=TwoByOneBuildState.SETTING_UP_FIRST_DOOR;return;
+                }
+                if(!holdClearanceDoor(client))return;
+                boolean blocked=areaNotClear();
+                if(blocked){
+                    String status="MINING";
+                    if(!status.equals(clearanceStatus)){
+                        clearanceStatus=status;
+                        GlobalStateLogger.logCustomEvent("portal_clearance_progress",Map.of("phase",status,
+                                "remaining",twoByOneAreaClearPos.size()));
                     }
-                    System.out.println("Fredodebug: twoByOneAreaClearPos: " + twoByOneAreaClearPos.toString());
-                    BlockPos currentPos = twoByOneAreaClearPos.getFirst();
-                    ToolsHelper.equipBestTool(client.player, currentPos, false);
-                    System.out.println("Fredodubug: clearing area Pos: " + currentPos.toShortString() + " state: " + client.interactionManager.updateBlockBreakingProgress(currentPos, Direction.UP));
+                    mineClearanceBlock(client);
                     return;
                 }
+                client.interactionManager.cancelBlockBreaking();
+                GlobalStateLogger.logCustomEvent("portal_clearance_complete",Map.of("pos",client.player.getPos().toString()));
                 currentTBOState = TwoByOneBuildState.SETTING_UP_HIT_POINT;
                 break;
             case SETTING_UP_HIT_POINT:
@@ -182,6 +217,16 @@ public class NetherPortalBuilding {
             case SETTING_UP_DOOR:
                 if(!ensurePortalDoor(client,PreNether.magmaPos,2))return;
                 BlockPos secondDoorBasePos=secondDoorBase();
+                if(secondDoorSpaceBlocked(client,secondDoorBasePos)){
+                    doorPlacementGuard.clear();
+                    GlobalStateLogger.logCustomEvent("portal_second_door_clearance_required",Map.of(
+                            "door",secondDoorBasePos.up().toShortString(),
+                            "lower",client.world.getBlockState(secondDoorBasePos.up()).toString(),
+                            "upper",client.world.getBlockState(secondDoorBasePos.up(2)).toString(),
+                            "gravity_cover",client.world.getBlockState(secondDoorBasePos.up(3)).toString()));
+                    currentTBOState=TwoByOneBuildState.CLEARING_AREA;
+                    return;
+                }
                 if(!ensurePortalDoor(client,secondDoorBasePos,1))return;
                 // The second door is placed while facing backwards; restore the approach direction.
                 facePortalApproach(client);
@@ -290,23 +335,17 @@ public class NetherPortalBuilding {
 
                 //==================================================================
 
+                // This is a frame cell, never a temporary building-block support.
+                BlockPos alignedFrame = alignedSideMiddleFragmentPos.up();
+                BlockState alignedFrameState = client.world.getBlockState(alignedFrame);
+                if (alignedFrameState.getMaterial().isSolid() && alignedFrameState.getBlock() != Blocks.OBSIDIAN) {
+                    ToolsHelper.equipBestTool(client.player, alignedFrame, false);
+                    client.interactionManager.updateBlockBreakingProgress(alignedFrame, Direction.UP);
+                    if (!client.player.handSwinging) client.player.swingHand(Hand.MAIN_HAND);
+                    return;
+                }
+                if(!ensureAlignedLavaFrame(client,alignedFrame))return;
                 client.player.inventory.selectedSlot = 3;
-                if (client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock() == Blocks.LAVA && client.world.getFluidState(PreNether.alignedMagmaPos.down()).isStill()) {
-                    float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.alignedMagmaPos.down());
-                    client.player.yaw = angles[0];
-                    client.player.pitch = angles[1];
-                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
-                    System.out.println("Fredodebug: third lava grab: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
-                    return;
-                }
-                if (client.player.inventory.getStack(3).getItem() == Items.LAVA_BUCKET && client.world.getBlockState(alignedSideMiddleFragmentPos.up()).getBlock() != Blocks.OBSIDIAN && client.world.getBlockState(alignedSideMiddleFragmentPos.up()).getBlock() != Blocks.LAVA) {
-                    float[] angles = MiningHelper.getValidMiningAngleForFace(client.player, alignedSideMiddleFragmentPos, Direction.UP);
-                    client.player.yaw = angles[0];
-                    client.player.pitch = angles[1];
-                    client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0], angles[1], client.player.isOnGround()));
-                    System.out.println("Fredodebug: third lava place: " + client.interactionManager.interactItem(client.player, client.world, Hand.MAIN_HAND));
-                    return;
-                }
                 if (client.world.getBlockState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down()).getBlock() == Blocks.LAVA && client.world.getFluidState(PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down()).isStill()) {
                     float[] angles = MiningHelper.getValidFluidAngle(client.player, PreNether.alignedMagmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned)).down());
                     client.player.yaw = angles[0];
@@ -316,9 +355,10 @@ public class NetherPortalBuilding {
                     return;
                 }
 
+                // The frame is confirmed before grabbing the next bucket or placing its upper support.
                 if (!client.world.getBlockState(alignedSideMiddleFragmentPos.up(2)).getMaterial().isSolid()) {
                     InventoryHelper.selectBuildingBlock(client.player, true);
-                    BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(alignedSideMiddleFragmentPos.up()), Direction.UP, alignedSideMiddleFragmentPos.up(), false);
+                    BlockHitResult blockHitResult = new BlockHitResult(Vec3d.ofCenter(alignedFrame).add(0, .5, 0), Direction.UP, alignedFrame, false);
                     client.interactionManager.interactBlock(client.player, client.world, Hand.MAIN_HAND, blockHitResult);
                     return;
                 }
@@ -448,6 +488,11 @@ public class NetherPortalBuilding {
                 pathExecutor.executeCustomPath(positioningBehave);
                 break;
             case FORCING_FLINT:
+                if(client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock()==Blocks.GRAVEL){
+                    ToolsHelper.equipBestTool(client.player,PreNether.alignedMagmaPos.down(),true);
+                    client.interactionManager.updateBlockBreakingProgress(PreNether.alignedMagmaPos.down(),Direction.UP);
+                    break;
+                }
                 if(InventoryHelper.findItemSlot(client.player,Items.FLINT)!=-1||hasLighter()){
                     currentTBOState = TwoByOneBuildState.CRAFTING_LIGHTER;
                     break;
@@ -457,14 +502,10 @@ public class NetherPortalBuilding {
                     globalExecutor.resetWorld("地狱门施工：缺少沙砾");
                     return;
                 }
-                if(client.world.getBlockState(PreNether.alignedMagmaPos.down()).getBlock()==Blocks.GRAVEL){
-                    ToolsHelper.equipBestTool(client.player,PreNether.alignedMagmaPos.down(),true);
-                    client.interactionManager.updateBlockBreakingProgress(PreNether.alignedMagmaPos.down(),Direction.UP);
-                    break;
-                }
+
                 InventoryHelper.moveItemToHotbar(client,client.player,Items.GRAVEL,6);
                 client.player.inventory.selectedSlot = 6;
-                BlockHitResult blockHitResult1 = new BlockHitResult(Vec3d.ofCenter(PreNether.alignedMagmaPos.down(2)),Direction.UP,PreNether.alignedMagmaPos,false);
+                BlockHitResult blockHitResult1 = new BlockHitResult(Vec3d.ofCenter(PreNether.alignedMagmaPos.down(2)),Direction.UP,PreNether.alignedMagmaPos.down(),false);
                 client.interactionManager.interactBlock(client.player,client.world,Hand.MAIN_HAND,blockHitResult1);
                 break;
             case CRAFTING_LIGHTER:
@@ -499,6 +540,7 @@ public class NetherPortalBuilding {
                 }
                 break;
             case NEXT:
+                globalExecutor.currentState = GlobalExecutor.GlobalState.ANALYZE_THE_BASTION;
                 break;
         }
     }
@@ -521,6 +563,50 @@ public class NetherPortalBuilding {
         client.player.yaw=RelevantDirectionHelper.getYawFromDirection(PreNether.fromMagmaToAligned);
         client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(client.player.yaw,client.player.pitch,client.player.isOnGround()));
     }
+    /** Confirm the third frame before the next grab; a client-side lava prediction is not completion. */
+    private static boolean ensureAlignedLavaFrame(MinecraftClient client,BlockPos target){
+        BlockState state=client.world.getBlockState(target);
+        if(state.getBlock()==Blocks.OBSIDIAN){alignedLavaRetryTick=-1;return true;}
+        int tick=client.player.age;
+        if(alignedLavaRetryTick>=0 && tick>=alignedLavaRetryTick && tick-alignedLavaRetryTick<10)return false;
+        client.player.inventory.selectedSlot=3;
+        Item held=client.player.inventory.getStack(3).getItem();
+        float[] angles;String action;
+        if(held==Items.LAVA_BUCKET){
+            // Retry even if the client still displays lava: the full bucket may be a server correction.
+            angles=MiningHelper.getValidMiningAngleForFace(client.player,alignedSideMiddleFragmentPos,Direction.UP);
+            action="RETRY_PLACE";
+        }else if(held==Items.BUCKET){
+            if(state.getBlock()==Blocks.LAVA && client.world.getFluidState(target).isStill()){
+                angles=MiningHelper.getValidFluidAngle(client.player,target);
+                action="RECOVER_UNCONFIRMED_LAVA";
+            }else{
+                BlockPos source=PreNether.alignedMagmaPos.down();
+                if(!isLavaSource(source) || !client.world.getFluidState(source).isStill())source=findLavaSource();
+                if(source==null){
+                    alignedLavaRetryTick=tick;
+                    GlobalStateLogger.logCustomEvent("portal_aligned_lava_recovery",Map.of("target",target.toShortString(),
+                            "state",state.toString(),"held",held.toString(),"action","WAIT_SOURCE"));
+                    return false;
+                }
+                angles=MiningHelper.getValidFluidAngle(client.player,source);
+                action="REFILL_BUCKET";
+            }
+        }else{
+            alignedLavaRetryTick=tick;
+            GlobalStateLogger.logCustomEvent("portal_aligned_lava_recovery",Map.of("target",target.toShortString(),
+                    "state",state.toString(),"held",held.toString(),"action","WAIT_BUCKET_SYNC"));
+            return false;
+        }
+        alignedLavaRetryTick=tick;
+        client.player.yaw=angles[0];client.player.pitch=angles[1];
+        client.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.LookOnly(angles[0],angles[1],client.player.isOnGround()));
+        var result=client.interactionManager.interactItem(client.player,client.world,Hand.MAIN_HAND);
+        GlobalStateLogger.logCustomEvent("portal_aligned_lava_recovery",Map.of("target",target.toShortString(),
+                "state",state.toString(),"held",held.toString(),"action",action,"result",result.toString()));
+        return false;
+    }
+
     private static BlockPos secondDoorBase(){
         return PreNether.magmaPos.offset(RelevantDirectionHelper.getRightDirection(PreNether.fromMagmaToAligned).getOpposite());
     }
@@ -536,6 +622,33 @@ public class NetherPortalBuilding {
                 && upper.get(DoorBlock.FACING)==portalDoorFacing(base)
                 && !lower.get(DoorBlock.OPEN) && !upper.get(DoorBlock.OPEN);
     }
+    /** Clear the intended closed door slab before sending a placement interaction. */
+    private static boolean yieldPrimaryDoorSpace(MinecraftClient client,BlockPos base){
+        Direction facing=portalDoorFacing(base);
+        BlockPos door=base.up();
+        BlockState intended=Blocks.OAK_DOOR.getDefaultState().with(DoorBlock.FACING,facing)
+                .with(DoorBlock.OPEN,false).with(DoorBlock.HALF,DoubleBlockHalf.LOWER);
+        var body=client.player.getBoundingBox().expand(.025,0,.025);
+        boolean overlaps=false;
+        for(var box:intended.getCollisionShape(client.world,door).getBoundingBoxes()){
+            if(body.intersects(box.offset(door.getX(),door.getY(),door.getZ()))
+                    || body.intersects(box.offset(door.getX(),door.getY()+1,door.getZ()))){
+                overlaps=true;break;
+            }
+        }
+        if(!overlaps)return false;
+        double dx=door.getX()+.5+facing.getOffsetX()*.06-client.player.getX();
+        double dz=door.getZ()+.5+facing.getOffsetZ()*.06-client.player.getZ();
+        client.player.yaw=(float)Math.toDegrees(Math.atan2(-dx,dz));
+        client.player.pitch=0; // A prior straight-down swim aim must not turn this nudge into a dive.
+        client.player.setSprinting(false);
+        KeyBinding.setKeyPressed(client.options.keySprint.getDefaultKey(),false);
+        KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),true);
+        if(client.player.age%20==0)GlobalStateLogger.logCustomEvent("portal_primary_door_make_room",Map.of(
+                "target",door.toShortString(),"facing",facing.toString(),
+                "pos",client.player.getPos().toString(),"body",client.player.getBoundingBox().toString()));
+        return true;
+    }
     private static boolean ensurePortalDoor(MinecraftClient client,BlockPos base,int requiredDoors){
         BlockPos door=base.up();int tick=client.player.age;
         if(doorPlacementGuard.observe(door,tick,portalDoorMatches(client,base)))return true;
@@ -549,6 +662,7 @@ public class NetherPortalBuilding {
                     "target",door.toShortString(),"lower",lower.toString(),"upper",upper.toString()));
             return false;
         }
+        if(base.equals(PreNether.magmaPos) && yieldPrimaryDoorSpace(client,base))return false;
         if(!doorPlacementGuard.tryIssue(door,tick))return false;
         if(!(DoorBlock.getBlockFromItem(client.player.inventory.getStack(8).getItem()) instanceof DoorBlock)
                 || client.player.inventory.getStack(8).getCount()<requiredDoors){
@@ -730,14 +844,71 @@ public class NetherPortalBuilding {
         return MinecraftClient.getInstance().world.getBlockState(pos).getBlock() == Blocks.LAVA;
     }
 
+    private static boolean clearanceDoorCell(BlockPos pos){
+        return pos.equals(PreNether.magmaPos.up()) || pos.equals(PreNether.magmaPos.up(2));
+    }
+
+    /** Centre in the existing breathing door without handing movement back to generic pathfinding. */
+    private static boolean holdClearanceDoor(MinecraftClient client){
+        double dx=PreNether.magmaPos.getX()+.5-client.player.getX();
+        double dz=PreNether.magmaPos.getZ()+.5-client.player.getZ();
+        double dy=PreNether.magmaPos.getY()+1-client.player.getY();
+        boolean wetHead=client.player.isSubmergedIn(FluidTags.WATER);
+        if(client.player.isSwimming() || wetHead || dy>.15){
+            KeyBinding.setKeyPressed(client.options.keySneak.getDefaultKey(),false);
+            KeyBinding.setKeyPressed(client.options.keyJump.getDefaultKey(),true);
+        }
+        if(Math.hypot(dx,dz)>.12){
+            MovementController.setLookDirection(client.player,(float)Math.toDegrees(Math.atan2(-dx,dz)),0);
+            KeyBinding.setKeyPressed(client.options.keyForward.getDefaultKey(),true);
+            return false;
+        }
+        return Math.abs(dy)<=.2 && client.player.isOnGround() && !client.player.isSwimming() && !wetHead;
+    }
+
+    private static void mineClearanceBlock(MinecraftClient client){
+        Vec3d eye=new Vec3d(client.player.getX(),client.player.getEyeY(),client.player.getZ());
+        for(BlockPos queued:twoByOneAreaClearPos){
+            BlockPos target=queued;
+            if(!clearanceDoorCell(target.up()) && client.world.getBlockState(target.up()).getBlock() instanceof FallingBlock)
+                target=target.up();
+            Vec3d point=Vec3d.ofCenter(target);
+            if(eye.squaredDistanceTo(point)>20.25)continue;
+            double dx=point.x-eye.x,dy=point.y-eye.y,dz=point.z-eye.z;
+            MovementController.setLookDirection(client.player,(float)Math.toDegrees(Math.atan2(-dx,dz)),
+                    (float)-Math.toDegrees(Math.atan2(dy,Math.hypot(dx,dz))));
+            ToolsHelper.equipBestTool(client.player,target,false);
+            // Keep direct block digging: the breathing door can obscure the visual ray.
+            client.interactionManager.updateBlockBreakingProgress(target,Direction.UP);
+            if(!client.player.handSwinging)client.player.swingHand(Hand.MAIN_HAND);
+            return;
+        }
+    }
+
+    private static boolean secondDoorSpaceBlocked(MinecraftClient client,BlockPos base){
+        // Even an already installed door needs its gravity cover checked again.
+        if(client.world.getBlockState(base.up(3)).getBlock() instanceof FallingBlock)return true;
+        return !portalDoorMatches(client,base) && (isNotClear(base.up()) || isNotClear(base.up(2)));
+    }
+
     private static boolean areaNotClear() {
-        // Always test and enqueue the same coordinates, including headroom over both outer faces.
+        // Re-scan live blocks each tick, retaining the first breathing door.
         twoByOneAreaClearPos.clear();
-        for(BlockPos pos:PortalClearanceGeometry.cells(PreNether.magmaPos,PreNether.alignedMagmaPos,PreNether.fromMagmaToAligned))
-            if(isNotClear(pos))twoByOneAreaClearPos.add(pos);
+        BlockPos secondBase=secondDoorBase();
+        boolean secondReady=portalDoorMatches(MinecraftClient.getInstance(),secondBase);
+        List<BlockPos> cells=new ArrayList<>(PortalClearanceGeometry.cells(
+                PreNether.magmaPos,PreNether.alignedMagmaPos,PreNether.fromMagmaToAligned));
+        cells.add(secondBase.up());cells.add(secondBase.up(2));
+        for(BlockPos pos:cells){
+            if(clearanceDoorCell(pos))continue;
+            BlockPos above=pos.up();
+            // Check the extra level even when the original cell has just become empty.
+            if(!clearanceDoorCell(above) && MinecraftClient.getInstance().world.getBlockState(above).getBlock() instanceof FallingBlock)
+                twoByOneAreaClearPos.add(above);
+            boolean secondDoorCell=pos.equals(secondBase.up()) || pos.equals(secondBase.up(2));
+            if(!(secondReady && secondDoorCell) && isNotClear(pos))twoByOneAreaClearPos.add(pos);
+        }
         boolean isNotClear=!twoByOneAreaClearPos.isEmpty();
-        System.out.println("Fredodebug: twoByOneisNotClear: " + isNotClear);
-        System.out.println("Fredodebug: twoByOneAreaClearPosList: " + twoByOneAreaClearPos.toString());
         return isNotClear;
     }
 

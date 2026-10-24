@@ -31,6 +31,7 @@ import java.util.concurrent.CancellationException;
  * The server thread is used to generate/read terrain safely, never to query loot or world seed.
  */
 public final class EarlyResetPreflight {
+    public static final int MAGMA_RAVINE_RADIUS=200;
     public record Plan(BlockPos treasure, BlockPos treasureSurface, BlockPos tnt,
                        PreflightGeometry.Workspace workspace, RavineFinder.Candidate ravine, BlockPos gravel) {}
     private static final Logger LOGGER = LogManager.getLogger("FredoBotPreflight");
@@ -211,9 +212,9 @@ public final class EarlyResetPreflight {
                     }
                 }
                 case MAGMA -> {
-                    load(workspace.table(), 102);
-                    ravine = RavineFinder.find(world, workspace.table(), 100, this::check, true);
-                    if (ravine == null) { failure = "前置：找不到 magma（预定工作台附近 100 格无可进入的 2×1 裂谷）"; return false; }
+                    load(workspace.table(), MAGMA_RAVINE_RADIUS+2);
+                    ravine = RavineFinder.find(world, workspace.table(), MAGMA_RAVINE_RADIUS, this::check, true);
+                    if (ravine == null) { failure = "前置：找不到 magma（预定工作台附近 "+MAGMA_RAVINE_RADIUS+" 格无可进入的 2×1 裂谷）"; return false; }
                 }
                 case GRAVEL -> {
                     BlockPos floor = PreflightGeometry.floor(world, ravine.magma());

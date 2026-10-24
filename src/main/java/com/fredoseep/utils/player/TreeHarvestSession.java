@@ -45,9 +45,9 @@ public final class TreeHarvestSession {
     public void interruptApproach(MinecraftClient client,PlayerEntity player,PathExecutor path,MiscController misc){
         if(phase!=Phase.TRUNK || !path.isBusy() || !stable(player))return;
         BlockPos reachable=target;
-        if(reachable==null || !client.world.getBlockState(reachable).isIn(BlockTags.LOGS) || !visible(client,player,reachable))
-            reachable=trunk.stream().filter(p -> MiningHelper.logTargetAllowed(p) && visible(client,player,p)).findFirst().orElse(null);
-        if(reachable!=null && visible(client,player,reachable))startBatch(player,path,misc);
+        if(reachable==null || !client.world.getBlockState(reachable).isIn(BlockTags.LOGS) || !canMine(client,player,reachable))
+            reachable=trunk.stream().filter(p -> MiningHelper.logTargetAllowed(p) && canMine(client,player,p)).findFirst().orElse(null);
+        if(reachable!=null && canMine(client,player,reachable))startBatch(player,path,misc);
     }
     private int suppliedLogs(PlayerEntity player){
         return Math.max(InventoryHelper.countItem(player,ItemTags.LOGS),batchStartLogs+batchBroken);
@@ -74,9 +74,11 @@ public final class TreeHarvestSession {
             case COLLECT -> "采树：集中收集掉落物";
         };
     }
-    private boolean visible(MinecraftClient client,PlayerEntity player,BlockPos p) {
+    private boolean canMine(MinecraftClient client,PlayerEntity player,BlockPos p) {
         Vec3d eye=new Vec3d(player.getX(),player.getEyeY(),player.getZ());
         if(eye.squaredDistanceTo(Vec3d.ofCenter(p))>20)return false;
+        // Direct digging packets address the log itself; intervening leaves do not block it.
+        if(client.world.getBlockState(p).isIn(BlockTags.LOGS))return true;
         var hit=client.world.rayTrace(new RayTraceContext(eye,Vec3d.ofCenter(p),RayTraceContext.ShapeType.OUTLINE,
                 RayTraceContext.FluidHandling.NONE,player));
         return hit.getType()==HitResult.Type.BLOCK && hit.getBlockPos().equals(p);
@@ -122,8 +124,8 @@ public final class TreeHarvestSession {
             if(target!=null && !trunk.contains(target)){target=null;requests=0;breakTicks=0;}
             if(trunk.isEmpty()){phase=Phase.SELECT;target=null;requests=0;return false;}
             else {
-                if(target==null)target=trunk.stream().filter(p -> visible(client,player,p)).findFirst().orElse(trunk.get(0));
-                if(!visible(client,player,target)) {
+                if(target==null)target=trunk.stream().filter(p -> canMine(client,player,p)).findFirst().orElse(trunk.get(0));
+                if(!canMine(client,player,target)) {
                     BlockPos stand=misc.findHarvestApproach(client,player,target,false);
                     if(stand==null || requests>=1) {
                         MiningHelper.blacklistLogTarget(target);
@@ -149,13 +151,13 @@ public final class TreeHarvestSession {
             if(batchFeet==null)batchFeet=player.getPos();
             if(player.getPos().squaredDistanceTo(batchFeet)>.25){collect(misc);return false;}
             if(suppliedLogs(player)>=logsRequired){target=null;pendingLog=null;finishLogBatch(player,misc);return false;}
-            if(target==null || !visible(client,player,target)){
+            if(target==null || !canMine(client,player,target)){
                 if(pendingLog!=null){client.interactionManager.cancelBlockBreaking();pendingLog=null;}
                 target=null;double best=Double.POSITIVE_INFINITY;
                 BlockPos feet=player.getBlockPos();
                 for(int x=-4;x<=4;x++)for(int y=-3;y<=5;y++)for(int z=-4;z<=4;z++){
                     BlockPos p=feet.add(x,y,z);
-                    if(!client.world.getBlockState(p).isIn(BlockTags.LOGS) || !MiningHelper.logTargetAllowed(p) || !visible(client,player,p))continue;
+                    if(!client.world.getBlockState(p).isIn(BlockTags.LOGS) || !MiningHelper.logTargetAllowed(p) || !canMine(client,player,p))continue;
                     double distance=Vec3d.ofCenter(p).squaredDistanceTo(player.getPos());
                     if(distance<best){target=p;best=distance;}
                 }
@@ -192,7 +194,7 @@ public final class TreeHarvestSession {
                 BlockPos feet=player.getBlockPos();double best=Double.POSITIVE_INFINITY;
                 for(int x=-4;x<=4;x++)for(int y=-3;y<=5;y++)for(int z=-4;z<=4;z++) {
                     BlockPos p=feet.add(x,y,z);
-                    if(failedLeaves.contains(p) || !client.world.getBlockState(p).isIn(BlockTags.LEAVES) || !visible(client,player,p))continue;
+                    if(failedLeaves.contains(p) || !client.world.getBlockState(p).isIn(BlockTags.LEAVES) || !canMine(client,player,p))continue;
                     double distance=p.getSquaredDistance(feet);
                     if(distance<best){best=distance;target=p;}
                 }
@@ -200,7 +202,7 @@ public final class TreeHarvestSession {
             }
             misc.resetKeys();
             if(!ToolsHelper.equipPlannedTool(player,target,Items.SHEARS)){leafToolsUnavailable=true;collect(misc);return false;}
-            if(++breakTicks>100 || !visible(client,player,target)){failedLeaves.add(target);target=null;breakTicks=0;return false;}
+            if(++breakTicks>100 || !canMine(client,player,target)){failedLeaves.add(target);target=null;breakTicks=0;return false;}
             mine(client,player,target);return false;
         }
         return false;
@@ -212,8 +214,15 @@ public final class TreeHarvestSession {
         else collect(misc);
     }
     private void mine(MinecraftClient client,PlayerEntity player,BlockPos p) {
-        float[] look=MiningHelper.getValidMiningAngle(player,p);
-        MovementController.setLookDirection(player,look[0],look[1]);
+        if(client.world.getBlockState(p).isIn(BlockTags.LOGS)){
+            Vec3d center=Vec3d.ofCenter(p);
+            double dx=center.x-player.getX(),dy=center.y-player.getEyeY(),dz=center.z-player.getZ();
+            MovementController.setLookDirection(player,(float)Math.toDegrees(Math.atan2(-dx,dz)),
+                    (float)-Math.toDegrees(Math.atan2(dy,Math.hypot(dx,dz))));
+        }else{
+            float[] look=MiningHelper.getValidMiningAngle(player,p);
+            MovementController.setLookDirection(player,look[0],look[1]);
+        }
         client.interactionManager.updateBlockBreakingProgress(p,Direction.UP);
         if(!player.handSwinging)player.swingHand(Hand.MAIN_HAND);
     }

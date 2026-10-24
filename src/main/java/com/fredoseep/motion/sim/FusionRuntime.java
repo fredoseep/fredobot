@@ -92,8 +92,13 @@ public final class FusionRuntime {
     public static String hudStatus(){return job==null?null:"Fusion："+job.phase+" 接续="+job.continuations+job.summary+(job.legs==null?"":" "+job.index+"/"+job.legs.size());}
     /** Render only immutable published counters; hide optimization labels once execution starts. */
     public static List<String> searchHudLines(){
+        if(FusionBoatRuntime.ownsTask())return FusionBoatRuntime.searchHudLines();
         Job j=job;Monitor view=monitor;
-        return j==null || j.legs!=null || view==null?List.of():FusionSearchHud.lines(view.metrics(),j.shortLogTask);
+        if(j==null || j.legs!=null || view==null)return List.of();
+        List<String> lines=new ArrayList<>(FusionSearchHud.lines(view.metrics(),j.shortLogTask));
+        if(view.metrics().get("prefix_attempts") instanceof Number n && n.intValue()>0)
+            lines.add("清零重搜："+view.metrics().get("prefix_rebases")+" 轮；"+view.metrics().get("prefix_decision"));
+        return List.copyOf(lines);
     }
     public static boolean command(String text){
         if(!text.equals("#fredomotion fusion") && !text.startsWith("#fredomotion fusion "))return false;

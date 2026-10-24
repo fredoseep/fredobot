@@ -9,6 +9,8 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.LinkedHashMap;
 import java.util.ArrayDeque;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 
 /** Experimental single frontier over physics states AND branch-local terrain/inventory.
  * No geometric route is computed first. Candidate pruning is deliberately approximate. */
@@ -19,11 +21,17 @@ public final class FusionSearch {
     private final ArrayDeque<MotionState> explored=new ArrayDeque<>();
     private Node previewNode;
     private Node expandedPreview;
-    public Operation operation(){return operation;}
+    public Operation operation(){FusionSearch active=continuation;return active==null?operation:active.operation();}
     private void operation(String name){operation=new Operation(name,System.currentTimeMillis());}
     /** Client-thread render snapshots: speculative, never executable route results. */
-    public List<MotionState> explored(){return List.copyOf(explored);}
+    public List<MotionState> explored(){return continuation==null?List.copyOf(explored):continuation.explored();}
     public List<MotionPlan.Frame> preview(){
+        if(continuation!=null){
+            List<MotionPlan.Frame> frames=new ArrayList<>();
+            for(Leg leg:committedPrefix)if(leg.motion()!=null)frames.addAll(leg.motion().frames());
+            frames.addAll(continuation.preview());
+            return List.copyOf(frames.subList(Math.max(0,frames.size()-1200),frames.size()));
+        }
         if(breathingSearch!=null)return breathingSearch.preview();
         Result ready=result==null?verifying:result;
         if(ready!=null){
@@ -43,6 +51,8 @@ public final class FusionSearch {
     }
     public interface Agent {
         Agent copy();
+        /** Reset start-local guidance for a cold search, retaining physical world/resource facts. */
+        default Agent freshSearchRoot(){return copy();}
         default boolean reachedGoal(LocalGroundSearch.Goal goal){
             MotionState s=state();double distance=Math.hypot(goal.x()-s.x(),goal.z()-s.z());
             return water()?distance<=.32 && Math.abs(goal.y()-s.y())<=.65 && Math.hypot(s.vx(),s.vz())<=.16:goal.reached(s);
@@ -90,11 +100,12 @@ public final class FusionSearch {
         private final Node parent;
         private final Leg leg;
         private final double g,rank;
+        private final int depth;
         private double leftRank=Double.NaN,rightRank=Double.NaN;
         // The three frontiers reference the same node. Expand each version only once.
         private boolean selected;
         Node(Agent agent,Node parent,Leg leg,double g,double rank){
-            this.agent=agent;this.parent=parent;this.leg=leg;this.g=g;this.rank=rank;
+            this.agent=agent;this.parent=parent;this.leg=leg;this.g=g;this.rank=rank;this.depth=parent==null?0:parent.depth+1;
         }
         Agent agent(){return agent;}Node parent(){return parent;}Leg leg(){return leg;}
         double g(){return g;}double rank(){return rank;}
@@ -137,6 +148,7 @@ public final class FusionSearch {
     private MotionState bestState;
     private String limitReason="NONE",checkpointBrakeReason="NOT_TRIED";
     private Agent replay;
+    private Result savedSafePrefix;
     private Result verifying;
     private int verifyLeg,verifyFrame;
     private Node expanding;
@@ -146,6 +158,22 @@ public final class FusionSearch {
     private boolean finished;
     private String reason="SEARCHING";
     private Result result;
+    // A committed prefix starts a cold search: no old frontier, deduplication table or reserved quota.
+    private static final int PREFIX_CANDIDATES=12,MAX_PREFIX_DEPTH=8,MAX_PREFIX_ATTEMPTS=8;
+    private static final class PrefixControl {int attempts,rebases,rollbacks,salvages;String decision="NONE",childFailure="none";}
+    private PrefixControl prefixControl=new PrefixControl();
+    private int prefixDepth,initialStageKnown,lastPrefixStage=-1;
+    private boolean prefixEnabled=true;
+    private volatile FusionSearch continuation;
+    private List<Leg> committedPrefix=List.of();
+    private double committedCost;
+    private boolean verifyingPrefix;
+    private int verifiedPrefixStage;
+    private Iterator<Node> prefixScan;
+    private final PriorityQueue<Node> prefixMiddle=new PriorityQueue<>(Comparator.comparingDouble(Node::rank).reversed());
+    private final PriorityQueue<Node> prefixLeft=new PriorityQueue<>(Comparator.comparingDouble((Node n)->directionRank(n,-1)).reversed());
+    private final PriorityQueue<Node> prefixRight=new PriorityQueue<>(Comparator.comparingDouble((Node n)->directionRank(n,1)).reversed());
+    private final Map<String,Integer> completedChildCounters=new HashMap<>();
     private FusionBreathingSearch breathingSearch;
     private Map<String,Object> breathingMetrics=Map.of();
     public FusionSearch(Agent start,LocalGroundSearch.Goal goal,long budget,int maxKnown){
@@ -164,11 +192,13 @@ public final class FusionSearch {
     }
     /** Configure before stepping; escalation retains this exact frontier and in-progress rollout. */
     public FusionSearch staged(int firstLimit,boolean allowGrowth,boolean partialRoutes){
-        stageKnown=Math.max(1,Math.min(firstLimit,maxKnown));growStages=allowGrowth;allowPartial=partialRoutes;stagedPolicy=true;
+        stageKnown=Math.max(1,Math.min(firstLimit,maxKnown));initialStageKnown=stageKnown;growStages=allowGrowth;allowPartial=partialRoutes;stagedPolicy=true;
         return this;
     }
     private boolean optimizingFirstTier(){return stagedPolicy && stage==1;}
-    public int stage(){return stage;}
+    /** Disable for experiments; normal staged Fusion enables internal prefix continuation. */
+    public FusionSearch prefixRebasing(boolean enabled){prefixEnabled=enabled;return this;}
+    public int stage(){return continuation!=null?continuation.stage():verifyingPrefix?verifiedPrefixStage:stage;}
     public boolean finished(){return finished;}
     public Result result(){return result;}
     public String reason(){return reason;}
@@ -185,7 +215,7 @@ public final class FusionSearch {
         data.put("left_open",leftOpen.size());data.put("right_open",rightOpen.size());
         data.put("side_seed_remaining",sideSeeds==null?0:sideSeeds.length-sideSeedIndex);
         data.put("complete_cost_ticks",incumbent==null?"none":incumbent.g());
-        data.put("stage_known_limit",stageKnown);data.put("search_stage",stage);data.put("grow_stages",growStages);
+        data.put("stage_known_limit",stageKnown);data.put("search_stage",stage());data.put("grow_stages",growStages);
         data.put("heuristic_weight",heuristicWeight);data.put("budget_ms",budget);data.put("simulated_ticks",simulated);data.put("reason",reason);
         data.put("checkpoint_kind",pitExitResult?"PIT_EXIT":"PROGRESS");
         data.put("pit_exit_height_gain",pitExitNode==null?0:pitExitNode.agent().state().y()-root.state().y());
@@ -204,9 +234,28 @@ public final class FusionSearch {
         data.put("best_water",previewNode==null || previewNode.agent().waterProfile()==null?"none":previewNode.agent().waterProfile().toString());
         data.put("edit_skips",Map.copyOf(editSkips));data.put("shore_candidates",shoreCandidates);data.put("water_exit_ticks",waterExitTicks);data.put("landing_jump_ticks",landingJumpTicks);
         data.put("rejections",Map.copyOf(rejected));data.put("break_candidates",breakCandidates);data.put("place_candidates",placeCandidates);
+        for(var entry:completedChildCounters.entrySet())data.merge(entry.getKey(),entry.getValue(),(a,b)->((Number)a).intValue()+((Number)b).intValue());
+        data.put("restart_policy","DISCARD_SEARCH_HISTORY");data.put("retained_backup_states",0);
+        data.put("round_elapsed_ms",System.currentTimeMillis()-started);data.put("round_budget_ms",budget);
+        int publishedPrefixDepth=prefixDepth;
+        if(continuation!=null){
+            Map<String,Object> child=continuation.metrics();
+            publishedPrefixDepth=((Number)child.get("prefix_depth")).intValue();
+            data.put("round_elapsed_ms",child.get("round_elapsed_ms"));data.put("round_budget_ms",child.get("round_budget_ms"));
+            for(String key:List.of("expanded","simulated_ticks","middle_expanded","left_expanded","right_expanded","known","open"))
+                data.put(key,((Number)data.get(key)).intValue()+((Number)child.get(key)).intValue());
+            data.put("stage_known_limit",best.size()+((Number)child.get("stage_known_limit")).intValue());
+            for(String key:List.of("search_stage","search_lanes","active_lane","best_goal_distance","best_state","best_air","reason"))data.put(key,child.get(key));
+        }
+        data.put("prefix_rebases",prefixControl.rebases);data.put("prefix_rollbacks",prefixControl.rollbacks);
+        data.put("prefix_salvages",prefixControl.salvages);data.put("prefix_child_failure",prefixControl.childFailure);
+        data.put("saved_prefix_available",savedSafePrefix!=null);
+        data.put("prefix_attempts",prefixControl.attempts);data.put("prefix_decision",prefixControl.decision);
+        data.put("prefix_depth",publishedPrefixDepth);
+        data.put("search_phase",prefixScan!=null?"COMMON_PREFIX":continuation!=null?"PREFIX_COLD_RESTART":data.get("search_phase"));
         return data;
     }
-    public void cancel(){finished=true;reason="CANCELLED";result=null;retainCounts();clearFrontiers();best.clear();}
+    public void cancel(){if(continuation!=null){continuation.cancel();continuation=null;}clearPrefixScan();verifying=null;replay=null;committedPrefix=List.of();savedSafePrefix=null;finished=true;reason="CANCELLED";result=null;retainCounts();clearFrontiers();best.clear();}
     public boolean reached(Agent agent){
         return agent.reachedGoal(goal);
     }
@@ -214,6 +263,8 @@ public final class FusionSearch {
     public void step(){
         if(finished)return;
         if(verifying!=null){verify();return;}
+        if(continuation!=null){stepContinuation();return;}
+        if(prefixScan!=null){scanPrefix();return;}
         if(breathingSearch!=null){
             operation("PLANNING_BREATHING_POINT");
             if(budget>0 && System.currentTimeMillis()-started>=budget){finish(null,"BREATHING_TIME_LIMIT");return;}
@@ -230,6 +281,8 @@ public final class FusionSearch {
         // Only a search that exceeded that tier commits the next full solution immediately.
         if(incumbent!=null && !optimizingFirstTier()){finish(incumbent,"FIRST_SOLUTION");return;}
         if(incumbent!=null && best.size()>=stageKnown){finish(incumbent,"FIRST_TIER_LIMIT");return;}
+        if(best.size()>=stageKnown && stageKnown<maxKnown && growStages && incumbent==null
+                && startPrefixScan())return;
         while(best.size()>=stageKnown && stageKnown<maxKnown && growStages){
             if(stage==1)enableThreeWay();
             stageKnown=(int)Math.min(maxKnown,Math.max((long)stageKnown+1,(long)stageKnown*2));stage++;
@@ -239,6 +292,7 @@ public final class FusionSearch {
             if(incumbent!=null){finish(incumbent,limitReason);return;}
             if(!allowPartial){finish(null,"SHORT_TASK_"+limitReason);return;}
             if(incumbent==null && pitExitNode==null)brakeCheckpoint();
+            if(incumbent==null && restartFresh(pitExitNode!=null?pitExitNode:checkpoint,true))return;
             if(incumbent==null && pitExitNode!=null)finish(pitExitNode,"PIT_EXIT");
             else finish(incumbent!=null?incumbent:checkpoint,limitReason);return;
         }
@@ -365,6 +419,108 @@ public final class FusionSearch {
             }
         }
     }
+    private static List<Leg> prefixLegs(Node endpoint){
+        List<Leg> legs=new ArrayList<>();
+        for(Node n=endpoint;n!=null && n.parent()!=null;n=n.parent())legs.add(n.leg());
+        Collections.reverse(legs);return legs.stream().flatMap(l->expand(l).stream()).toList();
+    }
+    private boolean startPrefixScan(){
+        if(!prefixEnabled || !stagedPolicy || lastPrefixStage==stage || prefixDepth>=MAX_PREFIX_DEPTH
+                || prefixControl.attempts>=MAX_PREFIX_ATTEMPTS || maxKnown<64
+                || (budget>0 && System.currentTimeMillis()-started>=budget))return false;
+        lastPrefixStage=stage;prefixControl.attempts++;prefixControl.decision="SCANNING";
+        prefixScan=open.iterator();operation("COMMON_PREFIX_SCAN");return true;
+    }
+    private void samplePrefix(Node n){
+        prefixMiddle.add(n);if(prefixMiddle.size()>PREFIX_CANDIDATES)prefixMiddle.poll();
+        if(threeWay){
+            prefixLeft.add(n);if(prefixLeft.size()>4)prefixLeft.poll();
+            prefixRight.add(n);if(prefixRight.size()>4)prefixRight.poll();
+        }
+    }
+    private static Node ancestor(Node a,Node b){
+        while(a!=null && b!=null && a.depth>b.depth)a=a.parent();
+        while(a!=null && b!=null && b.depth>a.depth)b=b.parent();
+        while(a!=b && a!=null && b!=null){a=a.parent();b=b.parent();}
+        return a==b?a:null;
+    }
+    /** Scan the current frontier in small slices before discarding it for a cold restart. */
+    private void scanPrefix(){
+        operation("COMMON_PREFIX_SCAN");
+        if(budget>0 && System.currentTimeMillis()-started>=budget){clearPrefixScan();prefixControl.decision="SCAN_TIME_LIMIT";return;}
+        for(int i=0;i<128 && prefixScan.hasNext();i++){
+            Node n=prefixScan.next();
+            if(!n.selected && n.g()<=best.getOrDefault(key(n.agent()),Double.POSITIVE_INFINITY)+1e-8)samplePrefix(n);
+        }
+        if(prefixScan.hasNext())return;
+        LinkedHashSet<Node> promising=new LinkedHashSet<>(prefixMiddle);
+        promising.addAll(prefixLeft);promising.addAll(prefixRight);
+        // An interrupted rollout remains an alternative; it must agree with the prefix too.
+        if(expanding!=null)promising.add(expanding);
+        Node common=null;for(Node n:promising)common=common==null?n:ancestor(common,n);
+        clearPrefixScan();
+        if(promising.size()<2 || common==null || common.parent()==null || common.leg().motion()==null
+                || common.g()<8 || initialDistance-distance(common.agent().state())<minProgress){
+            prefixControl.decision="NO_SHARED_PROGRESS";return;
+        }
+        restartFresh(common,false);
+    }
+    /** Save only executable history and the endpoint world/inventory, then release all old search states. */
+    private boolean restartFresh(Node anchor,boolean terminal){
+        if(!prefixEnabled || !growStages || anchor==null || anchor.parent()==null
+                || prefixControl.rebases>=MAX_PREFIX_ATTEMPTS || prefixDepth>=MAX_PREFIX_DEPTH
+                || initialDistance-distance(anchor.agent().state())<minProgress)return false;
+        if(terminal)prefixControl.attempts++;
+        Agent fresh=anchor.agent().freshSearchRoot();
+        committedPrefix=prefixLegs(anchor);committedCost=anchor.g();
+        savedSafePrefix=null;
+        for(Node safe=anchor;safe!=null && safe.parent()!=null;safe=safe.parent()){
+            if(safe.leg()!=null && safe.leg().motion()!=null && safe.agent().checkpointSafe()
+                    && initialDistance-distance(safe.agent().state())>=minProgress){
+                savedSafePrefix=new Result(prefixLegs(safe),safe.g(),expanded,simulated,false,safe.agent().state(),false);
+                break;
+            }
+        }
+        clearPrefixScan();clearFrontiers();best.clear();explored.clear();
+        expanding=null;previewNode=null;expandedPreview=null;checkpoint=null;pitExitNode=null;incumbent=null;
+        candidates=List.of();edits=List.of();cursor=0;retainedKnown=-1;retainedOpen=0;
+        // Each cold restart receives the full original state/time allowance, just like a real new request.
+        // The runtime's overall job timeout remains the outer guard.
+        continuation=new FusionSearch(fresh,goal,budget,maxKnown,heuristicWeight)
+                .staged(initialStageKnown>0?initialStageKnown:maxKnown,true,allowPartial);
+        continuation.prefixControl=prefixControl;continuation.prefixDepth=prefixDepth+1;
+        continuation.prefixEnabled=prefixEnabled;
+        prefixControl.rebases++;prefixControl.decision=terminal?"CHECKPOINT_COLD_RESTART":"COMMON_PREFIX_COLD_RESTART";
+        return true;
+    }
+    private void clearPrefixScan(){prefixScan=null;prefixMiddle.clear();prefixLeft.clear();prefixRight.clear();}
+    private void stepContinuation(){
+        operation("PREFIX_COLD_RESTART");
+        continuation.step();if(!continuation.finished())return;
+        FusionSearch child=continuation;Map<String,Object> counters=child.metrics();
+        for(String key:List.of("expanded","simulated_ticks","middle_expanded","left_expanded","right_expanded"))
+            completedChildCounters.merge(key,((Number)counters.get(key)).intValue(),Integer::sum);
+        continuation=null;retainedKnown=((Number)counters.get("known")).intValue();retainedOpen=0;
+        if(child.result()!=null){
+            List<Leg> legs=new ArrayList<>(committedPrefix);legs.addAll(child.result().legs());
+            verifying=new Result(List.copyOf(legs),committedCost+child.result().cost(),
+                    expanded+completedChildCounters.getOrDefault("expanded",0),simulated+completedChildCounters.getOrDefault("simulated_ticks",0),
+                    child.result().complete(),child.result().endpoint(),child.result().pitExit());
+            replay=root.copy();verifyLeg=0;verifyFrame=0;reason="VERIFYING";
+            verifiedPrefixStage=child.stage();verifyingPrefix=true;prefixControl.decision="VERIFYING_FRESH_ROUTE";
+            committedPrefix=List.of();savedSafePrefix=null;return;
+        }
+        committedPrefix=List.of();prefixControl.childFailure=child.reason();
+        if(allowPartial && savedSafePrefix!=null){
+            Result safe=savedSafePrefix;savedSafePrefix=null;prefixControl.salvages++;
+            verifying=new Result(safe.legs(),safe.cost(),expanded+completedChildCounters.getOrDefault("expanded",0),
+                    simulated+completedChildCounters.getOrDefault("simulated_ticks",0),false,safe.endpoint(),false);
+            replay=root.copy();verifyLeg=0;verifyFrame=0;verifyingPrefix=true;verifiedPrefixStage=stage;
+            prefixControl.decision="VERIFYING_SAVED_PREFIX";reason="VERIFYING";return;
+        }
+        finished=true;result=null;
+        reason="COLD_RESTART_FAILED: "+child.reason();prefixControl.decision="COLD_RESTART_FAILED";
+    }
     private double distance(MotionState s){return Math.sqrt(Math.pow(goal.x()-s.x(),2)+Math.pow(goal.y()-s.y(),2)+Math.pow(goal.z()-s.z(),2));}
     private double heuristic(MotionState s){return distance(s)*4;}
     /** Only entered after a growable first tier failed to produce a complete route. */
@@ -484,7 +640,7 @@ public final class FusionSearch {
         reason=why;pitExitResult=why.equals("PIT_EXIT");
         if(n!=null){boolean complete=reached(n.agent());MotionState endpoint=n.agent().state();List<Leg> legs=new ArrayList<>();double cost=n.g();
             while(n.parent()!=null){legs.add(n.leg());n=n.parent();}Collections.reverse(legs);legs=legs.stream().flatMap(l->expand(l).stream()).toList();
-            verifying=new Result(List.copyOf(legs),cost,expanded,simulated,complete,endpoint,pitExitResult);replay=root.copy();reason="VERIFYING";
+            verifying=new Result(List.copyOf(legs),cost,expanded+completedChildCounters.getOrDefault("expanded",0),simulated+completedChildCounters.getOrDefault("simulated_ticks",0),complete,endpoint,pitExitResult);replay=root.copy();reason="VERIFYING";
         }else finished=true;
         expanding=null;retainCounts();clearFrontiers();best.clear();incumbent=null;
     }
@@ -498,7 +654,12 @@ public final class FusionSearch {
                 }else if(!replay.checkpointSafe() || replay.state().positionError(verifying.endpoint())>1e-7
                         || (verifying.pitExit()?!replay.pitExitSafe(root.state().y(),escapeHeight):initialDistance-distance(replay.state())<minProgress))
                     throw new IllegalArgumentException("unsafe or non-progressing checkpoint");
-                result=verifying;verifying=null;finished=true;reason=result.complete()?"COMPLETE":result.pitExit()?"PIT_EXIT":"CHECKPOINT";return;
+                result=verifying;verifying=null;
+                if(verifyingPrefix){
+                    stage=verifiedPrefixStage;verifyingPrefix=false;retainCounts();clearFrontiers();best.clear();expanding=null;
+                    prefixControl.decision=prefixControl.salvages>0 && !result.complete()?"SAVED_PREFIX_VERIFIED":"COMBINED_ROUTE_VERIFIED";
+                }
+                finished=true;reason=result.complete()?"COMPLETE":result.pitExit()?"PIT_EXIT":"CHECKPOINT";return;
             }
             Leg leg=verifying.legs().get(verifyLeg);
             if(leg.interaction()!=null){replay=replay.apply(leg.interaction());verifyLeg++;return;}
@@ -510,6 +671,12 @@ public final class FusionSearch {
             if(s.positionError(frame.after())>1e-7 || s.velocityError(frame.after())>1e-7 || s.grounded()!=frame.after().grounded())
                 throw new IllegalArgumentException("physics replay mismatch");
             if(verifyFrame==plan.frames().size()){verifyFrame=0;verifyLeg++;}
-        }catch(IllegalArgumentException mismatch){verifying=null;result=null;finished=true;reason="REPLAY_FAILED: "+mismatch.getMessage();}
+        }catch(IllegalArgumentException mismatch){
+            verifying=null;result=null;
+            if(verifyingPrefix){
+                verifyingPrefix=false;replay=null;verifyLeg=0;verifyFrame=0;
+                finished=true;prefixControl.decision="COLD_RESTART_REPLAY_FAILED";reason="REPLAY_FAILED: "+mismatch.getMessage();
+            }else{finished=true;reason="REPLAY_FAILED: "+mismatch.getMessage();}
+        }
     }
 }

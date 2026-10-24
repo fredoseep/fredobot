@@ -4,6 +4,10 @@ import com.fredoseep.Test;
 import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.preflight.ResetHistory;
+import com.fredoseep.testing.nether.NetherStateAuto;
+import com.fredoseep.utils.nether.NetherAnalyzer;
+import com.fredoseep.utils.nether.bastion.BastionAnalyzer;
+import net.minecraft.world.dimension.DimensionType;
 import org.apache.logging.log4j.LogManager;
 import com.fredoseep.behave.CraftingController;
 import com.fredoseep.behave.IBotModule;
@@ -21,6 +25,8 @@ public class GlobalExecutor implements IBotModule {
 
     private final MinecraftClient minecraftClient = MinecraftClient.getInstance();
     private boolean globalInitialized = false;
+    private static final boolean autoNetherOn = true;
+    public  boolean isAutoNetherFinished = false;
     private int debugTick = 0;
     public GlobalState currentState = GlobalState.IDLE;
 
@@ -33,6 +39,7 @@ public class GlobalExecutor implements IBotModule {
         CRAFTING(6),
         PRE_NETHER(7),
         BUILDING_TWO_BY_ONE_NETHER_PORTAL(8),
+        ANALYZE_THE_BASTION(9),
         NEXT(0x7FFFFFF);
 
         private final int missionOrder;
@@ -72,6 +79,7 @@ public class GlobalExecutor implements IBotModule {
 
     private void resetState() {
         currentState = GlobalState.IDLE;
+        isAutoNetherFinished = false;
         debugTick = 0;
         globalInitialized = false;
         BtStuff.reset();
@@ -100,6 +108,13 @@ public class GlobalExecutor implements IBotModule {
         }
         if (!globalInitialized) initializeSettings();
 
+        if(autoNetherOn){
+            if(!isAutoNetherFinished) {
+                NetherStateAuto.autoNether();
+                currentState = GlobalState.ANALYZE_THE_BASTION;
+            }
+        }
+
         if (currentState.getMissionOrder() < 7) {
             BtStuff.btStaff((ClientPlayerEntity) player);
         }
@@ -108,6 +123,14 @@ public class GlobalExecutor implements IBotModule {
         }
         if(currentState.getMissionOrder()==8){
             NetherPortalBuilding.twoByOneBuild();
+        }
+        if(currentState.getMissionOrder()==9){
+            if(!client.world.getDimension().hasCeiling()){
+                System.out.println("Fredobot: waiting for player to get into the nether");
+                return;
+            }
+            if(!client.isPaused())client.openPauseMenu(true);
+            NetherAnalyzer.analyze(client,player);
         }
     }
 

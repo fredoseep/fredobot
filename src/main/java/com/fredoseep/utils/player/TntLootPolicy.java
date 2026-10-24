@@ -40,6 +40,11 @@ public final class TntLootPolicy {
         for(ItemEntity e:world.getEntities(ItemEntity.class,new Box(center).expand(radius),ItemEntity::isAlive))
             oldDrops.add(e.getUuid());
     }
+    /** Permanently ignore an abandoned blast drop for this world/session. */
+    public void discard(World world,ItemEntity drop){
+        if(this.world!=world){oldDrops.clear();this.world=world;}
+        oldDrops.add(drop.getUuid());
+    }
     public boolean eligible(World world,ItemEntity e){
         return e.isAlive() && !e.getStack().isEmpty() && allowed(e.getStack().getItem()) && excavationEligible(world,e)
                 && (this.world!=world || !oldDrops.contains(e.getUuid()));

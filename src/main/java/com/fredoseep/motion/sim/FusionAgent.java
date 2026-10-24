@@ -81,12 +81,17 @@ public final class FusionAgent implements FusionSearch.Agent {
         localEscapeHeight=surfaceAroundStart();escapeOriginX=agent.getX();escapeOriginZ=agent.getZ();
     }
     private FusionAgent(FusionAgent from,Map<BlockPos,BlockState> edits,Map<Item,Integer> spent,Map<Integer,Integer> wear){
+        this(from,edits,spent,wear,false);
+    }
+    private FusionAgent(FusionAgent from,Map<BlockPos,BlockState> edits,Map<Item,Integer> spent,Map<Integer,Integer> wear,boolean freshRoot){
         client=from.client;world=from.world;blacklist=from.blacklist;this.edits=Map.copyOf(edits);
         this.spent=Map.copyOf(spent);this.wear=Map.copyOf(wear);buildingQuota=from.buildingQuota;pillaringQuota=from.pillaringQuota;
-        agent=FusionWorld.in(world,this.edits,from.agent::copy);localEscapeHeight=from.localEscapeHeight;
-        escapeOriginX=from.escapeOriginX;escapeOriginZ=from.escapeOriginZ;
+        agent=FusionWorld.in(world,this.edits,from.agent::copy);
+        localEscapeHeight=freshRoot?FusionWorld.in(world,this.edits,this::surfaceAroundStart):from.localEscapeHeight;
+        escapeOriginX=freshRoot?agent.getX():from.escapeOriginX;escapeOriginZ=freshRoot?agent.getZ():from.escapeOriginZ;
     }
     public FusionAgent copy(){return new FusionAgent(this,edits,spent,wear);}
+    public FusionAgent freshSearchRoot(){return new FusionAgent(this,edits,spent,wear,true);}
     public MotionState state(){return agent.state();}
     public boolean water(){return agent.isTouchingWater() || agent.isSwimming();}
     public boolean climbing(){return agent.isClimbing();}
@@ -293,20 +298,12 @@ public final class FusionAgent implements FusionSearch.Agent {
                 new MotionPlan("fusion-aquatic-edit-hold",state(),frames,.20,.15));
     }
     private FusionSearch.Program prepareGoalConnection(GoalConnection connection){
-        FusionAgent next=copy();List<FusionSearch.Leg> steps=new ArrayList<>();
-        for(int y=FusionEscapeGeometry.passageTop(state().y(),connection.stand().getY());y>=connection.stand().getY();y--){
-            BlockPos pos=new BlockPos(connection.stand().getX(),y,connection.stand().getZ());FusionAgent current=next;
-            Edit edit=FusionWorld.in(world,next.edits,()->{
-                if(world.getBlockState(pos).getCollisionShape(world,pos).isEmpty())return null;
-                Edit choice=current.breaking(pos);
-                if(choice==null)throw new IllegalArgumentException("goal clearance "+current.breakRejection+" @ "+pos.toShortString());
-                return choice;
-            });
-            if(edit!=null){
-                if(next.edits.size()>=8)throw new IllegalArgumentException("goal clearance edit limit");
-                edit=(Edit)next.prepare(edit);next=next.apply(edit);steps.add(new FusionSearch.Leg(null,edit));
-            }
-        }
+        List<BlockPos> pending=new ArrayList<>();
+        for(int y=FusionEscapeGeometry.passageTop(state().y(),connection.stand().getY());y>=connection.stand().getY();y--)
+            pending.add(new BlockPos(connection.stand().getX(),y,connection.stand().getZ()));
+        List<FusionSearch.Leg> clearance=prepareClearance(pending);
+        FusionAgent next=clearance.isEmpty()?copy():apply(new FusionSearch.Program(clearance));
+        List<FusionSearch.Leg> steps=new ArrayList<>(clearance);
         if(connection.material()!=null){
             BlockPos support=connection.stand().down();
             if(next.agent.getBoundingBox().intersects(new Box(support))){
@@ -395,17 +392,28 @@ public final class FusionAgent implements FusionSearch.Agent {
         }
         throw new IllegalArgumentException("pit escape exceeds six simulated landings");
     }
-    private FusionSearch.Program prepareCorridor(Corridor corridor){
-        FusionAgent next=copy();List<FusionSearch.Leg> steps=new ArrayList<>();List<BlockPos> pending=new ArrayList<>(corridor.blocks());
+    /** Peel reachable cover first; an occluded high leaf must not reject a reachable lower leaf. */
+    private List<FusionSearch.Leg> prepareClearance(List<BlockPos> blocks){
+        FusionAgent next=copy();List<FusionSearch.Leg> steps=new ArrayList<>();List<BlockPos> pending=new ArrayList<>(blocks);
         while(!pending.isEmpty()){
+            FusionAgent snapshot=next;
+            FusionWorld.in(world,snapshot.edits,()->{pending.removeIf(p->world.getBlockState(p).getCollisionShape(world,p).isEmpty());return null;});
+            if(pending.isEmpty())break;
             FusionAgent current=next;
             Edit chosen=FusionWorld.in(world,next.edits,()->{
-                for(BlockPos p:pending){Edit candidate=current.breaking(p);if(candidate!=null)return candidate;}
+                for(BlockPos p:pending){if(world.getBlockState(p).getCollisionShape(world,p).isEmpty())continue;Edit candidate=current.breaking(p);if(candidate!=null)return candidate;}
                 return null;
             });
             if(chosen==null)throw new IllegalArgumentException("clearance "+current.breakRejection+" @ "+pending.get(0).toShortString());
+            if(next.edits.size()>=8)throw new IllegalArgumentException("clearance edit limit");
             Edit edit=(Edit)next.prepare(chosen);next=next.apply(edit);steps.add(new FusionSearch.Leg(null,edit));pending.remove(edit.pos());
         }
+        return List.copyOf(steps);
+    }
+    private FusionSearch.Program prepareCorridor(Corridor corridor){
+        List<FusionSearch.Leg> clearance=prepareClearance(corridor.blocks());
+        FusionAgent next=clearance.isEmpty()?copy():apply(new FusionSearch.Program(clearance));
+        List<FusionSearch.Leg> steps=new ArrayList<>(clearance);
         MotionState initial=next.state();List<MotionPlan.Frame> frames=new ArrayList<>();
         double tx=corridor.stand().getX()+.5,tz=corridor.stand().getZ()+.5;int ty=corridor.stand().getY();
         for(int i=0;i<48;i++){

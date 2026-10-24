@@ -63,6 +63,27 @@ public final class FusionBoatRuntime {
     }
     public static boolean ownsTask(){return job!=null;}
     public static String hudStatus(){Job j=job;return j==null?null:"Fusion 船："+j.phase+(j.frames==null?"":" "+j.index+"/"+j.frames.size());}
+    /** Same render-time search HUD used by land Fusion, including launch simulation. */
+    public static List<String> searchHudLines(){
+        Job j=job;
+        if(j==null || j.frames!=null || j.phase.equals("DISMOUNT") || j.phase.equals("RECOVERING"))return List.of();
+        String phase=switch(j.phase){
+            case "WAITING_TERRAIN" -> "等待地形";
+            case "PAUSING" -> "等待暂停";
+            case "SIMULATING_LAUNCH" -> "模拟放船";
+            case "LAUNCH_APPROACH" -> "前往放船位置";
+            case "SPAWN" -> "等待船生成";
+            case "BOARDING" -> "等待上船";
+            case "SEARCHING" -> "搜索划船路线";
+            default -> j.phase;
+        };
+        String title="Fusion 船："+phase+" 已用 "+((System.currentTimeMillis()-j.started)/1000)+"s";
+        if(j.search==null)return List.of(title);
+        Map<String,Object> metrics=j.search.metrics();
+        return List.of(title,
+                "第 "+metrics.get("search_stage")+" 级 状态 "+metrics.get("known")+" / "+metrics.get("stage_known_limit")+"；最高 "+metrics.get("max_known"),
+                "扩展 "+metrics.get("expanded")+" 待搜索 "+metrics.get("open")+" 模拟 "+metrics.get("simulated_ticks")+" ticks；"+metrics.get("reason"));
+    }
     public static boolean authorizes(MotionPlan plan){return job!=null && job.authorized==plan;}
     public static boolean begin(LocalGroundSearch.Goal goal,BooleanSupplier current,Consumer<RuntimeGroundMotion.Outcome> cb){
         MinecraftClient c=MinecraftClient.getInstance();

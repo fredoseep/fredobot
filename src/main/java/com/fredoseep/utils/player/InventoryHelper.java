@@ -546,4 +546,27 @@ public class InventoryHelper {
 
         return bestItem;
     }
+    public static void inventoryManagement(){
+        MinecraftClient minecraftClient = MinecraftClient.getInstance();
+        if(minecraftClient==null){
+            System.out.println("InventoryHelper.inventoryManagement Error: client is null");
+            return;
+        }
+        PlayerEntity player = minecraftClient.player;
+        if(player==null){
+            System.out.println("InventoryHelper.inventoryManagement Error: player is null");
+            return;
+        }
+
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, AxeItem.class, 0);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, PickaxeItem.class, 1);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, ShovelItem.class, 2);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.BUCKET, 3);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.COOKED_SALMON, 4);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, Items.COOKED_COD, 4);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, false), 5);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, false), 6);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, InventoryHelper.getCheapestBlock(player, true), 6);
+        InventoryHelper.moveItemToHotbar(minecraftClient, player, BoatItem.class, 7);
+    }
 }

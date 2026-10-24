@@ -1,7 +1,7 @@
 package com.fredoseep.utils.player;
 
 import com.fredoseep.behave.MiscController;
-import com.fredoseep.algorithm.planning.LayeredSpiralSearch;
+import com.fredoseep.algorithm.planning.StoneColumnSearch;
 import com.fredoseep.algorithm.planning.CollectionPriority;
 import com.fredoseep.algorithm.planning.DryGravelAccess;
 import com.fredoseep.logging.GlobalStateLogger;
@@ -341,9 +341,8 @@ public class MiningHelper {
         var client=MinecraftClient.getInstance();World world=client.world;
         if(world==null)return List.of();
         BlockPos start=client.player==null?origin:client.player.getBlockPos();
-        return LayeredSpiralSearch.findFeetFirst(start,radius,count,p->world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
-                && world.getBlockState(p).getBlock()==Blocks.STONE && eligible.test(p),
-                p->client.player!=null && directlyMineable(client.player,p));
+        return StoneColumnSearch.find(start,count,radius,p->world.getChunkManager().isChunkLoaded(p.getX()>>4,p.getZ()>>4)
+                && world.getBlockState(p).getBlock()==Blocks.STONE && eligible.test(p));
     }
     public static BlockPos findNearbyStone(PlayerEntity player){
         var found=findStoneTargets(player.getBlockPos(),1,5,p->true);
