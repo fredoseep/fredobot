@@ -4,6 +4,7 @@ import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.testing.utils.CommandUtils;
 import com.fredoseep.utils.player.InventoryHelper;
+import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
@@ -18,6 +19,7 @@ public class NetherStateAuto {
         CommandUtils.enableCheats();
         CommandUtils.getItems(itemsToAsk);
         InventoryHelper.inventoryManagement();
+        CommandUtils.command("/setBlock ~ ~ ~ "+ Blocks.NETHER_PORTAL.getName().asString());
         BotEngine.getInstance().getModule(GlobalExecutor.class).isAutoNetherFinished = true;
     }
 

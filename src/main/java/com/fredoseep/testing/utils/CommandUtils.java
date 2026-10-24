@@ -41,11 +41,16 @@ public class CommandUtils {
             enableCheats();
         }
         itemsToAsk.forEach((key,value)->{
-            String command = "/give @s "+key.getName().asString()+" "+value;
-            client.execute(()->{
-                client.player.sendChatMessage(command);
-            });
+            String com = "/give @s "+key.getName().asString()+" "+value;
+            command(com);
         });
 
+    }
+
+    public static void command(String command) {
+        MinecraftClient minecraftClient = MinecraftClient.getInstance();
+        minecraftClient.execute(()->{
+            minecraftClient.player.sendChatMessage(command);
+        });
     }
 }
