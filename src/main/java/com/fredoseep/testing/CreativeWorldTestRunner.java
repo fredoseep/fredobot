@@ -3,6 +3,8 @@ package com.fredoseep.testing;
 import com.fredoseep.Fredobot;
 import com.fredoseep.Test;
 import com.fredoseep.excutor.BotEngine;
+import com.fredoseep.excutor.GlobalExecutor;
+import com.fredoseep.testing.nether.NetherTestScenario;
 import com.google.gson.Gson;
 import me.voidxwalker.autoreset.Atum;
 import net.minecraft.client.MinecraftClient;
@@ -48,7 +50,10 @@ public final class CreativeWorldTestRunner {
     private static final Logger LOGGER = LogManager.getLogger("FredoBotTests");
     private static final Gson JSON = new Gson();
     private static final Map<String, Supplier<CreativeWorldScenario>> SCENARIOS = new LinkedHashMap<>();
-    static { register("treasure", TreasurePredictionScenario::new); }
+    static {
+        register("treasure", TreasurePredictionScenario::new);
+        register("nether", NetherTestScenario::new);
+    }
 
     private enum Phase { PREPARE_WORLD, WAIT_WORLD, RUNNING, ROUND_FINISHED }
     private record SavedRound(String directory, TestBatch.Outcome outcome) {}
@@ -95,10 +100,10 @@ public final class CreativeWorldTestRunner {
             if (args.length == 2 && args[1].equalsIgnoreCase("stop")) INSTANCE.cancel("USER_STOP");
             else if (args.length == 2 && args[1].equalsIgnoreCase("status")) say(client, INSTANCE.status());
             else if (args.length >= 2 && args.length <= 4 && SCENARIOS.containsKey(args[1])) {
-                int rounds = args.length >= 3 ? Integer.parseInt(args[2]) : 10;
+                int rounds = args.length >= 3 ? Integer.parseInt(args[2]) : args[1].equals("nether") ? 1 : 10;
                 Long seed = args.length == 4 ? Long.valueOf(args[3]) : null;
                 INSTANCE.begin(client, args[1], rounds, seed);
-            } else say(client, "用法：/fredotest treasure [轮数1..1000] [第一轮seed] | stop | status");
+            } else say(client, "用法：/fredotest nether [1] [seed] | treasure [轮数1..1000] [seed] | stop | status");
         } catch (IllegalArgumentException exception) { say(client, "参数错误：" + exception.getMessage()); }
         return true;
     }
@@ -108,6 +113,7 @@ public final class CreativeWorldTestRunner {
         if (client.world != null && !client.isInSingleplayer()) { say(client, "测试只支持单人世界或标题界面。"); return; }
         Supplier<CreativeWorldScenario> selected = SCENARIOS.get(name);
         if (selected == null) throw new IllegalArgumentException("unknown test: " + name);
+        if (name.equals("nether") && rounds != 1) throw new IllegalArgumentException("地狱测试交接给 Bot，一次只创建一个世界");
         TestBatch requested = new TestBatch(rounds);
         runId = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + "-" + UUID.randomUUID();
         reportPath = client.runDirectory.toPath().resolve("logs/fredobot-tests/" + runId + ".jsonl");
@@ -187,6 +193,22 @@ public final class CreativeWorldTestRunner {
                 phase = Phase.PREPARE_WORLD;
             }
         });
+    }
+
+    /** Finish only the world-creation harness before enabling the bot's own state machine. */
+    void handoffToNether(CreativeTestContext source) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (!active || phase != Phase.RUNNING || context != source || client.world != expectedWorld) return;
+        event("nether_handoff", Map.of("state", "ANALYZE_THE_BASTION", "worldDirectory", worldName));
+        if (!active) return;
+        source.complete(TestBatch.Outcome.PASS, "TEST_WORLD_READY", Map.of("scope", "world setup only; NetherAuto owns further behavior"));
+        if (!active) return; // A report failure must not start a different task.
+        finishBatch(); // Clears isActive(): BotEngine.start() deliberately rejects an active batch.
+        Fredobot.isTesting = false; // GlobalController must tick during this test.
+        BotEngine engine = BotEngine.getInstance();
+        engine.start();
+        engine.getModule(GlobalExecutor.class).startNetherTest();
+        say(client, "地狱测试已启动：NetherAuto 准备装备并入地狱，随后执行 NetherAnalyzer。");
     }
 
     boolean seedMatchesCreatedWorld(long observedSeed) { return requestedSeed == observedSeed; }

@@ -17,10 +17,10 @@ public abstract class MixinTestTitleScreen extends Screen {
     @Inject(method = "init", at = @At("TAIL"))
     private void fredobot$addWorldTestButton(CallbackInfo callback) {
         ButtonWidget button = new ButtonWidget(8, height - 32, 156, 20,
-                new LiteralText(CreativeWorldTestRunner.isActive() ? "停止自动测试" : "宝藏测试（10轮）"),
+                new LiteralText(CreativeWorldTestRunner.isActive() ? "停止自动测试" : "地狱测试"),
                 pressed -> {
                     if (CreativeWorldTestRunner.isActive()) CreativeWorldTestRunner.command("/fredotest stop");
-                    else CreativeWorldTestRunner.start("treasure", 10, null);
+                    else CreativeWorldTestRunner.start("nether", 1, null);
                 });
         addButton(button);
     }

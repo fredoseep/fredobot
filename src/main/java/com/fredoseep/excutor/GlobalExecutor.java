@@ -5,6 +5,7 @@ import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.preflight.ResetHistory;
 import com.fredoseep.testing.nether.NetherStateAuto;
+import com.fredoseep.testing.nether.NetherTestScenario;
 import com.fredoseep.utils.nether.NetherAnalyzer;
 import com.fredoseep.utils.nether.bastion.BastionAnalyzer;
 import net.minecraft.world.dimension.DimensionType;
@@ -80,6 +81,7 @@ public class GlobalExecutor implements IBotModule {
     private void resetState() {
         currentState = GlobalState.IDLE;
         isAutoNetherFinished = false;
+        NetherStateAuto.reset();
         debugTick = 0;
         globalInitialized = false;
         BtStuff.reset();
@@ -87,6 +89,13 @@ public class GlobalExecutor implements IBotModule {
         MiningHelper.blockToMine.clear();
         MiningHelper.currentTargetBlocks.clear();
         NetherPortalBuilding.resetState();
+        NetherAnalyzer.reset();
+    }
+
+    public void startNetherTest() {
+        isAutoNetherFinished = false;
+        NetherStateAuto.reset();
+        currentState = GlobalState.ANALYZE_THE_BASTION;
     }
 
     @Override
@@ -110,8 +119,9 @@ public class GlobalExecutor implements IBotModule {
 
         if(autoNetherOn){
             if(!isAutoNetherFinished) {
-                NetherStateAuto.autoNether();
                 currentState = GlobalState.ANALYZE_THE_BASTION;
+                NetherStateAuto.autoNether();
+                if (!isAutoNetherFinished) return;
             }
         }
 
@@ -130,7 +140,7 @@ public class GlobalExecutor implements IBotModule {
                 return;
             }
             if(!client.isPaused())client.openPauseMenu(true);
-            NetherAnalyzer.analyze(client,player);
+            NetherAnalyzer.analyzeBastion();
         }
     }
 

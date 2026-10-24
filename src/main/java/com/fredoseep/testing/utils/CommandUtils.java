@@ -2,6 +2,7 @@ package com.fredoseep.testing.utils;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
+import net.minecraft.util.registry.Registry;
 import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 
@@ -41,7 +42,7 @@ public class CommandUtils {
             enableCheats();
         }
         itemsToAsk.forEach((key,value)->{
-            String com = "/give @s "+key.getName().asString()+" "+value;
+            String com = "/give @s "+Registry.ITEM.getId(key).toString()+" "+value;
             command(com);
         });
 

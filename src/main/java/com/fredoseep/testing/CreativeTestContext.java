@@ -38,6 +38,9 @@ public final class CreativeTestContext {
     public long phaseMillis() { return phaseClock.millis(); }
     void setPaused(boolean paused) { phaseClock.setPaused(paused); }
     public boolean done() { return done; }
+    public void handoffToNether() {
+        if (!done && client.world == world) runner.handoffToNether(this);
+    }
     public void event(String type, Map<String, ?> data) { runner.event(type, data); }
 
     public boolean seedMatchesCreatedWorld(long observedSeed) {
