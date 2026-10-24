@@ -50,6 +50,7 @@ public final class BotStatusHud {
             case CRAFTING -> "准备工具和材料";
             case PRE_NETHER -> "准备进入地狱";
             case BUILDING_TWO_BY_ONE_NETHER_PORTAL -> "搭建地狱门";
+            case ANALYZE_THE_BASTION -> "analyzing the bastion";
             case NEXT -> "下一阶段";
         };
     }
