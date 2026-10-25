@@ -1,5 +1,7 @@
 package com.fredoseep.utils.nether.bastion;
 
+import com.fredoseep.excutor.BotEngine;
+import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.utils.render.WorldLoadingState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -25,38 +27,42 @@ public class BastionAnalyzer {
     }
 
     private static void initialize() {
-        System.out.println("we are here -1");
         MinecraftClient client = MinecraftClient.getInstance();
         if (!WorldLoadingState.areAllChunksLoaded()) {
-            System.out.println("Waiting for the chunks loaded...");
             return;
         }
-        System.out.println("we are here 1");
         if (blockEntityChestList == null) {
-            System.out.println("we are here 2");
             blockEntityChestList = client.world.blockEntities.stream().filter(blockEntity -> blockEntity.getType() == BlockEntityType.CHEST
             ).toList();
         }
         else{
-            System.out.println("we are here 3");
             if(bastionChestList==null){
-                System.out.println("we are here 4");
                 bastionChestList = blockEntityChestList.stream().filter(blockEntity -> {
                     World world = client.world;
                     if(blockEntity.getCachedState().get(ChestBlock.CHEST_TYPE)!=ChestType.SINGLE)return true;
                     Direction chestFacingDirection = blockEntity.getCachedState().get(ChestBlock.FACING);
                     Direction secondOffsetDirection = chestFacingDirection.rotateYCounterclockwise();
-                    BlockPos testingPos = blockEntity.getPos().offset(chestFacingDirection,2).offset(secondOffsetDirection,3).down();
-                    return world.getBlockState(testingPos).getBlock() == Blocks.POLISHED_BLACKSTONE_BRICK_STAIRS;
+                    BlockPos testingPos1 = blockEntity.getPos().offset(chestFacingDirection,2).offset(secondOffsetDirection,3).down();
+                    BlockPos testingPos2 = blockEntity.getPos().offset(chestFacingDirection,2).offset(secondOffsetDirection,3);
+                    return world.getBlockState(testingPos1).getBlock() == Blocks.POLISHED_BLACKSTONE_BRICK_STAIRS||world.getBlockState(testingPos2).getBlock()==Blocks.BLACKSTONE_STAIRS;
                 }).toList();
+                final BlockPos[] closetBastionChestPos = new BlockPos[1];
+                final double[] currentMinDis = {Double.MAX_VALUE};
                 bastionChestList.forEach(blockEntity -> {
-                    System.out.println("candidate: "+ blockEntity.getPos());
+                    double candidateDistance =  blockEntity.getPos().getSquaredDistance(client.player.getPos(),true);
+                    if(candidateDistance< currentMinDis[0]){
+                        closetBastionChestPos[0] = blockEntity.getPos();
+                        currentMinDis[0] = candidateDistance;
+                    }
                 });
+                System.out.println("Closest Bastion Chest is "+ closetBastionChestPos[0].toShortString());
+                BotEngine.getInstance().getModule(GlobalExecutor.class).dontBother = true;
             }
         }
     }
 
     public static void reset() {
         blockEntityChestList = null;
+        bastionChestList = null;
     }
 }

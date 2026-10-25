@@ -10,7 +10,6 @@ public class NetherAnalyzer {
 
 
     public static void analyzeBastion() {
-        System.out.println("we are here 0");
         BastionAnalyzer.analyze();
     }
 

@@ -23,5 +23,10 @@ public abstract class MixinTestTitleScreen extends Screen {
                     else CreativeWorldTestRunner.start("nether", 1, null);
                 });
         addButton(button);
+        addButton(new ButtonWidget(8, height - 56, 156, 20,
+                new LiteralText("箭时序校准对照测试"), pressed -> {
+                    if (CreativeWorldTestRunner.isActive()) CreativeWorldTestRunner.command("/fredotest stop");
+                    else CreativeWorldTestRunner.start("projectile_evasion", 1, null);
+                }));
     }
 }

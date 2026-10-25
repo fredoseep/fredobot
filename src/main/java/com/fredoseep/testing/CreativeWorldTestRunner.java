@@ -5,6 +5,12 @@ import com.fredoseep.Test;
 import com.fredoseep.excutor.BotEngine;
 import com.fredoseep.excutor.GlobalExecutor;
 import com.fredoseep.testing.nether.NetherTestScenario;
+import com.fredoseep.testing.combat.PacketCombatScenario;
+import com.fredoseep.testing.combat.PursuitCombatScenario;
+import com.fredoseep.testing.combat.ThreatDefenseScenario;
+import com.fredoseep.testing.combat.CriticalCombatScenario;
+import com.fredoseep.testing.combat.WeaponYawScenario;
+import com.fredoseep.testing.combat.TacticalKnockbackScenario;
 import com.google.gson.Gson;
 import me.voidxwalker.autoreset.Atum;
 import net.minecraft.client.MinecraftClient;
@@ -38,6 +44,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
@@ -53,12 +60,37 @@ public final class CreativeWorldTestRunner {
     static {
         register("treasure", TreasurePredictionScenario::new);
         register("nether", NetherTestScenario::new);
+        register("combat", PacketCombatScenario::new);
+        register("knockback", PacketCombatScenario::knockback);
+        register("pursuit", PursuitCombatScenario::new);
+        register("defense", PursuitCombatScenario::continuousDefense);
+        register("defense_ready", PursuitCombatScenario::cooldownDefense);
+        register("threat_defense", ThreatDefenseScenario::new);
+        register("predictive_defense", ThreatDefenseScenario::predictiveComparison);
+        register("sidestep_defense", ThreatDefenseScenario::sidestepComparison);
+        register("terrain_defense", ThreatDefenseScenario::terrainComparison);
+        register("escape_defense", ThreatDefenseScenario::escapeComparison);
+        register("critical", CriticalCombatScenario::new);
+        register("critical_pursuit", ThreatDefenseScenario::criticalComparison);
+        register("moving_critical", ThreatDefenseScenario::movingCriticalComparison);
+        register("continuation_defense", ThreatDefenseScenario::continuationComparison);
+        register("validated_defense", ThreatDefenseScenario::validatedContinuationComparison);
+        register("weapon_yaw", WeaponYawScenario::new);
+        register("tactical_knockback", TacticalKnockbackScenario::new);
+        register("ranged_pursuit", TacticalKnockbackScenario::rangedPursuit);
+        register("ranged_contact", TacticalKnockbackScenario::rangedContact);
+        register("projectile_evasion", TacticalKnockbackScenario::projectileEvasion);
+        register("contact_jump", TacticalKnockbackScenario::contactJump);
+        register("contact_robustness", TacticalKnockbackScenario::contactRobustness);
+        register("contact_impulse", TacticalKnockbackScenario::contactImpulse);
+        register("contact_tracking", TacticalKnockbackScenario::contactTracking);
     }
 
     private enum Phase { PREPARE_WORLD, WAIT_WORLD, RUNNING, ROUND_FINISHED }
     private record SavedRound(String directory, TestBatch.Outcome outcome) {}
     private final List<SavedRound> ownedWorlds = new ArrayList<>();
     private boolean active, creating, previousTesting;
+    private boolean flatCombatWorld;
     private Phase phase;
     private TestBatch batch;
     private Supplier<CreativeWorldScenario> factory;
@@ -100,10 +132,10 @@ public final class CreativeWorldTestRunner {
             if (args.length == 2 && args[1].equalsIgnoreCase("stop")) INSTANCE.cancel("USER_STOP");
             else if (args.length == 2 && args[1].equalsIgnoreCase("status")) say(client, INSTANCE.status());
             else if (args.length >= 2 && args.length <= 4 && SCENARIOS.containsKey(args[1])) {
-                int rounds = args.length >= 3 ? Integer.parseInt(args[2]) : args[1].equals("nether") ? 1 : 10;
+                int rounds = args.length >= 3 ? Integer.parseInt(args[2]) : (args[1].equals("nether") || args[1].equals("combat") || args[1].equals("knockback") || args[1].equals("pursuit") || args[1].equals("defense") || args[1].equals("defense_ready") || args[1].equals("threat_defense") || args[1].equals("predictive_defense") || args[1].equals("sidestep_defense") || args[1].equals("terrain_defense") || args[1].equals("escape_defense") || args[1].equals("projectile_evasion") || args[1].equals("contact_jump") || args[1].equals("contact_robustness") || args[1].equals("contact_impulse") || args[1].equals("contact_tracking") || args[1].equals("ranged_contact") || args[1].equals("ranged_pursuit") || args[1].equals("tactical_knockback") || args[1].equals("weapon_yaw") || args[1].equals("validated_defense") || args[1].equals("continuation_defense") || args[1].equals("moving_critical") || args[1].equals("critical_pursuit") || args[1].equals("critical")) ? 1 : 10;
                 Long seed = args.length == 4 ? Long.valueOf(args[3]) : null;
                 INSTANCE.begin(client, args[1], rounds, seed);
-            } else say(client, "用法：/fredotest nether [1] [seed] | treasure [轮数1..1000] [seed] | stop | status");
+            } else say(client, "用法：/fredotest projectile_evasion [1] [seed] | contact_jump [1] [seed] | contact_robustness [1] [seed] | contact_impulse [1] [seed] | contact_tracking [1] [seed] | ranged_contact [1] [seed] | ranged_pursuit [1] [seed] | tactical_knockback [1] [seed] | weapon_yaw [1] [seed] | validated_defense [1] [seed] | continuation_defense [1] [seed] | moving_critical [1] [seed] | critical_pursuit [1] [seed] | critical [1] [seed] | escape_defense [1] [seed] | terrain_defense [1] [seed] | sidestep_defense [1] [seed] | predictive_defense [1] [seed] | threat_defense [1] [seed] | defense_ready [1] [seed] | defense [1] [seed] | pursuit [1] [seed] | knockback [1] [seed] | combat [1] [seed] | nether [1] [seed] | treasure [轮数1..1000] [seed] | stop | status");
         } catch (IllegalArgumentException exception) { say(client, "参数错误：" + exception.getMessage()); }
         return true;
     }
@@ -113,6 +145,7 @@ public final class CreativeWorldTestRunner {
         if (client.world != null && !client.isInSingleplayer()) { say(client, "测试只支持单人世界或标题界面。"); return; }
         Supplier<CreativeWorldScenario> selected = SCENARIOS.get(name);
         if (selected == null) throw new IllegalArgumentException("unknown test: " + name);
+        if ((name.equals("combat") || name.equals("knockback") || name.equals("pursuit") || name.equals("defense") || name.equals("defense_ready") || name.equals("threat_defense") || name.equals("predictive_defense") || name.equals("sidestep_defense") || name.equals("terrain_defense") || name.equals("escape_defense") || name.equals("projectile_evasion") || name.equals("contact_jump") || name.equals("contact_robustness") || name.equals("contact_impulse") || name.equals("contact_tracking") || name.equals("ranged_contact") || name.equals("ranged_pursuit") || name.equals("tactical_knockback") || name.equals("weapon_yaw") || name.equals("validated_defense") || name.equals("continuation_defense") || name.equals("moving_critical") || name.equals("critical_pursuit") || name.equals("critical")) && rounds != 1) throw new IllegalArgumentException("攻击测试一次运行一个世界，内部自动遍历所有项目");
         if (name.equals("nether") && rounds != 1) throw new IllegalArgumentException("地狱测试交接给 Bot，一次只创建一个世界");
         TestBatch requested = new TestBatch(rounds);
         runId = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + "-" + UUID.randomUUID();
@@ -132,13 +165,30 @@ public final class CreativeWorldTestRunner {
         Atum.stopRunning(); // clears pending reset and seed futures; config is not changed/saved
         Fredobot.isTesting = true;
         batch = requested; factory = selected; this.firstSeed = firstSeed;
+        flatCombatWorld = name.equals("combat") || name.equals("knockback") || name.equals("pursuit") || name.equals("defense") || name.equals("defense_ready") || name.equals("threat_defense") || name.equals("predictive_defense") || name.equals("sidestep_defense") || name.equals("terrain_defense") || name.equals("escape_defense") || name.equals("projectile_evasion") || name.equals("contact_jump") || name.equals("contact_robustness") || name.equals("contact_impulse") || name.equals("contact_tracking") || name.equals("ranged_contact") || name.equals("ranged_pursuit") || name.equals("tactical_knockback") || name.equals("weapon_yaw") || name.equals("validated_defense") || name.equals("continuation_defense") || name.equals("moving_critical") || name.equals("critical_pursuit") || name.equals("critical");
         seeds = firstSeed == null ? new Random() : new Random(firstSeed);
         ownedWorlds.clear(); context = null; expectedWorld = null; scenario = null;
         consecutiveErrors = 0;
         active = true; phase = Phase.PREPARE_WORLD;
         event("batch_start", Map.of("test", name, "rounds", rounds, "firstSeed", firstSeed == null ? "random" : firstSeed.toString(),
-                "worldMode", "normal creative; structures enabled; cheats enabled; vanilla datapacks"));
+                "worldMode", flatCombatWorld ? "superflat creative setup; survival combat; structures disabled; cheats enabled"
+                        : "normal creative; structures enabled; cheats enabled; vanilla datapacks"));
         say(client, "开始 " + name + " 自动测试，共 " + rounds + " 轮；当前世界会保存并退出。");
+    }
+
+    /** 1.16.1's vanilla dedicated-world property parser also provides the flat generator. */
+    private static GeneratorOptions createTestOptions(long seed, boolean flatCombat) {
+        if (!flatCombat) return new GeneratorOptions(seed, true, false, DimensionType.method_28517(seed));
+        Properties properties = new Properties();
+        properties.setProperty("level-seed", Long.toString(seed));
+        properties.setProperty("level-type", "flat");
+        properties.setProperty("generate-structures", "false");
+        properties.setProperty("generator-settings", "{\"layers\":[{\"height\":1,\"block\":\"minecraft:bedrock\"},"
+                + "{\"height\":2,\"block\":\"minecraft:dirt\"},{\"height\":1,\"block\":\"minecraft:grass_block\"}],"
+                + "\"biome\":\"minecraft:plains\",\"structures\":{\"structures\":{}}}");
+        GeneratorOptions options = GeneratorOptions.fromProperties(properties);
+        if (!options.isFlatWorld()) throw new IllegalStateException("Combat test requires a flat generator");
+        return options;
     }
 
     private void pump(MinecraftClient client) {
@@ -155,8 +205,7 @@ public final class CreativeWorldTestRunner {
                 worldName = "FredoTest-" + runId + "-r" + batch.round();
                 LevelInfo info = new LevelInfo(worldName, GameMode.CREATIVE, false, Difficulty.NORMAL,
                         true, new GameRules(), DataPackSettings.SAFE_MODE);
-                GeneratorOptions options = new GeneratorOptions(requestedSeed, true, false,
-                        DimensionType.method_28517(requestedSeed));
+                GeneratorOptions options = createTestOptions(requestedSeed, flatCombatWorld);
                 phase = Phase.WAIT_WORLD;
                 deadline = System.nanoTime() + 180_000_000_000L;
                 event("create_world", Map.of("directory", worldName, "requestedSeed", requestedSeed));
@@ -251,6 +300,7 @@ public final class CreativeWorldTestRunner {
 
     private void finishBatch() {
         if (!active) return;
+        if (scenario != null && context != null) scenario.close(context);
         active = false;
         Fredobot.isTesting = previousTesting;
         Atum.stopRunning();

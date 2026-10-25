@@ -1,6 +1,7 @@
 package com.fredoseep.excutor;
 
 import com.fredoseep.Test;
+import com.fredoseep.Fredobot;
 import com.fredoseep.logging.GlobalStateLogger;
 import com.fredoseep.preflight.EarlyResetPreflight;
 import com.fredoseep.preflight.ResetHistory;
@@ -25,6 +26,7 @@ import net.minecraft.entity.player.PlayerEntity;
 public class GlobalExecutor implements IBotModule {
 
     private final MinecraftClient minecraftClient = MinecraftClient.getInstance();
+    public boolean dontBother = false;
     private boolean globalInitialized = false;
     private static final boolean autoNetherOn = true;
     public  boolean isAutoNetherFinished = false;
@@ -81,6 +83,7 @@ public class GlobalExecutor implements IBotModule {
     private void resetState() {
         currentState = GlobalState.IDLE;
         isAutoNetherFinished = false;
+        dontBother = false;
         NetherStateAuto.reset();
         debugTick = 0;
         globalInitialized = false;
@@ -110,6 +113,7 @@ public class GlobalExecutor implements IBotModule {
 
     @Override
     public void onTick(MinecraftClient client, PlayerEntity player) {
+        if(dontBother)return;
         if(Test.currentMission!= Test.CurrentTestingMission.IDLE)return;
         if (minecraftClient.world == null || minecraftClient.player == null) {
             BtStuff.waitTicks = 0;
@@ -134,14 +138,17 @@ public class GlobalExecutor implements IBotModule {
         if(currentState.getMissionOrder()==8){
             NetherPortalBuilding.twoByOneBuild();
         }
-        if(currentState.getMissionOrder()==9){
-            if(!client.world.getDimension().hasCeiling()){
-                System.out.println("Fredobot: waiting for player to get into the nether");
-                return;
-            }
-            if(!client.isPaused())client.openPauseMenu(true);
-            NetherAnalyzer.analyzeBastion();
-        }
+        if(currentState.getMissionOrder()==9) pumpNetherAnalysis(client);
+    }
+
+    /** Only the analysis stage may run while vanilla is paused; no movement or mining here. */
+    public void pumpNetherAnalysis(MinecraftClient client) {
+        if (currentState != GlobalState.ANALYZE_THE_BASTION || !isAutoNetherFinished
+                || Fredobot.isTesting || Test.currentMission != Test.CurrentTestingMission.IDLE
+                || client.world == null || client.player == null
+                || !client.world.getDimension().hasCeiling()) return;
+        if (!client.isPaused()) client.openPauseMenu(true);
+        NetherAnalyzer.analyzeBastion();
     }
 
     private void initializeSettings() {

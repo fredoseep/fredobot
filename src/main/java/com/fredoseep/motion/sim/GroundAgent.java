@@ -26,8 +26,12 @@ public final class GroundAgent extends ClientPlayerEntity implements GroundRoute
     private final ClientPlayerEntity source;
     private final MinecraftClient client;
     private final GroundFallGuard fallGuard;
-    public GroundAgent(MinecraftClient client,ClientPlayerEntity source) {
+    private final boolean combatPrediction;
+    public static GroundAgent forCombatPrediction(MinecraftClient c,ClientPlayerEntity p){return new GroundAgent(c,p,true);}
+    public GroundAgent(MinecraftClient client,ClientPlayerEntity source) {this(client,source,source instanceof GroundAgent ghost && ghost.combatPrediction);}
+    private GroundAgent(MinecraftClient client,ClientPlayerEntity source,boolean combatPrediction) {
         super(client,client.world,source.networkHandler,source.getStatHandler(),source.getRecipeBook(),false,false);
+        this.combatPrediction=combatPrediction;
         this.source=source instanceof GroundAgent ghost?ghost.source:source;
         this.client=client;fallGuard=source instanceof GroundAgent ghost?ghost.fallGuard.copy():new GroundFallGuard(source.getY());age=source.age;
         copyPositionAndRotation(source);setVelocity(source.getVelocity());setOnGround(source.isOnGround());
@@ -64,7 +68,8 @@ public final class GroundAgent extends ClientPlayerEntity implements GroundRoute
     @Override public boolean horizontalCollision(){return horizontalCollision;}
     @Override public MotionState step(MotionInput frame) {
         boolean fusion=FusionWorld.active();
-        if(fusion)FusionSafety.area(world,source,getBoundingBox().stretch(getVelocity()));
+        if(combatPrediction)FusionSafety.staticArea(world,source,getBoundingBox().stretch(getVelocity()));
+        else if(fusion)FusionSafety.area(world,source,getBoundingBox().stretch(getVelocity()));
         else GroundSafety.requireArea(world,source,getBoundingBox().stretch(getVelocity()));
         fallGuard.beforeTick(getY(),isOnGround());
         MinecraftClient client=MinecraftClient.getInstance();
@@ -80,7 +85,8 @@ public final class GroundAgent extends ClientPlayerEntity implements GroundRoute
             super.tickMovement();updateSize();age++;
             if(fusion)setAir(isSubmergedIn(FluidTags.WATER)?getAir()-1:Math.min(getMaxAir(),getAir()+4));
         } finally {client.options.keySprint.setPressed(sprint);}
-        if(fusion)FusionSafety.area(world,source,getBoundingBox());
+        if(combatPrediction)FusionSafety.staticArea(world,source,getBoundingBox());
+        else if(fusion)FusionSafety.area(world,source,getBoundingBox());
         else GroundSafety.requireArea(world,source,getBoundingBox());
         if(abilities.flying || (!fusion && (getPose()!=EntityPose.STANDING || isTouchingWater())) || isInLava())
             throw new IllegalArgumentException("候选动作离开干燥站立姿态：pose="+getPose()+" flying="+abilities.flying);

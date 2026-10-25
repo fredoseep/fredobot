@@ -96,7 +96,11 @@ public class BotEngine {
         }
         if (MotionCoordinator.blocksBot()) return;
         Test.tick();
-        if (!isRunning || client.player == null || client.world == null || client.isPaused()) return;
+        if (!isRunning || client.player == null || client.world == null) return;
+        if (client.isPaused()) {
+            getModule(GlobalExecutor.class).pumpNetherAnalysis(client);
+            return;
+        }
 
         // 严格按照优先级，让每个模块执行自己的逻辑
         for (IBotModule module : modules) {

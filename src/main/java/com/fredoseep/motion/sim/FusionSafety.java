@@ -9,6 +9,7 @@ import net.minecraft.block.FallingBlock;
 import net.minecraft.block.IceBlock;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.ExperienceOrbEntity;
 import net.minecraft.entity.FallingBlockEntity;
 import net.minecraft.tag.FluidTags;
 import net.minecraft.util.math.BlockPos;
@@ -111,13 +112,17 @@ public final class FusionSafety {
         try{area(w,player,new Box(pos));return null;}catch(IllegalArgumentException unsupported){return "UNMODELLED_ENVIRONMENT";}
     }
     public static void area(World w,ClientPlayerEntity p,Box box){
-        var entities=w.getEntities(p,box.expand(.2),e->e.isAlive() && !(e instanceof ItemEntity));
+        var entities=w.getEntities(p,box.expand(.2),e->e.isAlive() && !(e instanceof ItemEntity) && !(e instanceof ExperienceOrbEntity));
         if(!entities.isEmpty()){
             String detail="融合轨迹有实体碰撞："+entities.stream().limit(3)
                     .map(e->Registry.ENTITY_TYPE.getId(e.getType())+" @ "+e.getBlockPos().toShortString()).toList();
             if(entities.stream().allMatch(e->e instanceof FallingBlockEntity))throw new TransientCollision(detail);
             throw new IllegalArgumentException(detail);
         }
+        staticArea(w,p,box);
+    }
+    /** Static terrain checks only, for detached combat prediction with separately modelled entities. */
+    public static void staticArea(World w,ClientPlayerEntity p,Box box){
         for(int x=(int)Math.floor(box.minX-.01);x<=(int)Math.floor(box.maxX+.01);x++)
             for(int z=(int)Math.floor(box.minZ-.01);z<=(int)Math.floor(box.maxZ+.01);z++)
                 for(int y=(int)Math.floor(box.minY-.08);y<=(int)Math.floor(box.maxY+.01);y++){

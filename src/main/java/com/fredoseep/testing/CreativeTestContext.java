@@ -24,6 +24,10 @@ public final class CreativeTestContext {
 
     public void command(String command) {
         if (done || client.world != world || client.player == null) return;
+        if (command.length() > 256) {
+            throw new IllegalArgumentException("Test command exceeds the 1.16.1 chat limit: " + command.length()
+                    + " characters; split setup commands before sending");
+        }
         runner.event("command", Map.of("command", command));
         client.player.sendChatMessage(command);
     }

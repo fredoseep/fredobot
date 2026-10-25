@@ -7,6 +7,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.ExperienceOrbEntity;
 import net.minecraft.entity.EntityPose;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -41,7 +42,7 @@ public final class GroundSafety {
         requireArea(world,realPlayer,box,false);
     }
     public static void requireArea(World world,ClientPlayerEntity realPlayer,Box box,boolean allowVines) {
-        if(!world.getEntities(realPlayer,box.expand(.2),e -> e.isAlive() && !(e instanceof ItemEntity)).isEmpty())
+        if(!world.getEntities(realPlayer,box.expand(.2),e -> e.isAlive() && !(e instanceof ItemEntity) && !(e instanceof ExperienceOrbEntity)).isEmpty())
             throw new IllegalArgumentException("轨迹附近有实体，第一批地面模拟暂不处理实体碰撞");
         for(int x=(int)Math.floor(box.minX-.01);x<=(int)Math.floor(box.maxX+.01);x++)
             for(int z=(int)Math.floor(box.minZ-.01);z<=(int)Math.floor(box.maxZ+.01);z++)

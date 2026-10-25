@@ -30,6 +30,10 @@
     "MixinPreflightWorldCreation",
     "MixinPreflightPauseState",
     "MixinFusionWorld",
-    "MixinFusionChunk"
+    "MixinFusionChunk",
+    "MixinCombatCritProbe",
+    "MixinTacticalArrowProbe",
+    "MotionProjectileAccess",
+    "MixinClientArrowTiming"
   ]
 }

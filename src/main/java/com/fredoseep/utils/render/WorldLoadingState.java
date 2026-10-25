@@ -4,6 +4,8 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.server.integrated.IntegratedServer;
 import net.minecraft.world.chunk.ChunkStatus;
+import java.util.ArrayList;
+import java.util.List;
 
 public class WorldLoadingState {
 
@@ -17,15 +19,18 @@ public class WorldLoadingState {
             return false;
         }
 
-        int radius = client.options.viewDistance;
+        int requestedRadius = client.options.viewDistance;
+        IntegratedServer server = client.getServer();
+        int serverDistance = server == null ? -1 : server.getPlayerManager().getViewDistance();
+        // Singleplayer's actual sending distance can be smaller than the UI setting.
+        int radius = serverDistance >= 0 ? Math.min(requestedRadius, serverDistance) : requestedRadius;
         int centerX = client.player.getBlockPos().getX() >> 4;
         int centerZ = client.player.getBlockPos().getZ() >> 4;
 
         int missing = 0;
         int missingInner = 0;
         int missingEdge = 0;
-        int firstMissingX = 0;
-        int firstMissingZ = 0;
+        List<String> missingPositions = new ArrayList<>();
 
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
@@ -37,9 +42,8 @@ public class WorldLoadingState {
                     continue;
                 }
 
-                if (missing == 0) {
-                    firstMissingX = chunkX;
-                    firstMissingZ = chunkZ;
+                if (missingPositions.size() < 16) {
+                    missingPositions.add(chunkX + "," + chunkZ + " (offset=" + dx + "," + dz + ")");
                 }
 
                 missing++;
@@ -57,27 +61,21 @@ public class WorldLoadingState {
         if (now - lastLogNanos >= 2_000_000_000L) {
             lastLogNanos = now;
 
-            IntegratedServer server = client.getServer();
-            int serverDistance = server == null
-                    ? -1
-                    : server.getPlayerManager().getViewDistance();
-
             int width = radius * 2 + 1;
             int required = width * width;
 
             System.out.println(
                     "[ChunkLoad] dimension=" + world.getRegistryKey().getValue()
                             + " paused=" + client.isPaused()
-                            + " clientDistance=" + radius
+                            + " clientDistance=" + requestedRadius
+                            + " checkedRadius=" + radius
                             + " serverDistance=" + serverDistance
                             + " center=" + centerX + "," + centerZ
                             + " ready=" + (required - missing) + "/" + required
                             + " missingInner=" + missingInner
                             + " missingEdge=" + missingEdge
-                            + " firstMissing="
-                            + (missing == 0
-                            ? "none"
-                            : firstMissingX + "," + firstMissingZ)
+                            + " missingPositions=" + missingPositions
+                            + " omitted=" + Math.max(0, missing - missingPositions.size())
             );
         }
 
